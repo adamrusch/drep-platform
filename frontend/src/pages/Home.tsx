@@ -1,11 +1,12 @@
 import React from 'react';
-import { useAuthStore } from '@/stores/authStore';
+import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
 import { GuestLanding } from './GuestLanding';
 import { DRepDashboard } from './DRepDashboard';
 import { DelegatorDashboard } from './DelegatorDashboard';
 
 export function Home(): React.ReactElement {
-  const { isAuthenticated, roles } = useAuthStore();
+  const isAuthenticated = useIsAuthenticated();
+  const roles = useAuthStore((s) => s.roles);
 
   if (!isAuthenticated) {
     return <GuestLanding />;

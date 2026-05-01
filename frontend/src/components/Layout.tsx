@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { useAuthStore } from '@/stores/authStore';
+import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
 import { useUiStore } from '@/stores/uiStore';
 import { WalletButton } from './WalletButton';
 import { cn, formatWalletAddress } from '@/lib/utils';
@@ -55,7 +55,10 @@ const NAV_ITEMS: NavItem[] = [
 ];
 
 export function Layout({ children }: LayoutProps): React.ReactElement {
-  const { roles, walletAddress, isAuthenticated, profile } = useAuthStore();
+  const roles = useAuthStore((s) => s.roles);
+  const walletAddress = useAuthStore((s) => s.walletAddress);
+  const profile = useAuthStore((s) => s.profile);
+  const isAuthenticated = useIsAuthenticated();
   useUiStore();
   const location = useLocation();
   const navigate = useNavigate();

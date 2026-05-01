@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useWallet, useWalletList } from '@meshsdk/react';
-import { useAuthStore } from '@/stores/authStore';
+import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
 import { useWalletAuth } from '@/auth/useWalletAuth';
 import { useUiStore } from '@/stores/uiStore';
 import { cn } from '@/lib/utils';
@@ -12,7 +12,8 @@ interface WalletButtonProps {
 export function WalletButton({ className }: WalletButtonProps): React.ReactElement {
   const { wallet, connected } = useWallet();
   const walletList = useWalletList();
-  const { isAuthenticated, walletAddress } = useAuthStore();
+  const isAuthenticated = useIsAuthenticated();
+  const walletAddress = useAuthStore((s) => s.walletAddress);
   const { authenticate, logout, isLoading, error } = useWalletAuth();
   const { addToast } = useUiStore();
   const [showWalletList, setShowWalletList] = useState(false);

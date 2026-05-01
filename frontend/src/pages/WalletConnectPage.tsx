@@ -1,10 +1,10 @@
 import React from 'react';
 import { Navigate } from 'react-router-dom';
-import { useAuthStore } from '@/stores/authStore';
+import { useIsAuthenticated } from '@/stores/authStore';
 import { WalletButton } from '@/components/WalletButton';
 
 export function WalletConnectPage(): React.ReactElement {
-  const { isAuthenticated } = useAuthStore();
+  const isAuthenticated = useIsAuthenticated();
 
   if (isAuthenticated) {
     return <Navigate to="/" replace />;
