@@ -5,33 +5,41 @@
 - AWS CDK stacks: DatabaseStack, ApiStack, FrontendStack, SchedulerStack
 - All Phase 1 DynamoDB tables defined
 - All Phase 1 Lambda handlers scaffolded (auth, governance, comments, clubhouse, drep, profile)
-- Backend lib: dynamodb client, blockfrost wrapper, JWT auth, shared types
+- Backend lib: dynamodb client, blockfrost wrapper, JWT auth (runtime Secrets Manager fetch), shared types
 - JWT authorizer Lambda + role-guard middleware
-- Blockfrost governance-intake sync (EventBridge-triggered)
+- Blockfrost governance-intake sync (EventBridge every 2 minutes)
 - React frontend: all pages, components, hooks, stores, auth
 - Design system integrated (custom CSS + Cardano brand tokens)
 - App shell: topbar, sidebar, routing
 - TypeScript compiles clean in all workspaces
-- npm deps installed in all workspaces
+- npm deps installed in all workspaces (including vite-plugin-wasm, vite-plugin-top-level-await)
+- **CDK deployed to AWS** — dev stack live
+  - API Gateway: https://i9la4x29c6.execute-api.us-east-1.amazonaws.com/dev
+  - CloudFront: https://d31k3mmkrkmdvl.cloudfront.net
+  - S3 bucket: drep-platform-dev-frontend-409410541898
+  - CloudFront distribution: E2DICV1F3XXMNR
+- **Frontend built and deployed** to S3 + CloudFront (vite build ✅)
+  - Fixed: libsodium-sumo.mjs resolution via custom Rollup plugin in vite.config.ts
+  - Fixed: import order (design-system.css before Tailwind)
+- **CIP-30 Ed25519 signature verification** implemented in backend/src/lib/auth.ts
+  - CBOR decodes COSE_Sign1 structure (cbor-x)
+  - Reconstructs Sig_Structure and verifies with Node.js crypto (Ed25519)
+  - Extracts public key from COSE_Key (-2 field)
+- **GitHub repo created**: https://github.com/adamrusch/drep-platform (private)
+- Cardano network: **Mainnet** for all environments
 
-## In Progress / Next Steps
-- [ ] Initialize GitHub repo and push (user needs to confirm repo name)
-- [ ] Set Blockfrost API key in AWS Secrets Manager
-- [ ] `cdk deploy --profile drep-platform` for dev environment
-- [ ] SES email identity verification in AWS console
-- [ ] Phase 1-B: Implement real CIP-30 signature verification in auth/verify.ts (currently stubbed with TODO)
-- [ ] Phase 1-C: Connect frontend to deployed API (update VITE_API_BASE_URL)
-- [ ] Phase 1-D: Write tests
-
-## Key Decisions Made
-- Design system uses custom CSS classes (not Tailwind utilities) for components, matching the design handoff exactly
-- Tailwind used for layout utilities and extends brand colors from design tokens
-- Wallet signature verification stubbed pending CSL/cardano-crypto library decision
-- CDK targets: account 409410541898, region us-east-1, stage dev, Cardano network: preview
-- All AWS operations use `--profile drep-platform`
-
-## AWS Account
+## Key AWS Resources
 - Account: 409410541898
 - Region: us-east-1
 - CDK bootstrapped: ✅
 - Profile: drep-platform
+- Blockfrost key: stored in Secrets Manager at `drep-platform/dev/blockfrost-api-key`
+- JWT secret: stored in Secrets Manager at `drep-platform/dev/jwt-secret`
+- EventBridge sync: every 2 minutes
+
+## Remaining / Phase 1-D+
+- [ ] Phase 1-D: Write tests (unit tests for auth.ts, integration tests for key flows)
+- [ ] SES email identity verification (if email features needed)
+- [ ] Phase 2: Committee voting, sentiment tracking, rationale documents, on-chain submission
+- [ ] Phase 2: DRep registration on-chain via wallet signing
+- [ ] Performance: chunking optimization for mesh-sdk (~6.8MB bundle — consider dynamic import)
