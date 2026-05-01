@@ -1,0 +1,38 @@
+import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
+import { getItem, tableNames } from '../../lib/dynamodb';
+import type { UserItem } from '../../lib/types';
+import { extractAuthContext } from '../../middleware/role-guard';
+import { ok, unauthorized, notFound, internalError } from '../_response';
+
+export const handler = async (
+  event: APIGatewayProxyEventV2WithJWTAuthorizer,
+): Promise<APIGatewayProxyResultV2> => {
+  try {
+    const authCtx = extractAuthContext(event);
+
+    const user = await getItem<UserItem>(tableNames.users, {
+      walletAddress: authCtx.walletAddress,
+      SK: 'PROFILE',
+    });
+
+    if (!user) {
+      return notFound('User');
+    }
+
+    // Strip sensitive fields before returning
+    const { sessionTokenHash: _sessionTokenHash, sessionExpiry: _sessionExpiry, ...safeUser } = user;
+
+    return ok({
+      ...safeUser,
+      walletAddress: authCtx.walletAddress,
+      roles: authCtx.roles,
+      drepId: authCtx.drepId,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AuthorizationError') {
+      return unauthorized(err.message);
+    }
+    console.error('me handler error:', err);
+    return internalError('Failed to fetch user');
+  }
+};
