@@ -7,11 +7,16 @@ import path from 'path';
 
 const fixLibsodium = {
   name: 'fix-libsodium-sumo',
+  // libsodium-wrappers-sumo's ESM build imports `./libsodium-sumo.mjs` via a
+  // relative path, but the file actually lives in a SEPARATE package
+  // (libsodium-sumo). Without this resolver, Vite either fails to bundle or
+  // ships a broken module that throws `_sodium_init is not a function` at
+  // runtime, which breaks wallet signing.
   resolveId(id: string, importer: string | undefined) {
     if (id === './libsodium-sumo.mjs' && importer?.includes('libsodium-wrappers-sumo')) {
       return path.resolve(
         __dirname,
-        'node_modules/libsodium-wrappers-sumo/dist/modules-sumo/libsodium-wrappers.js',
+        'node_modules/libsodium-sumo/dist/modules-sumo-esm/libsodium-sumo.mjs',
       );
     }
   },
