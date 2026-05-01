@@ -20,17 +20,39 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
       return badRequest('limit must be a positive integer');
     }
 
-    const result = await queryItems<GovernanceActionItem>(tableNames.governanceActions, {
-      indexName: 'status-submittedAt-index',
-      keyConditionExpression: '#status = :status',
-      expressionAttributeNames: { '#status': 'status' },
-      expressionAttributeValues: { ':status': status },
-      limit,
-      scanIndexForward: false,
-      ...(lastKey
-        ? { exclusiveStartKey: JSON.parse(Buffer.from(lastKey, 'base64').toString('utf-8')) as Record<string, unknown> }
-        : {}),
-    });
+    let exclusiveStartKey: Record<string, unknown> | undefined;
+    if (lastKey) {
+      try {
+        const decoded = Buffer.from(lastKey, 'base64').toString('utf-8');
+        const parsed = JSON.parse(decoded);
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+          throw new Error('lastKey must decode to a JSON object');
+        }
+        exclusiveStartKey = parsed as Record<string, unknown>;
+      } catch {
+        return badRequest('lastKey is malformed (must be base64-encoded JSON object)');
+      }
+    }
+
+    let result;
+    try {
+      result = await queryItems<GovernanceActionItem>(tableNames.governanceActions, {
+        indexName: 'status-submittedAt-index',
+        keyConditionExpression: '#status = :status',
+        expressionAttributeNames: { '#status': 'status' },
+        expressionAttributeValues: { ':status': status },
+        limit,
+        scanIndexForward: false,
+        ...(exclusiveStartKey ? { exclusiveStartKey } : {}),
+      });
+    } catch (err) {
+      // DynamoDB ValidationException for a malformed exclusiveStartKey
+      // (wrong shape, missing GSI keys, etc.) → return 400, not 500.
+      if (err instanceof Error && err.name === 'ValidationException') {
+        return badRequest('lastKey is invalid for this query');
+      }
+      throw err;
+    }
 
     return ok({
       items: result.items,

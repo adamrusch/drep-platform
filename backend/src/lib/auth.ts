@@ -89,7 +89,16 @@ export function buildSignMessage(nonce: string, walletAddress: string): string {
   return `drep-platform wants you to sign in:\n\nWallet: ${walletAddress}\nNonce: ${nonce}\n\nThis request will not trigger a blockchain transaction or cost any gas fees.`;
 }
 
-export async function validateChallenge(
+/**
+ * Check whether a challenge nonce exists, is unexpired, and matches the
+ * supplied wallet address. Does NOT delete the nonce — call `consumeChallenge`
+ * after signature verification has succeeded.
+ *
+ * Splitting peek and consume prevents a DoS vector where an attacker who
+ * knows a victim's freshly-issued nonce + walletAddress could burn it by
+ * submitting a bogus signature.
+ */
+export async function peekChallenge(
   nonce: string,
   walletAddress: string,
 ): Promise<{ valid: boolean; reason?: string }> {
@@ -112,8 +121,17 @@ export async function validateChallenge(
     return { valid: false, reason: 'Challenge nonce does not match wallet address' };
   }
 
-  // Consume the nonce atomically — single use. The conditional delete ensures
-  // that two concurrent verify calls cannot both succeed against the same nonce.
+  return { valid: true };
+}
+
+/**
+ * Atomically consume (delete) a challenge nonce. Use only after the signature
+ * has been verified. The conditional delete ensures two concurrent verify
+ * calls cannot both succeed against the same nonce.
+ */
+export async function consumeChallenge(
+  nonce: string,
+): Promise<{ valid: boolean; reason?: string }> {
   try {
     await deleteItem(
       tableNames.authNonces,
@@ -128,6 +146,20 @@ export async function validateChallenge(
     throw err;
   }
   return { valid: true };
+}
+
+/**
+ * @deprecated Use peekChallenge + consumeChallenge with signature verification
+ * between them. Kept for backward compatibility with any caller that does not
+ * verify signatures (none exist in this codebase as of writing).
+ */
+export async function validateChallenge(
+  nonce: string,
+  walletAddress: string,
+): Promise<{ valid: boolean; reason?: string }> {
+  const peek = await peekChallenge(nonce, walletAddress);
+  if (!peek.valid) return peek;
+  return consumeChallenge(nonce);
 }
 
 // ---- Wallet Signature Verification ----
