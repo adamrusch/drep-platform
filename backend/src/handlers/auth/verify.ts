@@ -1,6 +1,7 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import {
-  validateChallenge,
+  peekChallenge,
+  consumeChallenge,
   verifyWalletSignature,
   issueJWT,
   buildSignMessage,
@@ -38,17 +39,27 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
       return badRequest('walletAddress, nonce, signature, and key are required');
     }
 
-    // 1. Validate that the nonce exists and matches this wallet
-    const challengeResult = await validateChallenge(nonce, walletAddress);
-    if (!challengeResult.valid) {
-      return unauthorized(challengeResult.reason ?? 'Invalid challenge');
+    // 1. Peek the nonce — confirm it exists, is unexpired, and matches the
+    //    wallet — but DO NOT consume it yet. Consuming before signature
+    //    verification would let an attacker burn a victim's freshly-issued
+    //    nonce by submitting a bogus signature.
+    const peek = await peekChallenge(nonce, walletAddress);
+    if (!peek.valid) {
+      return unauthorized(peek.reason ?? 'Invalid challenge');
     }
 
-    // 2. Verify the wallet signature
+    // 2. Verify the wallet signature against the expected message.
     const expectedMessage = buildSignMessage(nonce, walletAddress);
     const sigResult = verifyWalletSignature(walletAddress, expectedMessage, { signature, key });
     if (!sigResult.valid) {
       return unauthorized(sigResult.reason ?? 'Invalid signature');
+    }
+
+    // 3. Atomically consume the nonce. If two requests with valid signatures
+    //    race for the same nonce, only one wins; the other gets 401.
+    const consume = await consumeChallenge(nonce);
+    if (!consume.valid) {
+      return unauthorized(consume.reason ?? 'Challenge already consumed');
     }
 
     // 3. Upsert user record in DynamoDB

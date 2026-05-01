@@ -16,11 +16,11 @@ export interface ApiStackProps extends cdk.StackProps {
 }
 
 const ALLOWED_ORIGINS = [
-  'https://d31k3mmkrkmdvl.cloudfront.net',
+  'https://dbq4k0wz4ik0v.cloudfront.net',
   'http://localhost:5173',
 ];
 
-const PRIMARY_CORS_ORIGIN = 'https://d31k3mmkrkmdvl.cloudfront.net';
+const PRIMARY_CORS_ORIGIN = 'https://dbq4k0wz4ik0v.cloudfront.net';
 
 export class ApiStack extends cdk.Stack {
   public readonly apiUrl: string;
@@ -96,6 +96,10 @@ export class ApiStack extends cdk.Stack {
         sourceMap: false,
         target: 'es2022',
         externalModules: ['@aws-sdk/*'],
+        // See scheduler-stack.ts for rationale — CSL ships a .wasm file
+        // that esbuild can't inline. nodeModules causes npm-install at
+        // bundle time so the WASM lands in the Lambda zip intact.
+        nodeModules: ['@emurgo/cardano-serialization-lib-nodejs'],
         forceDockerBundling: false,
       },
       depsLockFilePath: path.join(backendDir, 'package-lock.json'),
@@ -195,7 +199,13 @@ export class ApiStack extends cdk.Stack {
       jwtAuthorizerFn,
       {
         responseTypes: [apigwv2Authorizers.HttpLambdaResponseType.SIMPLE],
-        identitySource: ['$request.header.Cookie', '$request.header.Authorization'],
+        // HTTP API v2 requires ALL listed identity sources to be present in the
+        // request before invoking the authorizer Lambda. The browser SPA only
+        // sends `Cookie`, so listing `Authorization` here would silently 401
+        // every browser request. The authorizer Lambda itself reads both
+        // `Cookie` and `Authorization` headers internally — non-browser bearer
+        // clients still work, they just bypass the cache key for now.
+        identitySource: ['$request.header.Cookie'],
         resultsCacheTtl: cdk.Duration.seconds(0),
       },
     );

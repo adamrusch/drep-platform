@@ -65,6 +65,11 @@ export class SchedulerStack extends cdk.Stack {
         sourceMap: false,
         target: 'es2022',
         externalModules: ['@aws-sdk/*'],
+        // Keep cardano-serialization-lib-nodejs out of the esbuild bundle —
+        // it ships a .wasm file that esbuild cannot inline. Listing it under
+        // nodeModules causes CDK to npm-install it into the Lambda zip with
+        // its WASM intact.
+        nodeModules: ['@emurgo/cardano-serialization-lib-nodejs'],
         forceDockerBundling: false,
       },
       depsLockFilePath: path.join(backendDir, 'package-lock.json'),
