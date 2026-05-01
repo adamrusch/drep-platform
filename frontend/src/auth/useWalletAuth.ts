@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { post, get as apiGet } from '@/lib/api';
+import { post, get as apiGet, del as apiDelete } from '@/lib/api';
 import { useAuthStore } from '@/stores/authStore';
 import type { UserRole, SessionType, UserProfile } from '@/types';
 
@@ -109,9 +109,11 @@ export function useWalletAuth(): UseWalletAuthReturn {
   const logout = useCallback(async (): Promise<void> => {
     setIsLoading(true);
     try {
-      await apiGet('/auth/session');
+      // Backend exposes DELETE /auth/session for logout. The cookie is cleared
+      // server-side via Set-Cookie: Max-Age=0 in the response.
+      await apiDelete('/auth/session');
     } catch {
-      // Ignore logout errors
+      // Ignore logout errors — clear local state regardless so the UI logs out
     } finally {
       clearAuth();
       setIsLoading(false);

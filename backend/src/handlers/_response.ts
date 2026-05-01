@@ -1,11 +1,18 @@
 import type { APIGatewayProxyResultV2 } from 'aws-lambda';
 
+// CORS_ORIGIN must be a specific origin (not "*") because we use credentialed
+// requests. The browser CORS spec requires Allow-Credentials: true with an
+// explicit origin. The CDK stack sets CORS_ORIGIN per Lambda; this default
+// matches the deployed CloudFront frontend.
+const DEFAULT_CORS_ORIGIN = 'https://d31k3mmkrkmdvl.cloudfront.net';
+
 export const corsHeaders: Record<string, string> = {
   'Content-Type': 'application/json',
-  'Access-Control-Allow-Origin': process.env['CORS_ORIGIN'] ?? '*',
-  'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+  'Access-Control-Allow-Origin': process.env['CORS_ORIGIN'] ?? DEFAULT_CORS_ORIGIN,
+  'Access-Control-Allow-Headers': 'Content-Type,Authorization,Cookie',
   'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
   'Access-Control-Allow-Credentials': 'true',
+  'Vary': 'Origin',
 };
 
 export function ok<T>(data: T, setCookies?: string[]): APIGatewayProxyResultV2 {
