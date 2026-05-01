@@ -1,0 +1,104 @@
+import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
+import {
+  validateChallenge,
+  verifyWalletSignature,
+  issueJWT,
+  buildSignMessage,
+  buildSetCookieHeader,
+  hashValue,
+} from '../../lib/auth';
+import { getItem, putItem, tableNames } from '../../lib/dynamodb';
+import type { UserItem, SessionType } from '../../lib/types';
+import { ok, badRequest, unauthorized, internalError } from '../_response';
+
+interface VerifyRequestBody {
+  walletAddress: string;
+  nonce: string;
+  signature: string;
+  key: string;
+  rememberMe?: boolean;
+}
+
+export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> => {
+  try {
+    if (!event.body) {
+      return badRequest('Request body is required');
+    }
+
+    let body: VerifyRequestBody;
+    try {
+      body = JSON.parse(event.body) as VerifyRequestBody;
+    } catch {
+      return badRequest('Invalid JSON body');
+    }
+
+    const { walletAddress, nonce, signature, key } = body;
+
+    if (!walletAddress || !nonce || !signature || !key) {
+      return badRequest('walletAddress, nonce, signature, and key are required');
+    }
+
+    // 1. Validate that the nonce exists and matches this wallet
+    const challengeResult = validateChallenge(nonce, walletAddress);
+    if (!challengeResult.valid) {
+      return unauthorized(challengeResult.reason ?? 'Invalid challenge');
+    }
+
+    // 2. Verify the wallet signature
+    const expectedMessage = buildSignMessage(nonce, walletAddress);
+    const sigResult = verifyWalletSignature(walletAddress, expectedMessage, { signature, key });
+    if (!sigResult.valid) {
+      return unauthorized(sigResult.reason ?? 'Invalid signature');
+    }
+
+    // 3. Upsert user record in DynamoDB
+    const now = new Date().toISOString();
+    const sessionType: SessionType = body.rememberMe ? 'remember_me' : 'normal';
+
+    // Fetch existing user to preserve roles/profile
+    const existing = await getItem<UserItem>(tableNames.users, {
+      walletAddress,
+      SK: 'PROFILE',
+    });
+
+    const sessionExpiry = new Date(
+      Date.now() + (sessionType === 'remember_me' ? 30 : 7) * 24 * 60 * 60 * 1000,
+    ).toISOString();
+
+    // 4. Issue JWT
+    const roles = existing?.roles as string[] | undefined;
+    const typedRoles = (roles ?? ['delegator']) as Array<'guest' | 'delegator' | 'committee_member' | 'lead_drep' | 'trusted_delegator'>;
+    const { token, expiresAt } = await issueJWT(walletAddress, typedRoles, sessionType, existing?.drepId as string | undefined);
+
+    const userItem: UserItem = {
+      walletAddress,
+      SK: 'PROFILE',
+      displayName: existing?.displayName,
+      bio: existing?.bio,
+      socialLinks: existing?.socialLinks,
+      roles: typedRoles,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+      sessionTokenHash: hashValue(token),
+      sessionExpiry,
+      delegationHistory: existing?.delegationHistory,
+    };
+
+    await putItem(tableNames.users, userItem as unknown as Record<string, unknown>);
+
+    const cookieHeader = buildSetCookieHeader(token, sessionType);
+
+    return ok(
+      {
+        walletAddress,
+        roles: typedRoles,
+        sessionType,
+        expiresAt,
+      },
+      [cookieHeader],
+    );
+  } catch (err) {
+    console.error('verify handler error:', err);
+    return internalError('Authentication failed');
+  }
+};

@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build output
+dist/
+**/dist/
+*.js.map
+cdk.out/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# AWS CDK
+cdk.out/
+*.d.ts
+*.js
+!jest.config.js
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Test coverage
+coverage/
