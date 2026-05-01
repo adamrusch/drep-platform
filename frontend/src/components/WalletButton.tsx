@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useWallet, useWalletList } from '@meshsdk/react';
 import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
 import { useWalletAuth } from '@/auth/useWalletAuth';
+import { CARDANO_NETWORK } from '@/auth/WalletAuthProvider';
 import { useUiStore } from '@/stores/uiStore';
 import { cn } from '@/lib/utils';
 
@@ -26,6 +27,20 @@ export function WalletButton({ className }: WalletButtonProps): React.ReactEleme
       if (!connector) throw new Error(`Wallet "${walletName}" is not installed`);
       const api = await connector.enable();
       if (!api) throw new Error('Failed to connect wallet');
+
+      // CIP-30 returns 1 for mainnet, 0 for testnets (preprod/preview).
+      // Enforce mainnet to prevent users from accidentally connecting on the
+      // wrong network — the platform reads on-chain governance state from
+      // mainnet only and stake addresses are network-prefixed.
+      const networkId = await api.getNetworkId();
+      const expectedNetworkId = CARDANO_NETWORK === 'mainnet' ? 1 : 0;
+      if (networkId !== expectedNetworkId) {
+        const got = networkId === 1 ? 'mainnet' : 'a testnet (preprod/preview)';
+        throw new Error(
+          `Wallet is connected to ${got}. Please switch your wallet to ${CARDANO_NETWORK} and try again.`,
+        );
+      }
+
       await authenticate(api);
       setShowWalletList(false);
       addToast({ title: 'Wallet connected', variant: 'success' });

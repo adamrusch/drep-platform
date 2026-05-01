@@ -11,6 +11,7 @@ import { useAuthStore } from '@/stores/authStore';
 
 import { Home } from '@/pages/Home';
 import { GuestLanding } from '@/pages/GuestLanding';
+import { GovernanceListPage } from '@/pages/GovernanceListPage';
 import { GovernanceActionPage } from '@/pages/GovernanceActionPage';
 import { DRepPublicProfile } from '@/pages/DRepPublicProfile';
 import { DelegatorClubhouse } from '@/pages/DelegatorClubhouse';
@@ -47,7 +48,8 @@ function App(): React.ReactElement {
               {/* Auth */}
               <Route path="/auth/connect" element={<WalletConnectPage />} />
 
-              {/* Governance */}
+              {/* Governance — public, no auth required */}
+              <Route path="/governance" element={<GovernanceListPage />} />
               <Route path="/governance/:actionId" element={<GovernanceActionPage />} />
 
               {/* DRep public surfaces */}

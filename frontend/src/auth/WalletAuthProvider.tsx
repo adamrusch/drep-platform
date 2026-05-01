@@ -49,3 +49,12 @@ export function WalletAuthProvider({ children }: WalletAuthProviderProps): React
     </MeshProvider>
   );
 }
+
+/**
+ * Network identifier read from `VITE_CARDANO_NETWORK` (mainnet | preprod |
+ * preview). Used by components that need the network for Blockfrost/Koios
+ * lookups or to validate that the connected wallet matches.
+ */
+export const CARDANO_NETWORK: 'mainnet' | 'preprod' | 'preview' =
+  (import.meta.env.VITE_CARDANO_NETWORK as 'mainnet' | 'preprod' | 'preview' | undefined) ??
+  'mainnet';
