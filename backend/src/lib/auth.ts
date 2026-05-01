@@ -3,6 +3,16 @@ import * as crypto from 'crypto';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { decode as cborDecode, encode as cborEncode } from 'cbor-x';
 import type { JWTPayload, UserRole, SessionType } from './types';
+import { putItem, getItem, deleteItem, tableNames } from './dynamodb';
+
+// ---- Auth nonce DynamoDB record ----
+
+interface AuthNonceItem extends Record<string, unknown> {
+  nonce: string;
+  kind: 'challenge' | 'mutation';
+  walletAddress: string;
+  expiresAt: number; // epoch seconds for DynamoDB TTL
+}
 
 // ---- Secrets Manager client (module-level, reused across invocations) ----
 
@@ -38,21 +48,32 @@ async function getJwtSecret(): Promise<Uint8Array> {
 const CHALLENGE_TTL_MS = 5 * 60 * 1_000; // 5 minutes
 const MUTATION_NONCE_TTL_MS = 5 * 60 * 1_000; // 5 minutes
 
-// In-memory store for challenges (in production use DynamoDB or ElastiCache)
-const challengeStore = new Map<string, { walletAddress: string; expiresAt: number }>();
-
-export function generateChallenge(walletAddress: string): {
+/**
+ * Generate a challenge nonce. Persists to DynamoDB so the verify call (which
+ * may land on a different Lambda instance) can validate it.
+ *
+ * Single-use semantics are enforced by `attribute_not_exists(nonce)` on insert
+ * and an atomic delete during validation.
+ */
+export async function generateChallenge(walletAddress: string): Promise<{
   nonce: string;
   message: string;
   expiresAt: string;
-} {
+}> {
   const nonce = crypto.randomBytes(32).toString('hex');
-  const expiresAt = new Date(Date.now() + CHALLENGE_TTL_MS);
+  const expiresAtDate = new Date(Date.now() + CHALLENGE_TTL_MS);
+  const expiresAtSec = Math.floor(expiresAtDate.getTime() / 1000);
 
-  // Store the challenge
-  challengeStore.set(nonce, {
+  const item: AuthNonceItem = {
+    nonce,
+    kind: 'challenge',
     walletAddress,
-    expiresAt: expiresAt.getTime(),
+    expiresAt: expiresAtSec,
+  };
+
+  // ConditionExpression ensures we never overwrite an existing nonce
+  await putItem(tableNames.authNonces, item, 'attribute_not_exists(#nonce)', {
+    '#nonce': 'nonce',
   });
 
   const message = buildSignMessage(nonce, walletAddress);
@@ -60,7 +81,7 @@ export function generateChallenge(walletAddress: string): {
   return {
     nonce,
     message,
-    expiresAt: expiresAt.toISOString(),
+    expiresAt: expiresAtDate.toISOString(),
   };
 }
 
@@ -68,17 +89,22 @@ export function buildSignMessage(nonce: string, walletAddress: string): string {
   return `drep-platform wants you to sign in:\n\nWallet: ${walletAddress}\nNonce: ${nonce}\n\nThis request will not trigger a blockchain transaction or cost any gas fees.`;
 }
 
-export function validateChallenge(
+export async function validateChallenge(
   nonce: string,
   walletAddress: string,
-): { valid: boolean; reason?: string } {
-  const stored = challengeStore.get(nonce);
-  if (!stored) {
+): Promise<{ valid: boolean; reason?: string }> {
+  const stored = await getItem<AuthNonceItem>(tableNames.authNonces, { nonce });
+  if (!stored || stored.kind !== 'challenge') {
     return { valid: false, reason: 'Challenge nonce not found or already used' };
   }
 
-  if (Date.now() > stored.expiresAt) {
-    challengeStore.delete(nonce);
+  // DynamoDB TTL deletion can lag by minutes, so always re-check expiry here.
+  if (Date.now() / 1000 > stored.expiresAt) {
+    try {
+      await deleteItem(tableNames.authNonces, { nonce });
+    } catch {
+      // Best-effort cleanup
+    }
     return { valid: false, reason: 'Challenge nonce has expired' };
   }
 
@@ -86,8 +112,21 @@ export function validateChallenge(
     return { valid: false, reason: 'Challenge nonce does not match wallet address' };
   }
 
-  // Consume the nonce — single use
-  challengeStore.delete(nonce);
+  // Consume the nonce atomically — single use. The conditional delete ensures
+  // that two concurrent verify calls cannot both succeed against the same nonce.
+  try {
+    await deleteItem(
+      tableNames.authNonces,
+      { nonce },
+      'attribute_exists(#nonce)',
+      { '#nonce': 'nonce' },
+    );
+  } catch (err) {
+    if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
+      return { valid: false, reason: 'Challenge nonce not found or already used' };
+    }
+    throw err;
+  }
   return { valid: true };
 }
 
@@ -284,42 +323,63 @@ export function buildClearCookieHeader(): string {
 
 // ---- Mutation nonce ----
 
-const mutationNonceStore = new Map<string, { walletAddress: string; expiresAt: number }>();
-
-export function generateMutationNonce(walletAddress: string): {
+export async function generateMutationNonce(walletAddress: string): Promise<{
   nonce: string;
   message: string;
   expiresAt: string;
-} {
+}> {
   const nonce = crypto.randomBytes(16).toString('hex');
-  const expiresAt = new Date(Date.now() + MUTATION_NONCE_TTL_MS);
+  const expiresAtDate = new Date(Date.now() + MUTATION_NONCE_TTL_MS);
+  const expiresAtSec = Math.floor(expiresAtDate.getTime() / 1000);
 
-  mutationNonceStore.set(nonce, {
+  const item: AuthNonceItem = {
+    nonce,
+    kind: 'mutation',
     walletAddress,
-    expiresAt: expiresAt.getTime(),
+    expiresAt: expiresAtSec,
+  };
+
+  await putItem(tableNames.authNonces, item, 'attribute_not_exists(#nonce)', {
+    '#nonce': 'nonce',
   });
 
-  const message = `drep-platform mutation authorization:\n\nWallet: ${walletAddress}\nNonce: ${nonce}\nExpires: ${expiresAt.toISOString()}`;
+  const message = `drep-platform mutation authorization:\n\nWallet: ${walletAddress}\nNonce: ${nonce}\nExpires: ${expiresAtDate.toISOString()}`;
 
-  return { nonce, message, expiresAt: expiresAt.toISOString() };
+  return { nonce, message, expiresAt: expiresAtDate.toISOString() };
 }
 
-export function validateMutationNonce(
+export async function validateMutationNonce(
   nonce: string,
   walletAddress: string,
-): { valid: boolean; reason?: string } {
-  const stored = mutationNonceStore.get(nonce);
-  if (!stored) {
+): Promise<{ valid: boolean; reason?: string }> {
+  const stored = await getItem<AuthNonceItem>(tableNames.authNonces, { nonce });
+  if (!stored || stored.kind !== 'mutation') {
     return { valid: false, reason: 'Mutation nonce not found or already used' };
   }
-  if (Date.now() > stored.expiresAt) {
-    mutationNonceStore.delete(nonce);
+  if (Date.now() / 1000 > stored.expiresAt) {
+    try {
+      await deleteItem(tableNames.authNonces, { nonce });
+    } catch {
+      // Best-effort cleanup
+    }
     return { valid: false, reason: 'Mutation nonce has expired' };
   }
   if (stored.walletAddress !== walletAddress) {
     return { valid: false, reason: 'Mutation nonce does not match wallet address' };
   }
-  mutationNonceStore.delete(nonce);
+  try {
+    await deleteItem(
+      tableNames.authNonces,
+      { nonce },
+      'attribute_exists(#nonce)',
+      { '#nonce': 'nonce' },
+    );
+  } catch (err) {
+    if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
+      return { valid: false, reason: 'Mutation nonce not found or already used' };
+    }
+    throw err;
+  }
   return { valid: true };
 }
 

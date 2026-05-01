@@ -42,6 +42,7 @@ export const tableNames = {
   comments: `${TABLE_PREFIX}comments`,
   clubhousePosts: `${TABLE_PREFIX}clubhouse_posts`,
   auditLog: `${TABLE_PREFIX}audit_log`,
+  authNonces: `${TABLE_PREFIX}auth_nonces`,
 } as const;
 
 export type TableName = keyof typeof tableNames;
@@ -64,11 +65,15 @@ export async function putItem<T extends Record<string, unknown>>(
   tableName: string,
   item: T,
   conditionExpression?: string,
+  expressionAttributeNames?: Record<string, string>,
 ): Promise<void> {
   const params: PutCommandInput = {
     TableName: tableName,
     Item: item,
     ...(conditionExpression ? { ConditionExpression: conditionExpression } : {}),
+    ...(expressionAttributeNames
+      ? { ExpressionAttributeNames: expressionAttributeNames }
+      : {}),
   };
   await docClient.send(new PutCommand(params));
 }
@@ -77,11 +82,15 @@ export async function deleteItem(
   tableName: string,
   key: Record<string, unknown>,
   conditionExpression?: string,
+  expressionAttributeNames?: Record<string, string>,
 ): Promise<void> {
   const params: DeleteCommandInput = {
     TableName: tableName,
     Key: key,
     ...(conditionExpression ? { ConditionExpression: conditionExpression } : {}),
+    ...(expressionAttributeNames
+      ? { ExpressionAttributeNames: expressionAttributeNames }
+      : {}),
   };
   await docClient.send(new DeleteCommand(params));
 }

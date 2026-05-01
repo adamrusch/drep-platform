@@ -5,26 +5,48 @@ export interface AuthContext {
   walletAddress: string;
   roles: UserRole[];
   drepId?: string;
+  sessionType?: string;
 }
 
 /**
- * Extracts auth context from the Lambda authorizer context.
- * Throws a typed error if the event has no authorizer context.
+ * Shape produced by our HTTP API v2 Lambda authorizer (simple response form).
+ * Delivered to handlers at `event.requestContext.authorizer.lambda`.
+ */
+interface LambdaAuthorizerContext {
+  walletAddress?: string;
+  roles?: string;
+  sessionType?: string;
+  drepId?: string;
+}
+
+/**
+ * Extracts auth context from the HTTP API v2 Lambda authorizer context.
+ *
+ * For HTTP API v2 + Lambda authorizer (simple response), API Gateway delivers
+ * the authorizer's returned `context` object at `event.requestContext.authorizer.lambda`.
+ * Throws an AuthorizationError if no authorizer context is present (this should
+ * never happen for routes protected by the authorizer).
  */
 export function extractAuthContext(
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
 ): AuthContext {
-  const ctx = event.requestContext.authorizer?.jwt?.claims;
+  // We declare the event as `WithJWTAuthorizer` only to keep handler types
+  // consistent. The runtime payload from a Lambda authorizer is
+  // `authorizer.lambda`, so we cast through `unknown`.
+  const authorizer = event.requestContext.authorizer as unknown as
+    | { lambda?: LambdaAuthorizerContext }
+    | undefined;
+  const ctx = authorizer?.lambda;
   if (!ctx) {
     throw new AuthorizationError('No authorizer context found', 401);
   }
 
-  const walletAddress = ctx['sub'] as string | undefined;
+  const walletAddress = ctx.walletAddress;
   if (!walletAddress) {
-    throw new AuthorizationError('Missing sub claim in JWT', 401);
+    throw new AuthorizationError('Missing walletAddress in authorizer context', 401);
   }
 
-  const rawRoles = ctx['roles'] as string | undefined;
+  const rawRoles = ctx.roles;
   let roles: UserRole[] = [];
   if (rawRoles) {
     try {
@@ -37,7 +59,8 @@ export function extractAuthContext(
   return {
     walletAddress,
     roles,
-    drepId: ctx['drepId'] as string | undefined,
+    drepId: ctx.drepId,
+    sessionType: ctx.sessionType,
   };
 }
 

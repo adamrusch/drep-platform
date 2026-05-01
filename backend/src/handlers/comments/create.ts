@@ -50,7 +50,7 @@ export const handler = async (
     }
 
     // Validate mutation nonce
-    const nonceResult = validateMutationNonce(body.mutationNonce, authCtx.walletAddress);
+    const nonceResult = await validateMutationNonce(body.mutationNonce, authCtx.walletAddress);
     if (!nonceResult.valid) {
       return unauthorized(nonceResult.reason ?? 'Invalid mutation nonce');
     }

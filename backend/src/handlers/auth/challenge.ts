@@ -30,7 +30,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
       return badRequest('Invalid Cardano wallet address format');
     }
 
-    const challenge = generateChallenge(body.walletAddress);
+    const challenge = await generateChallenge(body.walletAddress);
 
     return ok({
       nonce: challenge.nonce,

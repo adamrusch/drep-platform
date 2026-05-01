@@ -39,7 +39,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     }
 
     // 1. Validate that the nonce exists and matches this wallet
-    const challengeResult = validateChallenge(nonce, walletAddress);
+    const challengeResult = await validateChallenge(nonce, walletAddress);
     if (!challengeResult.valid) {
       return unauthorized(challengeResult.reason ?? 'Invalid challenge');
     }

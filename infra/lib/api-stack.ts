@@ -1,5 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
-import * as apigateway from 'aws-cdk-lib/aws-apigateway';
+import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
+import * as apigwv2Integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
+import * as apigwv2Authorizers from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -12,6 +14,13 @@ export interface ApiStackProps extends cdk.StackProps {
   stage: string;
   databaseStack: DatabaseStack;
 }
+
+const ALLOWED_ORIGINS = [
+  'https://d31k3mmkrkmdvl.cloudfront.net',
+  'http://localhost:5173',
+];
+
+const PRIMARY_CORS_ORIGIN = 'https://d31k3mmkrkmdvl.cloudfront.net';
 
 export class ApiStack extends cdk.Stack {
   public readonly apiUrl: string;
@@ -46,6 +55,7 @@ export class ApiStack extends cdk.Stack {
       SES_REGION: 'us-east-1',
       JWT_SECRET_NAME: `drep-platform/${stage}/jwt-secret`,
       BLOCKFROST_SECRET_NAME: `drep-platform/${stage}/blockfrost-api-key`,
+      CORS_ORIGIN: PRIMARY_CORS_ORIGIN,
     };
 
     // ---- Shared Lambda execution role ----
@@ -56,7 +66,7 @@ export class ApiStack extends cdk.Stack {
       ],
     });
 
-    // Grant DynamoDB access
+    // Grant DynamoDB access (including the new auth_nonces table)
     for (const table of [
       databaseStack.usersTable,
       databaseStack.drepCommitteesTable,
@@ -64,6 +74,7 @@ export class ApiStack extends cdk.Stack {
       databaseStack.commentsTable,
       databaseStack.clubhousePostsTable,
       databaseStack.auditLogTable,
+      databaseStack.authNoncesTable,
     ]) {
       table.grantReadWriteData(lambdaRole);
     }
@@ -105,6 +116,7 @@ export class ApiStack extends cdk.Stack {
     const refreshFn = fn('AuthRefreshFn', 'handlers/auth/refresh.ts');
     const logoutFn = fn('AuthLogoutFn', 'handlers/auth/logout.ts');
     const meFn = fn('AuthMeFn', 'handlers/auth/me.ts');
+    const mutationNonceFn = fn('AuthMutationNonceFn', 'handlers/auth/mutationNonce.ts');
 
     // ---- Governance handlers ----
     const govListFn = fn('GovListFn', 'handlers/governance/list.ts');
@@ -125,86 +137,173 @@ export class ApiStack extends cdk.Stack {
     // ---- Clubhouse handlers ----
     const clubhouseListFn = fn('ClubhouseListFn', 'handlers/clubhouse/list.ts');
     const clubhouseCreatePostFn = fn('ClubhouseCreatePostFn', 'handlers/clubhouse/createPost.ts');
-    const clubhouseCreateCommentFn = fn('ClubhouseCreateCommentFn', 'handlers/clubhouse/createComment.ts');
+    const clubhouseCreateCommentFn = fn(
+      'ClubhouseCreateCommentFn',
+      'handlers/clubhouse/createComment.ts',
+    );
     const clubhouseDeletePostFn = fn('ClubhouseDeletePostFn', 'handlers/clubhouse/deletePost.ts');
 
     // ---- Profile handlers ----
     const profileGetFn = fn('ProfileGetFn', 'handlers/profile/get.ts');
     const profileUpsertFn = fn('ProfileUpsertFn', 'handlers/profile/upsert.ts');
-    const profileDelegationHistoryFn = fn('ProfileDelegationHistoryFn', 'handlers/profile/delegationHistory.ts');
+    const profileDelegationHistoryFn = fn(
+      'ProfileDelegationHistoryFn',
+      'handlers/profile/delegationHistory.ts',
+    );
 
     // ---- JWT Authorizer Lambda ----
     const jwtAuthorizerFn = fn('JwtAuthorizerFn', 'middleware/jwt-authorizer.ts');
 
-    // ---- API Gateway (REST) ----
-    const api = new apigateway.RestApi(this, 'DRepPlatformApi', {
-      restApiName: `drep-platform-${stage}`,
+    // ---- HTTP API v2 ----
+    const api = new apigwv2.HttpApi(this, 'DRepPlatformApi', {
+      apiName: `drep-platform-${stage}`,
       description: 'DRep Coordination Platform API',
-      deployOptions: {
-        stageName: stage,
-        throttlingRateLimit: 100,
-        throttlingBurstLimit: 200,
-      },
-      defaultCorsPreflightOptions: {
-        allowOrigins: apigateway.Cors.ALL_ORIGINS,
-        allowMethods: apigateway.Cors.ALL_METHODS,
-        allowHeaders: ['Content-Type', 'Authorization'],
+      corsPreflight: {
+        allowOrigins: ALLOWED_ORIGINS,
+        allowMethods: [
+          apigwv2.CorsHttpMethod.GET,
+          apigwv2.CorsHttpMethod.POST,
+          apigwv2.CorsHttpMethod.PUT,
+          apigwv2.CorsHttpMethod.DELETE,
+          apigwv2.CorsHttpMethod.OPTIONS,
+        ],
+        allowHeaders: ['Content-Type', 'Cookie', 'Authorization'],
         allowCredentials: true,
+        maxAge: cdk.Duration.hours(1),
+      },
+      // Default stage `$default` auto-deploys; throttling is set on the stage.
+      createDefaultStage: false,
+    });
+
+    new apigwv2.HttpStage(this, 'DefaultStage', {
+      httpApi: api,
+      stageName: '$default',
+      autoDeploy: true,
+      throttle: {
+        rateLimit: 100,
+        burstLimit: 200,
       },
     });
 
-    // ---- Token authorizer ----
-    const tokenAuthorizer = new apigateway.TokenAuthorizer(this, 'JwtTokenAuthorizer', {
-      handler: jwtAuthorizerFn,
-      identitySource: 'method.request.header.Authorization',
-      resultsCacheTtl: cdk.Duration.minutes(5),
-    });
-
-    const authOptions: apigateway.MethodOptions = { authorizer: tokenAuthorizer };
+    // ---- Lambda authorizer ----
+    // Identity sources include the Cookie header (where browsers send the auth
+    // cookie) and the Authorization header (for non-browser clients / future
+    // bearer-token use). Caching is disabled (TTL = 0) because the identity
+    // value (cookie) is per-user and we want immediate revocation on logout.
+    const lambdaAuthorizer = new apigwv2Authorizers.HttpLambdaAuthorizer(
+      'JwtLambdaAuthorizer',
+      jwtAuthorizerFn,
+      {
+        responseTypes: [apigwv2Authorizers.HttpLambdaResponseType.SIMPLE],
+        identitySource: ['$request.header.Cookie', '$request.header.Authorization'],
+        resultsCacheTtl: cdk.Duration.seconds(0),
+      },
+    );
 
     // ---- Route helpers ----
-    const r = (path: string): apigateway.Resource => api.root.resourceForPath(path);
-    const integ = (fn: lambda.IFunction): apigateway.LambdaIntegration =>
-      new apigateway.LambdaIntegration(fn, { proxy: true });
+    const integ = (handler: lambda.IFunction, id: string): apigwv2Integrations.HttpLambdaIntegration =>
+      new apigwv2Integrations.HttpLambdaIntegration(id, handler, {
+        payloadFormatVersion: apigwv2.PayloadFormatVersion.VERSION_2_0,
+      });
+
+    const addRoute = (
+      method: apigwv2.HttpMethod,
+      route: string,
+      handler: lambda.IFunction,
+      idHint: string,
+      authenticated = false,
+    ): void => {
+      api.addRoutes({
+        path: route,
+        methods: [method],
+        integration: integ(handler, `${idHint}Integration`),
+        ...(authenticated ? { authorizer: lambdaAuthorizer } : {}),
+      });
+    };
 
     // ---- Auth routes ----
-    r('/auth/challenge').addMethod('POST', integ(challengeFn));
-    r('/auth/verify').addMethod('POST', integ(verifyFn));
-    r('/auth/refresh').addMethod('POST', integ(refreshFn), authOptions);
-    r('/auth/session').addMethod('DELETE', integ(logoutFn), authOptions);
-    r('/auth/me').addMethod('GET', integ(meFn), authOptions);
+    addRoute(apigwv2.HttpMethod.POST, '/auth/challenge', challengeFn, 'AuthChallenge');
+    addRoute(apigwv2.HttpMethod.POST, '/auth/verify', verifyFn, 'AuthVerify');
+    addRoute(apigwv2.HttpMethod.POST, '/auth/refresh', refreshFn, 'AuthRefresh', true);
+    addRoute(apigwv2.HttpMethod.DELETE, '/auth/session', logoutFn, 'AuthLogout', true);
+    addRoute(apigwv2.HttpMethod.GET, '/auth/me', meFn, 'AuthMe', true);
+    addRoute(
+      apigwv2.HttpMethod.POST,
+      '/auth/mutation-nonce',
+      mutationNonceFn,
+      'AuthMutationNonce',
+      true,
+    );
 
     // ---- Governance routes ----
-    r('/governance').addMethod('GET', integ(govListFn));
-    r('/governance/{actionId}').addMethod('GET', integ(govGetFn));
-    r('/governance/sync').addMethod('POST', integ(govSyncFn), authOptions);
+    addRoute(apigwv2.HttpMethod.GET, '/governance', govListFn, 'GovList');
+    addRoute(apigwv2.HttpMethod.GET, '/governance/{actionId}', govGetFn, 'GovGet');
+    addRoute(apigwv2.HttpMethod.POST, '/governance/sync', govSyncFn, 'GovSync', true);
 
     // ---- DRep routes ----
-    r('/drep').addMethod('GET', integ(drepListFn));
-    r('/drep').addMethod('POST', integ(drepRegisterFn), authOptions);
-    r('/drep/{drepId}').addMethod('GET', integ(drepGetFn));
-    r('/drep/{drepId}').addMethod('PUT', integ(drepUpdateFn), authOptions);
+    addRoute(apigwv2.HttpMethod.GET, '/drep', drepListFn, 'DRepList');
+    addRoute(apigwv2.HttpMethod.POST, '/drep', drepRegisterFn, 'DRepRegister', true);
+    addRoute(apigwv2.HttpMethod.GET, '/drep/{drepId}', drepGetFn, 'DRepGet');
+    addRoute(apigwv2.HttpMethod.PUT, '/drep/{drepId}', drepUpdateFn, 'DRepUpdate', true);
 
     // ---- Comments routes ----
-    r('/comments/{actionId}').addMethod('GET', integ(commentsListFn));
-    r('/comments/{actionId}').addMethod('POST', integ(commentsCreateFn), authOptions);
-    r('/comments/{actionId}/{commentId}').addMethod('DELETE', integ(commentsDeleteFn), authOptions);
+    addRoute(apigwv2.HttpMethod.GET, '/comments/{actionId}', commentsListFn, 'CommentsList');
+    addRoute(
+      apigwv2.HttpMethod.POST,
+      '/comments/{actionId}',
+      commentsCreateFn,
+      'CommentsCreate',
+      true,
+    );
+    addRoute(
+      apigwv2.HttpMethod.DELETE,
+      '/comments/{actionId}/{commentId}',
+      commentsDeleteFn,
+      'CommentsDelete',
+      true,
+    );
 
     // ---- Clubhouse routes ----
-    r('/clubhouse/{drepId}').addMethod('GET', integ(clubhouseListFn));
-    r('/clubhouse/{drepId}/post').addMethod('POST', integ(clubhouseCreatePostFn), authOptions);
-    r('/clubhouse/{drepId}/post/{postId}/comment').addMethod('POST', integ(clubhouseCreateCommentFn), authOptions);
-    r('/clubhouse/{drepId}/post/{postId}').addMethod('DELETE', integ(clubhouseDeletePostFn), authOptions);
+    addRoute(apigwv2.HttpMethod.GET, '/clubhouse/{drepId}', clubhouseListFn, 'ClubhouseList');
+    addRoute(
+      apigwv2.HttpMethod.POST,
+      '/clubhouse/{drepId}/post',
+      clubhouseCreatePostFn,
+      'ClubhouseCreatePost',
+      true,
+    );
+    addRoute(
+      apigwv2.HttpMethod.POST,
+      '/clubhouse/{drepId}/post/{postId}/comment',
+      clubhouseCreateCommentFn,
+      'ClubhouseCreateComment',
+      true,
+    );
+    addRoute(
+      apigwv2.HttpMethod.DELETE,
+      '/clubhouse/{drepId}/post/{postId}',
+      clubhouseDeletePostFn,
+      'ClubhouseDeletePost',
+      true,
+    );
 
     // ---- Profile routes ----
-    r('/profile/{walletAddress}').addMethod('GET', integ(profileGetFn));
-    r('/profile').addMethod('POST', integ(profileUpsertFn), authOptions);
-    r('/profile/{walletAddress}/delegation-history').addMethod('GET', integ(profileDelegationHistoryFn));
+    addRoute(apigwv2.HttpMethod.GET, '/profile/{walletAddress}', profileGetFn, 'ProfileGet');
+    addRoute(apigwv2.HttpMethod.POST, '/profile', profileUpsertFn, 'ProfileUpsert', true);
+    // Authenticated: this endpoint hits Blockfrost on every call; auth-gating
+    // it prevents anonymous attackers from amplifying our Blockfrost quota.
+    addRoute(
+      apigwv2.HttpMethod.GET,
+      '/profile/{walletAddress}/delegation-history',
+      profileDelegationHistoryFn,
+      'ProfileDelegationHistory',
+      true,
+    );
 
-    this.apiUrl = api.url;
+    this.apiUrl = api.apiEndpoint;
 
     new cdk.CfnOutput(this, 'ApiUrl', {
-      value: api.url,
+      value: api.apiEndpoint,
       exportName: `${stage}-ApiUrl`,
     });
   }

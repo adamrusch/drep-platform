@@ -4,7 +4,12 @@ import type { ApiError } from '@/types';
 
 // ---- Axios instance ----
 
-const BASE_URL = import.meta.env.VITE_API_URL ?? '/api';
+// Accept both names so .env.production (`VITE_API_BASE_URL`) and any older
+// dev configs (`VITE_API_URL`) work without a flag day.
+const BASE_URL =
+  import.meta.env.VITE_API_BASE_URL ??
+  import.meta.env.VITE_API_URL ??
+  '/api';
 
 export const apiClient: AxiosInstance = axios.create({
   baseURL: BASE_URL,

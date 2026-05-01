@@ -13,6 +13,7 @@ export class DatabaseStack extends cdk.Stack {
   public readonly commentsTable: dynamodb.Table;
   public readonly clubhousePostsTable: dynamodb.Table;
   public readonly auditLogTable: dynamodb.Table;
+  public readonly authNoncesTable: dynamodb.Table;
 
   private readonly tablePrefix: string;
 
@@ -51,6 +52,17 @@ export class DatabaseStack extends cdk.Stack {
     this.drepCommitteesTable.addGlobalSecondaryIndex({
       indexName: 'leadWallet-index',
       partitionKey: { name: 'leadWallet', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    // Browse-all index: every committee item has SK='COMMITTEE', so this GSI
+    // partitions all committees onto a single hash and sorts by createdAt for
+    // chronological browsing. With PAY_PER_REQUEST + adaptive capacity this is
+    // acceptable at this scale; revisit if committee count exceeds ~1000.
+    this.drepCommitteesTable.addGlobalSecondaryIndex({
+      indexName: 'SK-createdAt-index',
+      partitionKey: { name: 'SK', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
@@ -120,6 +132,18 @@ export class DatabaseStack extends cdk.Stack {
       removalPolicy: props.stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
+    // ---- auth_nonces ----
+    // Stores both auth challenge nonces and mutation nonces.
+    // Item shape: { nonce, kind: 'challenge' | 'mutation', walletAddress, expiresAt (epoch seconds for TTL), message? }
+    // DynamoDB TTL on expiresAt handles cleanup automatically.
+    this.authNoncesTable = new dynamodb.Table(this, 'AuthNoncesTable', {
+      tableName: `${this.tablePrefix}auth_nonces`,
+      partitionKey: { name: 'nonce', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      timeToLiveAttribute: 'expiresAt',
+      removalPolicy: props.stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
     // ---- Outputs ----
     new cdk.CfnOutput(this, 'UsersTableName', { value: this.usersTable.tableName, exportName: `${props.stage}-UsersTableName` });
     new cdk.CfnOutput(this, 'DRepCommitteesTableName', { value: this.drepCommitteesTable.tableName, exportName: `${props.stage}-DRepCommitteesTableName` });
@@ -127,5 +151,6 @@ export class DatabaseStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'CommentsTableName', { value: this.commentsTable.tableName, exportName: `${props.stage}-CommentsTableName` });
     new cdk.CfnOutput(this, 'ClubhousePostsTableName', { value: this.clubhousePostsTable.tableName, exportName: `${props.stage}-ClubhousePostsTableName` });
     new cdk.CfnOutput(this, 'AuditLogTableName', { value: this.auditLogTable.tableName, exportName: `${props.stage}-AuditLogTableName` });
+    new cdk.CfnOutput(this, 'AuthNoncesTableName', { value: this.authNoncesTable.tableName, exportName: `${props.stage}-AuthNoncesTableName` });
   }
 }

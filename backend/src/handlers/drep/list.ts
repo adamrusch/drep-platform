@@ -1,8 +1,18 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { queryItems, tableNames } from '../../lib/dynamodb';
 import type { DRepCommitteeItem } from '../../lib/types';
-import { ok, badRequest, internalError } from '../_response';
+import { ok, internalError } from '../_response';
 
+/**
+ * GET /drep
+ *
+ * Two listing modes:
+ *  - `?leadWallet=<addr>` → query the `leadWallet-index` GSI (committee for one wallet)
+ *  - no params           → query the `SK-createdAt-index` GSI for all committees,
+ *                          sorted newest-first.
+ *
+ * Pagination: `?lastKey=<base64>` opaque cursor; `?limit=<n>` capped at 100.
+ */
 export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> => {
   try {
     const qs = event.queryStringParameters ?? {};
@@ -12,37 +22,37 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
 
     const limit = limitParam ? Math.min(parseInt(limitParam, 10), 100) : 20;
 
+    const exclusiveStartKey = lastKey
+      ? (JSON.parse(Buffer.from(lastKey, 'base64').toString('utf-8')) as Record<string, unknown>)
+      : undefined;
+
     if (leadWallet) {
-      // Query by leadWallet using the GSI
       const result = await queryItems<DRepCommitteeItem>(tableNames.drepCommittees, {
         indexName: 'leadWallet-index',
         keyConditionExpression: '#leadWallet = :leadWallet',
         expressionAttributeNames: { '#leadWallet': 'leadWallet' },
         expressionAttributeValues: { ':leadWallet': leadWallet },
         limit,
+        ...(exclusiveStartKey ? { exclusiveStartKey } : {}),
       });
-      return ok({ items: result.items });
+      return ok({
+        items: result.items,
+        lastEvaluatedKey: result.lastEvaluatedKey
+          ? Buffer.from(JSON.stringify(result.lastEvaluatedKey)).toString('base64')
+          : undefined,
+        total: result.count,
+      });
     }
 
-    if (!leadWallet) {
-      return badRequest(
-        'Either leadWallet query parameter is required, or use pagination. Full table scan is disabled — specify leadWallet to filter.',
-      );
-    }
-
+    // Browse-all: list every committee, newest first.
     const result = await queryItems<DRepCommitteeItem>(tableNames.drepCommittees, {
-      keyConditionExpression: '#leadWallet = :leadWallet',
-      expressionAttributeNames: { '#leadWallet': 'leadWallet' },
-      expressionAttributeValues: { ':leadWallet': leadWallet },
-      indexName: 'leadWallet-index',
+      indexName: 'SK-createdAt-index',
+      keyConditionExpression: '#sk = :sk',
+      expressionAttributeNames: { '#sk': 'SK' },
+      expressionAttributeValues: { ':sk': 'COMMITTEE' },
       limit,
-      ...(lastKey
-        ? {
-            exclusiveStartKey: JSON.parse(
-              Buffer.from(lastKey, 'base64').toString('utf-8'),
-            ) as Record<string, unknown>,
-          }
-        : {}),
+      scanIndexForward: false,
+      ...(exclusiveStartKey ? { exclusiveStartKey } : {}),
     });
 
     return ok({
@@ -50,6 +60,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
       lastEvaluatedKey: result.lastEvaluatedKey
         ? Buffer.from(JSON.stringify(result.lastEvaluatedKey)).toString('base64')
         : undefined,
+      total: result.count,
     });
   } catch (err) {
     console.error('drep/list handler error:', err);
