@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useAuthStore } from '@/stores/authStore';
+import { useIsAuthenticated } from '@/stores/authStore';
 import { useCreateComment } from '@/hooks/useComments';
 import { useUiStore } from '@/stores/uiStore';
 import { cn } from '@/lib/utils';
@@ -12,7 +12,7 @@ interface CommentFormProps {
 export function CommentForm({ actionId, className }: CommentFormProps): React.ReactElement {
   const [body, setBody] = useState('');
   const [isPublic, setIsPublic] = useState(true);
-  const { isAuthenticated } = useAuthStore();
+  const isAuthenticated = useIsAuthenticated();
   const createComment = useCreateComment();
   const { addToast } = useUiStore();
 

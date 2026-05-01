@@ -1,11 +1,11 @@
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { get, post } from '@/lib/api';
-import { useAuthStore } from '@/stores/authStore';
+import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
 import { queryClient } from '@/lib/api';
 import type { UserProfile } from '@/types';
 
 export function useMe() {
-  const { isAuthenticated } = useAuthStore();
+  const isAuthenticated = useIsAuthenticated();
 
   return useQuery({
     queryKey: ['auth', 'me'],
