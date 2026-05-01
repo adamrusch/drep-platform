@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import wasm from 'vite-plugin-wasm';
 import topLevelAwait from 'vite-plugin-top-level-await';
+import { nodePolyfills } from 'vite-plugin-node-polyfills';
 import path from 'path';
 
 const fixLibsodium = {
@@ -17,7 +18,19 @@ const fixLibsodium = {
 };
 
 export default defineConfig({
-  plugins: [fixLibsodium, wasm(), topLevelAwait(), react()],
+  plugins: [
+    fixLibsodium,
+    // MeshSDK + libsodium-wrappers-sumo expect Node globals (process, Buffer,
+    // stream, etc.) at runtime. Without this plugin the bundle throws
+    // `ReferenceError: process is not defined` and the SPA never mounts.
+    nodePolyfills({
+      globals: { process: true, Buffer: true, global: true },
+      protocolImports: true,
+    }),
+    wasm(),
+    topLevelAwait(),
+    react(),
+  ],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
@@ -38,7 +51,10 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    sourcemap: true,
+    // Sourcemaps disabled in prod — the polyfilled MeshSDK bundle exceeds
+    // Node's default heap when generating maps. Enable locally with
+    // `vite build --sourcemap` if you need them for debugging.
+    sourcemap: false,
     rollupOptions: {
       output: {
         manualChunks: {
