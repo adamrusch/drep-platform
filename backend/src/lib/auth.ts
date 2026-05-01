@@ -337,8 +337,18 @@ export function extractTokenFromCookie(cookieHeader: string | undefined): string
   return match ? (match[1] ?? null) : null;
 }
 
+/**
+ * Build the Set-Cookie header for a successful auth.
+ *
+ * If COOKIE_DOMAIN is set (e.g. ".drep.tools"), the cookie is scoped to the
+ * registrable domain so the SPA at https://drep.tools can authenticate
+ * against the API at https://api.drep.tools. Without a domain, the cookie
+ * is bound to the exact response origin, which still works for same-site
+ * XHR but won't survive subdomain redirects.
+ */
 export function buildSetCookieHeader(token: string, sessionType: SessionType): string {
   const maxAge = SESSION_DURATIONS[sessionType];
+  const cookieDomain = process.env['COOKIE_DOMAIN'];
   return [
     `access_token=${token}`,
     `Max-Age=${maxAge}`,
@@ -346,11 +356,15 @@ export function buildSetCookieHeader(token: string, sessionType: SessionType): s
     'Secure',
     'SameSite=Strict',
     'Path=/',
+    ...(cookieDomain ? [`Domain=${cookieDomain}`] : []),
   ].join('; ');
 }
 
 export function buildClearCookieHeader(): string {
-  return 'access_token=; Max-Age=0; HttpOnly; Secure; SameSite=Strict; Path=/';
+  const cookieDomain = process.env['COOKIE_DOMAIN'];
+  const parts = ['access_token=', 'Max-Age=0', 'HttpOnly', 'Secure', 'SameSite=Strict', 'Path=/'];
+  if (cookieDomain) parts.push(`Domain=${cookieDomain}`);
+  return parts.join('; ');
 }
 
 // ---- Mutation nonce ----

@@ -2,10 +2,23 @@ import * as cdk from 'aws-cdk-lib';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as cloudfrontOrigins from 'aws-cdk-lib/aws-cloudfront-origins';
+import * as acm from 'aws-cdk-lib/aws-certificatemanager';
+import * as route53 from 'aws-cdk-lib/aws-route53';
+import * as route53Targets from 'aws-cdk-lib/aws-route53-targets';
 import { Construct } from 'constructs';
+
+export interface CustomDomainConfig {
+  hostedZoneId: string;
+  zoneName: string;
+  certificateArn: string;
+  apexDomain: string;
+  wwwDomain: string;
+  apiDomain: string;
+}
 
 export interface FrontendStackProps extends cdk.StackProps {
   stage: string;
+  customDomain?: CustomDomainConfig;
 }
 
 export class FrontendStack extends cdk.Stack {
@@ -16,7 +29,7 @@ export class FrontendStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: FrontendStackProps) {
     super(scope, id, props);
 
-    const { stage } = props;
+    const { stage, customDomain } = props;
 
     // ---- S3 bucket (no public access — served exclusively via CloudFront OAC) ----
     this.bucket = new s3.Bucket(this, 'FrontendBucket', {
@@ -34,10 +47,25 @@ export class FrontendStack extends cdk.Stack {
       description: `OAC for drep-platform ${stage} frontend`,
     });
 
+    // ---- Custom domain (optional) ----
+    let viewerCertificate: acm.ICertificate | undefined;
+    let domainNames: string[] | undefined;
+    if (customDomain) {
+      viewerCertificate = acm.Certificate.fromCertificateArn(
+        this,
+        'FrontendCert',
+        customDomain.certificateArn,
+      );
+      domainNames = [customDomain.apexDomain, customDomain.wwwDomain];
+    }
+
     // ---- CloudFront distribution ----
     this.distribution = new cloudfront.Distribution(this, 'FrontendDistribution', {
       comment: `drep-platform ${stage} frontend`,
       defaultRootObject: 'index.html',
+      ...(domainNames && viewerCertificate
+        ? { domainNames, certificate: viewerCertificate }
+        : {}),
       defaultBehavior: {
         origin: cloudfrontOrigins.S3BucketOrigin.withOriginAccessControl(this.bucket, {
           originAccessControl: oac,
@@ -68,6 +96,38 @@ export class FrontendStack extends cdk.Stack {
 
     this.distributionUrl = `https://${this.distribution.distributionDomainName}`;
 
+    // ---- Route 53 alias records ----
+    if (customDomain) {
+      const zone = route53.HostedZone.fromHostedZoneAttributes(this, 'FrontendZone', {
+        hostedZoneId: customDomain.hostedZoneId,
+        zoneName: customDomain.zoneName,
+      });
+      const target = route53.RecordTarget.fromAlias(
+        new route53Targets.CloudFrontTarget(this.distribution),
+      );
+
+      new route53.ARecord(this, 'ApexAliasA', {
+        zone,
+        recordName: customDomain.apexDomain,
+        target,
+      });
+      new route53.AaaaRecord(this, 'ApexAliasAAAA', {
+        zone,
+        recordName: customDomain.apexDomain,
+        target,
+      });
+      new route53.ARecord(this, 'WwwAliasA', {
+        zone,
+        recordName: customDomain.wwwDomain,
+        target,
+      });
+      new route53.AaaaRecord(this, 'WwwAliasAAAA', {
+        zone,
+        recordName: customDomain.wwwDomain,
+        target,
+      });
+    }
+
     new cdk.CfnOutput(this, 'FrontendBucketName', {
       value: this.bucket.bucketName,
       exportName: `${stage}-FrontendBucketName`,
@@ -82,5 +142,12 @@ export class FrontendStack extends cdk.Stack {
       value: this.distribution.distributionId,
       exportName: `${stage}-DistributionId`,
     });
+
+    if (customDomain) {
+      new cdk.CfnOutput(this, 'PrimaryUrl', {
+        value: `https://${customDomain.apexDomain}`,
+        exportName: `${stage}-PrimaryUrl`,
+      });
+    }
   }
 }

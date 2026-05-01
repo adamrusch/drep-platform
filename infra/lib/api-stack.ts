@@ -6,21 +6,24 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as acm from 'aws-cdk-lib/aws-certificatemanager';
+import * as route53 from 'aws-cdk-lib/aws-route53';
+import * as route53Targets from 'aws-cdk-lib/aws-route53-targets';
 import { Construct } from 'constructs';
 import * as path from 'path';
 import type { DatabaseStack } from './database-stack';
+import type { CustomDomainConfig } from './frontend-stack';
 
 export interface ApiStackProps extends cdk.StackProps {
   stage: string;
   databaseStack: DatabaseStack;
+  customDomain?: CustomDomainConfig;
 }
 
-const ALLOWED_ORIGINS = [
+const FALLBACK_ALLOWED_ORIGINS = [
   'https://dbq4k0wz4ik0v.cloudfront.net',
   'http://localhost:5173',
 ];
-
-const PRIMARY_CORS_ORIGIN = 'https://dbq4k0wz4ik0v.cloudfront.net';
 
 export class ApiStack extends cdk.Stack {
   public readonly apiUrl: string;
@@ -28,8 +31,23 @@ export class ApiStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: ApiStackProps) {
     super(scope, id, props);
 
-    const { stage, databaseStack } = props;
+    const { stage, databaseStack, customDomain } = props;
     const backendDir = path.join(__dirname, '../../backend');
+
+    // Compute the CORS allow-list. When a custom domain is configured the
+    // browser will load the SPA from https://drep.tools / https://www.drep.tools,
+    // so those origins must be allowlisted in addition to the CloudFront
+    // default domain (kept for fallback / debugging).
+    const allowedOrigins = customDomain
+      ? [
+          `https://${customDomain.apexDomain}`,
+          `https://${customDomain.wwwDomain}`,
+          ...FALLBACK_ALLOWED_ORIGINS,
+        ]
+      : FALLBACK_ALLOWED_ORIGINS;
+    const primaryCorsOrigin = customDomain
+      ? `https://${customDomain.apexDomain}`
+      : FALLBACK_ALLOWED_ORIGINS[0];
 
     // ---- Secrets ----
     const jwtSecret = secretsmanager.Secret.fromSecretNameV2(
@@ -55,7 +73,9 @@ export class ApiStack extends cdk.Stack {
       SES_REGION: 'us-east-1',
       JWT_SECRET_NAME: `drep-platform/${stage}/jwt-secret`,
       BLOCKFROST_SECRET_NAME: `drep-platform/${stage}/blockfrost-api-key`,
-      CORS_ORIGIN: PRIMARY_CORS_ORIGIN,
+      CORS_ORIGIN: primaryCorsOrigin,
+      CORS_ALLOWED_ORIGINS: allowedOrigins.join(','),
+      ...(customDomain ? { COOKIE_DOMAIN: `.${customDomain.zoneName}` } : {}),
     };
 
     // ---- Shared Lambda execution role ----
@@ -163,7 +183,7 @@ export class ApiStack extends cdk.Stack {
       apiName: `drep-platform-${stage}`,
       description: 'DRep Coordination Platform API',
       corsPreflight: {
-        allowOrigins: ALLOWED_ORIGINS,
+        allowOrigins: allowedOrigins,
         allowMethods: [
           apigwv2.CorsHttpMethod.GET,
           apigwv2.CorsHttpMethod.POST,
@@ -179,7 +199,7 @@ export class ApiStack extends cdk.Stack {
       createDefaultStage: false,
     });
 
-    new apigwv2.HttpStage(this, 'DefaultStage', {
+    const defaultStage = new apigwv2.HttpStage(this, 'DefaultStage', {
       httpApi: api,
       stageName: '$default',
       autoDeploy: true,
@@ -316,5 +336,55 @@ export class ApiStack extends cdk.Stack {
       value: api.apiEndpoint,
       exportName: `${stage}-ApiUrl`,
     });
+
+    // ---- Custom domain: api.drep.tools ----
+    if (customDomain) {
+      const apiCert = acm.Certificate.fromCertificateArn(
+        this,
+        'ApiCert',
+        customDomain.certificateArn,
+      );
+
+      const apiCustomDomain = new apigwv2.DomainName(this, 'ApiDomainName', {
+        domainName: customDomain.apiDomain,
+        certificate: apiCert,
+        endpointType: apigwv2.EndpointType.REGIONAL,
+        securityPolicy: apigwv2.SecurityPolicy.TLS_1_2,
+      });
+
+      // Map the $default stage to the custom domain.
+      new apigwv2.ApiMapping(this, 'ApiMapping', {
+        api,
+        domainName: apiCustomDomain,
+        stage: defaultStage,
+      });
+
+      // Route 53 alias for api.drep.tools → API Gateway regional endpoint.
+      const zone = route53.HostedZone.fromHostedZoneAttributes(this, 'ApiZone', {
+        hostedZoneId: customDomain.hostedZoneId,
+        zoneName: customDomain.zoneName,
+      });
+      const apiAliasTarget = route53.RecordTarget.fromAlias(
+        new route53Targets.ApiGatewayv2DomainProperties(
+          apiCustomDomain.regionalDomainName,
+          apiCustomDomain.regionalHostedZoneId,
+        ),
+      );
+      new route53.ARecord(this, 'ApiAliasA', {
+        zone,
+        recordName: customDomain.apiDomain,
+        target: apiAliasTarget,
+      });
+      new route53.AaaaRecord(this, 'ApiAliasAAAA', {
+        zone,
+        recordName: customDomain.apiDomain,
+        target: apiAliasTarget,
+      });
+
+      new cdk.CfnOutput(this, 'ApiCustomUrl', {
+        value: `https://${customDomain.apiDomain}`,
+        exportName: `${stage}-ApiCustomUrl`,
+      });
+    }
   }
 }

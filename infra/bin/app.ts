@@ -15,6 +15,20 @@ const env: cdk.Environment = {
   region: 'us-east-1',
 };
 
+// ---- Custom domain configuration (drep.tools) ----
+// Enabled for all stages currently. Apex + www → frontend; api.drep.tools → API.
+// The hosted zone and ACM certificate are managed manually outside CDK to avoid
+// destruction risk; CDK imports them by ID/ARN.
+const customDomain = {
+  hostedZoneId: 'Z0487212142GV67N7GOFU',
+  zoneName: 'drep.tools',
+  certificateArn:
+    'arn:aws:acm:us-east-1:409410541898:certificate/9b367d8e-f72f-4e69-9f02-0124c70c7149',
+  apexDomain: 'drep.tools',
+  wwwDomain: 'www.drep.tools',
+  apiDomain: 'api.drep.tools',
+};
+
 const databaseStack = new DatabaseStack(app, `DRepPlatform-Database-${stage}`, {
   stage,
   env,
@@ -28,6 +42,7 @@ const databaseStack = new DatabaseStack(app, `DRepPlatform-Database-${stage}`, {
 const apiStack = new ApiStack(app, `DRepPlatform-Api-${stage}`, {
   stage,
   databaseStack,
+  customDomain,
   env,
   description: `DRep Platform API Gateway + Lambda — ${stage}`,
   tags: {
@@ -39,6 +54,7 @@ apiStack.addDependency(databaseStack);
 
 const frontendStack = new FrontendStack(app, `DRepPlatform-Frontend-${stage}`, {
   stage,
+  customDomain,
   env,
   description: `DRep Platform S3 + CloudFront — ${stage}`,
   tags: {
