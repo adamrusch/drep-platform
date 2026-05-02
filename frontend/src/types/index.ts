@@ -72,13 +72,39 @@ export interface GovernanceAction {
 }
 
 /**
- * Aggregated vote counts for a governance action, bucketed by voter role.
+ * One slice of a per-role tally. `count` is the voter headcount; `power`
+ * is the voting power they collectively represent, in lovelace, as a
+ * stringified integer (DRep totals exceed 2^53 so JSON `number` would
+ * lose precision). For the Constitutional Committee `power` mirrors
+ * `count` — CC members vote one-each on mainnet today.
+ */
+export interface VoteSlice {
+  count: number;
+  power: string;
+}
+
+/**
+ * Per-role tally with explicit `notVoted` and `totalActive` slices.
+ * `totalActive` is the global active voting power for this role at sync
+ * time — it's the denominator Cardano governance thresholds evaluate
+ * against, distinct from total-cast-votes.
+ */
+export interface VoteRoleTally {
+  yes: VoteSlice;
+  no: VoteSlice;
+  abstain: VoteSlice;
+  notVoted: VoteSlice;
+  totalActive: VoteSlice;
+}
+
+/**
+ * Aggregated votes for a governance action, bucketed by voter role.
  * `cc` = constitutional committee.
  */
 export interface VoteTally {
-  drep: { yes: number; no: number; abstain: number };
-  spo: { yes: number; no: number; abstain: number };
-  cc: { yes: number; no: number; abstain: number };
+  drep: VoteRoleTally;
+  spo: VoteRoleTally;
+  cc: VoteRoleTally;
 }
 
 export interface EpochInfo {

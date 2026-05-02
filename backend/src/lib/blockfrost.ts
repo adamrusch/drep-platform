@@ -288,44 +288,19 @@ export interface BlockfrostProposalVote {
 const VOTE_MAX_PAGES = 5;
 const VOTE_PAGE_SIZE = 100;
 
-/** Empty/zeroed tally — used as the starting accumulator and as a fallback
- *  when fetching votes fails. */
-function emptyTally(): VoteTally {
-  return {
-    drep: { yes: 0, no: 0, abstain: 0 },
-    spo: { yes: 0, no: 0, abstain: 0 },
-    cc: { yes: 0, no: 0, abstain: 0 },
-  };
-}
-
-/** Bucket a list of raw votes into a VoteTally. */
-export function tallyVotes(votes: readonly BlockfrostProposalVote[]): VoteTally {
-  const tally = emptyTally();
-  for (const v of votes) {
-    const bucket =
-      v.voter_role === 'drep'
-        ? tally.drep
-        : v.voter_role === 'spo'
-          ? tally.spo
-          : tally.cc;
-    if (v.vote === 'yes') bucket.yes += 1;
-    else if (v.vote === 'no') bucket.no += 1;
-    else if (v.vote === 'abstain') bucket.abstain += 1;
-  }
-  return tally;
-}
-
 /**
- * Paginated fetch of all votes for a proposal, bucketed into a VoteTally.
- * Bounded by `VOTE_MAX_PAGES` so a single high-vote proposal cannot exhaust
- * the Blockfrost rate budget. Returns null if the votes endpoint 404s
- * (some governance types — e.g. info actions — may have no vote endpoint
- * exposed yet on certain Blockfrost stages).
+ * Paginated fetch of all raw votes for a proposal. Bounded by
+ * `VOTE_MAX_PAGES` so a single high-vote proposal cannot exhaust the
+ * Blockfrost rate budget. Returns null if the votes endpoint 404s (some
+ * governance types — e.g. info actions — may have no vote endpoint exposed
+ * yet on certain Blockfrost stages). Tallying (with voting-power lookups
+ * and `notVoted` computation) is done by `tallyVotesWithPower` in
+ * `voteTally.ts`.
  */
 export async function getProposalVotes(
   txHash: string,
   certIndex: number,
-): Promise<VoteTally | null> {
+): Promise<BlockfrostProposalVote[] | null> {
   const client = await getClient();
   const acc: BlockfrostProposalVote[] = [];
   for (let page = 1; page <= VOTE_MAX_PAGES; page++) {
@@ -346,7 +321,7 @@ export async function getProposalVotes(
     acc.push(...pageVotes);
     if (pageVotes.length < VOTE_PAGE_SIZE) break;
   }
-  return tallyVotes(acc);
+  return acc;
 }
 
 // ---- Anchor fetching & verification ----

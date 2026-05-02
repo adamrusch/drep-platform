@@ -81,15 +81,46 @@ export interface GovernanceAction {
 }
 
 /**
- * Aggregated vote counts for a governance action, bucketed by voter role.
- * Each bucket tracks the count of yes/no/abstain votes from that role.
- *
- * `cc` = constitutional committee. `drep` and `spo` are self-explanatory.
+ * One slice of a per-role tally — `count` is the headcount of voters in
+ * this slice; `power` is the voting power they collectively represent,
+ * in lovelace. `power` is a stringified integer because total active DRep
+ * power is on the order of 30B+ ADA = 3×10^16 lovelace, well past 2^53;
+ * keeping it as a string lets it round-trip through DynamoDB and JSON
+ * without precision loss. For Constitutional Committee voters there is
+ * no per-voter weighting on mainnet today, so `power` mirrors `count`
+ * (1 lovelace per member, conceptually).
+ */
+export interface VoteSlice {
+  count: number;
+  power: string;
+}
+
+/**
+ * Per-role tally with an explicit `notVoted` slice (computed from the
+ * role's `totalActive` minus the cast-vote slices). `totalActive` carries
+ * the global active voting power for the role at sync time, which is the
+ * denominator the user actually cares about — Cardano governance
+ * thresholds (e.g. ratification at 51% of active stake) are evaluated
+ * against TOTAL active stake, not just stake-that-voted.
+ */
+export interface VoteRoleTally {
+  yes: VoteSlice;
+  no: VoteSlice;
+  abstain: VoteSlice;
+  notVoted: VoteSlice;
+  totalActive: VoteSlice;
+}
+
+/**
+ * Aggregated votes for a governance action, bucketed by voter role.
+ * `cc` = constitutional committee. Each role carries its own
+ * yes/no/abstain/notVoted slices and the total active voting power
+ * available to that role at sync time.
  */
 export interface VoteTally {
-  drep: { yes: number; no: number; abstain: number };
-  spo: { yes: number; no: number; abstain: number };
-  cc: { yes: number; no: number; abstain: number };
+  drep: VoteRoleTally;
+  spo: VoteRoleTally;
+  cc: VoteRoleTally;
 }
 
 export interface GovernanceReference {
