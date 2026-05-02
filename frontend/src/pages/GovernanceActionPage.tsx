@@ -1,6 +1,6 @@
 import React from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { ChevronLeft, Lock, Share2, Vote } from 'lucide-react';
+import { ChevronLeft, ExternalLink, Lock, Share2, Vote } from 'lucide-react';
 import * as Tabs from '@radix-ui/react-tabs';
 import { useGovernanceAction } from '@/hooks/useGovernanceActions';
 import { useComments } from '@/hooks/useComments';
@@ -15,14 +15,34 @@ import { ShareModal } from '@/components/governance/ShareModal';
 import { ProposalRail } from '@/components/rails/ProposalRail';
 import { PageWithRail } from '@/components/Layout';
 import { useAuthStore } from '@/stores/authStore';
+import { useUiStore } from '@/stores/uiStore';
 import { cn, epochsToDate, formatRelativeTime } from '@/lib/utils';
 import type { GovernanceAction } from '@/types';
 
-function displayTitle(action: GovernanceAction): string {
-  if (!action.title || action.title === action.actionId) {
-    return 'Untitled governance action';
+/** Header title slot. The page also renders a fallback (synthesized
+ *  summary or italic placeholder) when this returns null.
+ *
+ *  Until the backend re-enriches (gated on Blockfrost daily quota), some
+ *  rows still carry a legacy synthetic `title` matching the on-chain
+ *  summary or the bare actionId. Treat those as "no anchor" so the UI
+ *  reflects the intended Title / Type / Hash / Metadata separation in
+ *  both the new and old data shapes. */
+function displayTitle(action: GovernanceAction): string | null {
+  if (typeof action.title !== 'string' || action.title.length === 0) return null;
+  if (!action.anchorUrl) {
+    if (action.title === action.actionId) return null;
+    if (action.summary && action.title === action.summary) return null;
   }
   return action.title;
+}
+
+/** Build adastat / cardanoscan URLs. Percent-encode the `#` separator. */
+function explorerUrls(actionId: string): { adastat: string; cardanoscan: string } {
+  const encoded = actionId.replace('#', '%23');
+  return {
+    adastat: `https://adastat.net/governances/${encoded}`,
+    cardanoscan: `https://cardanoscan.io/governanceAction/${encoded}`,
+  };
 }
 
 function isSafeReferenceUri(uri: string): boolean {
@@ -95,12 +115,28 @@ export function GovernanceActionPage(): React.ReactElement {
   }
 
   const title = displayTitle(action);
+  // Share / breadcrumb fallback. If there's no anchor title, prefer the
+  // synthesized summary; if even that's missing, fall back to a generic
+  // label so we never blast the raw 64-char hash into a share dialog.
+  const shareTitle =
+    title ??
+    (action.summary && action.summary.length > 0 ? action.summary : 'Governance action');
   const hasAnchorIndicator = typeof action.anchorVerified === 'boolean';
   const commentCount = commentsData?.items.length ?? 0;
   const proposalUrl =
     typeof window !== 'undefined'
       ? `${window.location.origin}/governance/${encodeURIComponent(action.actionId)}`
       : `https://drep.tools/governance/${encodeURIComponent(action.actionId)}`;
+  const explorers = explorerUrls(action.actionId);
+  const addToast = useUiStore((s) => s.addToast);
+  const handleCopyHash = async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(action.actionId);
+      addToast({ title: 'Hash copied', variant: 'success' });
+    } catch {
+      addToast({ title: 'Copy failed', variant: 'error' });
+    }
+  };
 
   const center = (
     <>
@@ -114,7 +150,7 @@ export function GovernanceActionPage(): React.ReactElement {
           <span>Governance</span>
         </Link>
         <span className="crumbs__sep">/</span>
-        <span className="text-[var(--text-primary)] truncate">{title}</span>
+        <span className="text-[var(--text-primary)] truncate">{shareTitle}</span>
       </nav>
 
       {/* Header */}
@@ -133,9 +169,21 @@ export function GovernanceActionPage(): React.ReactElement {
             <StatusPill status="warning" label="Anchor mismatch" />
           ) : null}
           <span className="ml-auto flex items-center gap-1.5">
+            {action.anchorUrl && (
+              <a
+                href={action.anchorUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-[12px] text-[var(--text-tertiary)] hover:text-[var(--brand-primary)] hover:underline"
+                title={action.anchorUrl}
+              >
+                Metadata
+                <ExternalLink size={12} strokeWidth={2} aria-hidden="true" />
+              </a>
+            )}
             {canVote && action.status === 'active' && (
               <CastVoteModal
-                actionTitle={title}
+                actionTitle={shareTitle}
                 trigger={
                   <Button variant="primary" size="sm">
                     <Vote size={14} strokeWidth={2} />
@@ -146,7 +194,7 @@ export function GovernanceActionPage(): React.ReactElement {
             )}
             <ShareModal
               url={proposalUrl}
-              title={title}
+              title={shareTitle}
               trigger={
                 <Button
                   variant="ghost"
@@ -160,17 +208,55 @@ export function GovernanceActionPage(): React.ReactElement {
             />
           </span>
         </div>
-        <h1 className="text-[26px] font-bold leading-tight tracking-tight text-[var(--text-primary)]">
-          {title}
-        </h1>
+        {/* Title slot: anchor title in bold; italic muted placeholder when
+            absent. The synthesized on-chain summary lives below as a
+            subtitle in either case. */}
+        {title ? (
+          <h1 className="text-[26px] font-bold leading-tight tracking-tight text-[var(--text-primary)]">
+            {title}
+          </h1>
+        ) : (
+          <h1 className="text-[20px] italic font-medium leading-tight text-[var(--text-tertiary)]">
+            (No off-chain metadata)
+          </h1>
+        )}
         {action.summary && action.summary.length > 0 && (
           <p className="text-sm text-[var(--text-secondary)] leading-relaxed">
             {action.summary}
           </p>
         )}
-        <code className="text-[11px] font-mono text-[var(--text-muted)] break-all block">
-          {action.actionId}
-        </code>
+        <div className="flex items-center gap-3 flex-wrap">
+          <button
+            type="button"
+            onClick={() => void handleCopyHash()}
+            title={`Click to copy: ${action.actionId}`}
+            className={cn(
+              'text-[11px] font-mono text-[var(--text-muted)] break-all',
+              'hover:text-[var(--brand-primary)] text-left',
+              'rounded-token-sm focus-visible:outline-none focus-visible:shadow-token-focus',
+            )}
+          >
+            {action.actionId}
+          </button>
+          <a
+            href={explorers.adastat}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 text-[11.5px] text-[var(--text-tertiary)] hover:text-[var(--brand-primary)] hover:underline"
+          >
+            adastat
+            <ExternalLink size={11} strokeWidth={2} aria-hidden="true" />
+          </a>
+          <a
+            href={explorers.cardanoscan}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 text-[11.5px] text-[var(--text-tertiary)] hover:text-[var(--brand-primary)] hover:underline"
+          >
+            cardanoscan
+            <ExternalLink size={11} strokeWidth={2} aria-hidden="true" />
+          </a>
+        </div>
       </div>
 
       {/* Meta strip */}

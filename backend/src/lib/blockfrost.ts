@@ -554,8 +554,12 @@ export function mapBlockfrostProposalToGovernanceAction(
   const cip108 = parseCip108Body(ctx.anchor?.json ?? null);
   const onchain = summarizeGovernanceDescription(actionType, raw.governance_description);
 
-  // Title precedence: anchor title → on-chain summary → action ID
-  const title = cip108.title ?? (onchain.summary || actionId);
+  // Title comes ONLY from the off-chain CIP-108 anchor body. When there is
+  // no anchor (or no title in it) we leave `title` undefined — the synthesized
+  // on-chain `summary` is a separate field and the UI surfaces it as a
+  // subtitle. Adastat-style: Title / Type / Hash / Metadata are independent
+  // slots; we no longer collapse them into one synthetic title.
+  const title = cip108.title;
   // Description precedence: anchor abstract → anchor motivation → on-chain summary
   const description =
     cip108.abstract ?? cip108.motivation ?? cip108.rationale ?? onchain.summary ?? '';

@@ -122,7 +122,7 @@ export function ProposalRail({ action }: ProposalRailProps): React.ReactElement 
                   to={`/governance/${encodeURIComponent(r.actionId)}`}
                   className="block text-[13px] text-[var(--text-primary)] hover:text-[var(--brand-primary)] hover:underline truncate"
                 >
-                  {r.title || 'Untitled action'}
+                  {r.title || r.summary || 'Untitled action'}
                 </Link>
                 <div className="text-[11px] text-[var(--text-tertiary)]">
                   Epoch {r.epochDeadline}

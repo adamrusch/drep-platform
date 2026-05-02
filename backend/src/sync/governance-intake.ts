@@ -46,8 +46,13 @@ const ITEM_CONCURRENCY = 4;
  * v2 → v3: cold path now fetches and stores `votes` (DRep / SPO / CC tally)
  * via `getProposalVotes`. Hot path also refreshes votes — they mutate as
  * voting progresses, so a 24h enrichment-fresh skip would freeze tallies.
+ * v3 → v4: `title` is no longer synthesized from the on-chain summary
+ * when the anchor is absent — it now reflects ONLY the CIP-108 anchor
+ * body title (or undefined). The frontend surfaces the synthesized
+ * `summary` as a subtitle. Bumping the version forces all rows to
+ * re-enrich so stale "Withdraw …" titles get cleared to undefined.
  */
-const ENRICHMENT_VERSION = 3;
+const ENRICHMENT_VERSION = 4;
 
 function isEnrichmentFresh(existing: GovernanceActionItem | undefined, now: number): boolean {
   if (!existing) return false;
