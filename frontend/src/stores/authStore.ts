@@ -14,6 +14,13 @@ import type { UserRole, SessionType, UserProfile } from '@/types';
  */
 interface AuthStore {
   walletAddress: string | null;
+  /**
+   * Name of the CIP-30 connector last used (e.g. "nami", "eternl").
+   * We need this to re-enable the wallet later for mutation-nonce signing —
+   * the SPA does NOT keep the API instance around (it's per-page) so any
+   * subsequent signature requires another `cardano[walletName].enable()`.
+   */
+  walletName: string | null;
   roles: UserRole[];
   drepId: string | null;
   sessionType: SessionType | null;
@@ -22,6 +29,7 @@ interface AuthStore {
 
   setAuth: (params: {
     walletAddress: string;
+    walletName?: string;
     roles: UserRole[];
     sessionType: SessionType;
     expiresAt: string;
@@ -36,20 +44,24 @@ export const useAuthStore = create<AuthStore>()(
   persist(
     (set) => ({
       walletAddress: null,
+      walletName: null,
       roles: [],
       drepId: null,
       sessionType: null,
       expiresAt: null,
       profile: null,
 
-      setAuth: ({ walletAddress, roles, sessionType, expiresAt, drepId }) => {
-        set({
+      setAuth: ({ walletAddress, walletName, roles, sessionType, expiresAt, drepId }) => {
+        set((state) => ({
           walletAddress,
+          // Preserve walletName if a fresh setAuth doesn't pass one (e.g. session
+          // refresh that doesn't re-prompt the wallet). Otherwise update.
+          walletName: walletName ?? state.walletName,
           roles,
           sessionType,
           expiresAt,
           drepId: drepId ?? null,
-        });
+        }));
       },
 
       setProfile: (profile: UserProfile) => {
@@ -59,6 +71,7 @@ export const useAuthStore = create<AuthStore>()(
       clearAuth: () => {
         set({
           walletAddress: null,
+          walletName: null,
           roles: [],
           drepId: null,
           sessionType: null,
@@ -76,6 +89,7 @@ export const useAuthStore = create<AuthStore>()(
       storage: createJSONStorage(() => sessionStorage),
       partialize: (state) => ({
         walletAddress: state.walletAddress,
+        walletName: state.walletName,
         roles: state.roles,
         drepId: state.drepId,
         sessionType: state.sessionType,
