@@ -18,6 +18,11 @@ import {
   findByOnChainTxHash as findPillarByTxHash,
   type ProposalPillarEntry,
 } from '../lib/proposalPillar';
+import {
+  isBlockfrostCircuitOpen,
+  openBlockfrostCircuit,
+  isBlockfrostQuotaError,
+} from '../lib/circuitBreaker';
 import type {
   GovernanceActionItem,
   GovernanceMetadataSource,
@@ -83,7 +88,33 @@ function isEnrichmentFresh(existing: GovernanceActionItem | undefined, now: numb
 export async function runGovernanceIntake(): Promise<IntakeResult> {
   const result: IntakeResult = { synced: 0, skipped: 0, errors: 0 };
 
-  const epochInfo = await getLatestEpoch();
+  // Circuit breaker: if Blockfrost rate-limited us recently, skip the run
+  // entirely. Hammering Blockfrost during a quota outage adds rejected calls
+  // to the rolling window, preventing recovery. Marker auto-expires via
+  // DynamoDB TTL, so the next sync after the window will probe fresh.
+  const circuit = await isBlockfrostCircuitOpen();
+  if (circuit.open) {
+    const minsLeft = Math.ceil(((circuit.expiresAt ?? 0) - Date.now() / 1000) / 60);
+    console.log(
+      `Governance intake skipped: Blockfrost circuit open for ~${minsLeft} more min`,
+    );
+    return result;
+  }
+
+  let epochInfo;
+  try {
+    epochInfo = await getLatestEpoch();
+  } catch (err) {
+    if (isBlockfrostQuotaError(err)) {
+      // Open the circuit and skip the rest of the run. Default 6 hours
+      // gives the rolling window time to clear without being so long that
+      // a transient throttle blocks us all day.
+      await openBlockfrostCircuit();
+      console.warn('Governance intake: opened Blockfrost circuit due to quota error');
+      return result;
+    }
+    throw err;
+  }
   const currentEpoch = epochInfo.epoch;
 
   let page = 1;
