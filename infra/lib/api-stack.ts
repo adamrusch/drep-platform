@@ -170,6 +170,7 @@ export class ApiStack extends cdk.Stack {
       'handlers/clubhouse/createComment.ts',
     );
     const clubhouseDeletePostFn = fn('ClubhouseDeletePostFn', 'handlers/clubhouse/deletePost.ts');
+    const clubhouseVotePollFn = fn('ClubhouseVotePollFn', 'handlers/clubhouse/votePoll.ts');
 
     // ---- Profile handlers ----
     const profileGetFn = fn('ProfileGetFn', 'handlers/profile/get.ts');
@@ -321,6 +322,15 @@ export class ApiStack extends cdk.Stack {
       '/clubhouse/{drepId}/post/{postId}',
       clubhouseDeletePostFn,
       'ClubhouseDeletePost',
+      true,
+    );
+    // Poll vote — JWT-only (no mutation-nonce). Trade-off documented in
+    // handlers/clubhouse/votePoll.ts.
+    addRoute(
+      apigwv2.HttpMethod.POST,
+      '/clubhouse/{drepId}/post/{postId}/vote',
+      clubhouseVotePollFn,
+      'ClubhouseVotePoll',
       true,
     );
 
