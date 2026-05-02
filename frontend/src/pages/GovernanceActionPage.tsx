@@ -1,6 +1,6 @@
 import React from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { ChevronLeft, Lock } from 'lucide-react';
+import { ChevronLeft, Lock, Share2, Vote } from 'lucide-react';
 import * as Tabs from '@radix-ui/react-tabs';
 import { useGovernanceAction } from '@/hooks/useGovernanceActions';
 import { useComments } from '@/hooks/useComments';
@@ -8,7 +8,13 @@ import { CommentList } from '@/components/CommentList';
 import { CommentForm } from '@/components/CommentForm';
 import { SentimentBlock } from '@/components/SentimentBlock';
 import { Card } from '@/components/ui/Card';
+import { Button } from '@/components/ui/Button';
 import { StatusPill } from '@/components/ui/StatusPill';
+import { CastVoteModal } from '@/components/governance/CastVoteModal';
+import { ShareModal } from '@/components/governance/ShareModal';
+import { ProposalRail } from '@/components/rails/ProposalRail';
+import { PageWithRail } from '@/components/Layout';
+import { useAuthStore } from '@/stores/authStore';
 import { cn, epochsToDate, formatRelativeTime } from '@/lib/utils';
 import type { GovernanceAction } from '@/types';
 
@@ -61,6 +67,8 @@ export function GovernanceActionPage(): React.ReactElement {
   const { actionId } = useParams<{ actionId: string }>();
   const { data: action, isLoading, error } = useGovernanceAction(actionId ?? '');
   const { data: commentsData, isLoading: commentsLoading } = useComments(actionId ?? '');
+  const roles = useAuthStore((s) => s.roles);
+  const canVote = roles.includes('lead_drep') || roles.includes('committee_member');
 
   if (isLoading) {
     return (
@@ -89,9 +97,13 @@ export function GovernanceActionPage(): React.ReactElement {
   const title = displayTitle(action);
   const hasAnchorIndicator = typeof action.anchorVerified === 'boolean';
   const commentCount = commentsData?.items.length ?? 0;
+  const proposalUrl =
+    typeof window !== 'undefined'
+      ? `${window.location.origin}/governance/${encodeURIComponent(action.actionId)}`
+      : `https://drep.tools/governance/${encodeURIComponent(action.actionId)}`;
 
-  return (
-    <div className="max-w-3xl mx-auto space-y-6">
+  const center = (
+    <>
       {/* Breadcrumb */}
       <nav className="crumbs">
         <Link
@@ -120,6 +132,33 @@ export function GovernanceActionPage(): React.ReactElement {
           ) : hasAnchorIndicator ? (
             <StatusPill status="warning" label="Anchor mismatch" />
           ) : null}
+          <span className="ml-auto flex items-center gap-1.5">
+            {canVote && action.status === 'active' && (
+              <CastVoteModal
+                actionTitle={title}
+                trigger={
+                  <Button variant="primary" size="sm">
+                    <Vote size={14} strokeWidth={2} />
+                    Cast Vote
+                  </Button>
+                }
+              />
+            )}
+            <ShareModal
+              url={proposalUrl}
+              title={title}
+              trigger={
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Share proposal"
+                  title="Share proposal"
+                >
+                  <Share2 size={16} strokeWidth={1.75} />
+                </Button>
+              }
+            />
+          </span>
         </div>
         <h1 className="text-[26px] font-bold leading-tight tracking-tight text-[var(--text-primary)]">
           {title}
@@ -368,6 +407,8 @@ export function GovernanceActionPage(): React.ReactElement {
           </Card>
         </Tabs.Content>
       </Tabs.Root>
-    </div>
+    </>
   );
+
+  return <PageWithRail rail={<ProposalRail action={action} />}>{center}</PageWithRail>;
 }

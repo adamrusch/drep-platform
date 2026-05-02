@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Home,
@@ -12,6 +12,7 @@ import {
   Moon,
   Search,
   Wallet,
+  Menu,
   type LucideIcon,
 } from 'lucide-react';
 import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
@@ -92,11 +93,19 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
   const walletAddress = useAuthStore((s) => s.walletAddress);
   const profile = useAuthStore((s) => s.profile);
   const isAuthenticated = useIsAuthenticated();
-  useUiStore();
+  const mobileMenuOpen = useUiStore((s) => s.mobileMenuOpen);
+  const toggleMobileMenu = useUiStore((s) => s.toggleMobileMenu);
+  const closeMobileMenu = useUiStore((s) => s.closeMobileMenu);
   const location = useLocation();
   const navigate = useNavigate();
   const theme = useThemeStore((s) => s.theme);
   const toggleTheme = useThemeStore((s) => s.toggle);
+
+  // Auto-close mobile drawer on route change so a tap on a nav item
+  // navigates *and* clears the overlay.
+  useEffect(() => {
+    closeMobileMenu();
+  }, [location.pathname, closeMobileMenu]);
 
   // Show all 7 nav items to everyone — guest visitors can see Dashboard
   // (it redirects to wallet connect under the hood). Hiding nav items
@@ -152,6 +161,15 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
         <div className="topbar__actions">
           <button
             type="button"
+            className="mobile-menu-btn"
+            onClick={toggleMobileMenu}
+            aria-label={mobileMenuOpen ? 'Close menu' : 'Open menu'}
+            aria-expanded={mobileMenuOpen}
+          >
+            <Menu size={18} strokeWidth={1.75} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
             onClick={toggleTheme}
             aria-label={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
             title={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
@@ -192,8 +210,8 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
         </div>
       </header>
 
-      {/* Sidebar */}
-      <aside className="sidebar">
+      {/* Sidebar (becomes a left-slide drawer below the responsive breakpoint) */}
+      <aside className={cn('sidebar', mobileMenuOpen && 'sidebar--open')}>
         <nav className="nav">
           {visibleNav.map((item) => {
             const Icon = item.icon;
@@ -202,6 +220,7 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
               <Link
                 key={item.id}
                 to={item.href}
+                onClick={closeMobileMenu}
                 className={cn('nav__item', isActive && 'nav__item--active')}
               >
                 <Icon size={18} strokeWidth={1.75} aria-hidden="true" />
@@ -234,8 +253,48 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
         </div>
       </aside>
 
-      {/* Main content */}
+      {/* Scrim — blocks interaction with center content while the drawer is open. */}
+      {mobileMenuOpen && (
+        <button
+          type="button"
+          aria-label="Close menu"
+          className="scrim scrim--show"
+          onClick={closeMobileMenu}
+        />
+      )}
+
+      {/* Main content — pages may opt into a right rail by wrapping the
+          tree in <PageWithRail rail={...}>. We always render the no-rail
+          shell here; the wrapper takes care of the secondary column when
+          present. */}
       <main className="main main--no-rail">{children}</main>
+    </div>
+  );
+}
+
+interface PageWithRailProps {
+  rail: React.ReactNode;
+  children: React.ReactNode;
+}
+
+/**
+ * Wraps page content with the optional right rail column described in
+ * `styles.css:466–491`. The outer `<main>` in `Layout` always renders as
+ * `main--no-rail` (single column); pages that need a rail compose
+ * `<PageWithRail rail={…}>…</PageWithRail>` and we re-create the
+ * two-column grid locally. This keeps the layout decision per-page
+ * without forcing every page to participate.
+ *
+ * The grid collapses on viewports below 1180px (per the design's
+ * responsive block) so mobile users see content first, then the rail.
+ */
+export function PageWithRail({ rail, children }: PageWithRailProps): React.ReactElement {
+  return (
+    <div className="grid gap-6 lg:grid-cols-[1fr_304px] items-start">
+      <div className="min-w-0 flex flex-col gap-4">{children}</div>
+      <aside className="flex flex-col gap-4 lg:sticky lg:top-[calc(var(--topbar-h)+24px)]">
+        {rail}
+      </aside>
     </div>
   );
 }

@@ -9,6 +9,8 @@ import { GovernanceActionCard } from '@/components/GovernanceActionCard';
 import { HeroBand } from '@/components/HeroBand';
 import { StatTile } from '@/components/ui/StatTile';
 import { Button } from '@/components/ui/Button';
+import { DashboardRail } from '@/components/rails/DashboardRail';
+import { PageWithRail } from '@/components/Layout';
 import { formatRelativeTime } from '@/lib/utils';
 
 function formatCountdown(seconds: number): string {
@@ -41,8 +43,8 @@ export function DelegatorDashboard(): React.ReactElement {
     .sort()
     .reverse()[0];
 
-  return (
-    <div className="space-y-6">
+  const center = (
+    <>
       <HeroBand
         title={`Welcome${profile?.displayName ? `, ${profile.displayName}` : ' back'}`}
         subtitle="Track active governance, follow your DRep, and weigh in on proposals you care about."
@@ -141,6 +143,8 @@ export function DelegatorDashboard(): React.ReactElement {
           </div>
         )}
       </div>
-    </div>
+    </>
   );
+
+  return <PageWithRail rail={<DashboardRail />}>{center}</PageWithRail>;
 }
