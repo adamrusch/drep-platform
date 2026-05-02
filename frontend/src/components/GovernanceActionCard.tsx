@@ -1,8 +1,16 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import type { GovernanceAction } from '@/types';
+import type { GovernanceAction, VoteTally } from '@/types';
 import { formatRelativeTime, epochsToDate, cn } from '@/lib/utils';
 import { StatusPill } from '@/components/ui/StatusPill';
+import { SentimentBar } from '@/components/ui/SentimentBar';
+
+function tallyTotals(votes: VoteTally): { yes: number; no: number; abstain: number; total: number } {
+  const yes = votes.drep.yes + votes.spo.yes + votes.cc.yes;
+  const no = votes.drep.no + votes.spo.no + votes.cc.no;
+  const abstain = votes.drep.abstain + votes.spo.abstain + votes.cc.abstain;
+  return { yes, no, abstain, total: yes + no + abstain };
+}
 
 interface GovernanceActionCardProps {
   action: GovernanceAction;
@@ -82,10 +90,22 @@ export function GovernanceActionCard({
         </div>
       </div>
 
-      <div className="mt-3 pt-3 border-t border-[var(--border-subtle)] flex items-center justify-between text-[11.5px] text-[var(--text-tertiary)] tabular-nums">
-        <span>Submitted {formatRelativeTime(action.submittedAt)}</span>
-        <span>
-          Deadline: Epoch {action.epochDeadline} ({epochsToDate(action.epochDeadline)})
+      <div className="mt-3 pt-3 border-t border-[var(--border-subtle)] flex items-center justify-between gap-4 text-[11.5px] text-[var(--text-tertiary)] tabular-nums">
+        <span className="flex-shrink-0">Submitted {formatRelativeTime(action.submittedAt)}</span>
+        {action.votes && tallyTotals(action.votes).total > 0 ? (
+          <div className="flex-1 max-w-[180px]">
+            <SentimentBar
+              yes={action.votes.drep.yes + action.votes.spo.yes + action.votes.cc.yes}
+              no={action.votes.drep.no + action.votes.spo.no + action.votes.cc.no}
+              abstain={
+                action.votes.drep.abstain + action.votes.spo.abstain + action.votes.cc.abstain
+              }
+              height={6}
+            />
+          </div>
+        ) : null}
+        <span className="flex-shrink-0">
+          Epoch {action.epochDeadline} ({epochsToDate(action.epochDeadline)})
         </span>
       </div>
     </Link>
