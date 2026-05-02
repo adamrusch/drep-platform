@@ -28,7 +28,10 @@ export type SessionType = 'normal' | 'remember_me';
 export interface GovernanceAction {
   actionId: string;
   actionType: GovernanceActionType;
-  title: string;
+  /** Title comes only from the off-chain CIP-108 anchor body. When the
+   *  anchor is missing or has no title, this is undefined. The frontend
+   *  uses the on-chain `summary` as a subtitle in that case. */
+  title?: string;
   description: string;
   submittedAt: string;
   epochDeadline: number;
@@ -278,7 +281,9 @@ export interface GovernanceActionItem {
   actionId: string;
   SK: 'ACTION';
   actionType: string;
-  title: string;
+  /** Off-chain CIP-108 anchor title, when present. Undefined when the
+   *  proposal has no anchor or the anchor body has no `title` field. */
+  title?: string;
   description: string;
   submittedAt: string;
   epochDeadline: number;
