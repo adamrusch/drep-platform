@@ -1,10 +1,12 @@
 import React from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
+import { TrendingUp } from 'lucide-react';
 import { get } from '@/lib/api';
 import { useClubhousePosts } from '@/hooks/useClubhouse';
 import type { DRepCommittee } from '@/types';
 import { formatRelativeTime } from '@/lib/utils';
+import { Sparkline, seededRandomWalk } from '@/components/ui/Sparkline';
 
 export function DRepPublicProfile(): React.ReactElement {
   const { drepId } = useParams<{ drepId: string }>();
@@ -46,6 +48,28 @@ export function DRepPublicProfile(): React.ReactElement {
           <span>{drep.members.length} member{drep.members.length !== 1 ? 's' : ''}</span>
           <span>Active since {formatRelativeTime(drep.createdAt)}</span>
         </div>
+      </div>
+
+      {/* Delegation trend (sample data — real series lands when stake-history sync is on). */}
+      <div className="rounded-token-xl border border-[var(--border-default)] bg-[var(--bg-canvas)] p-5 shadow-token-sm">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="font-semibold text-[15px] text-[var(--text-primary)] flex items-center gap-2">
+            <TrendingUp size={14} strokeWidth={2} className="text-[var(--brand-primary)]" />
+            Delegation trend
+            <span className="text-[11px] text-[var(--text-tertiary)] font-normal ml-1">
+              · last 14 epochs
+            </span>
+          </h2>
+          <span className="inline-flex items-center text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-token-full bg-[var(--bg-muted)] text-[var(--text-tertiary)]">
+            Sample data
+          </span>
+        </div>
+        <Sparkline
+          points={seededRandomWalk(drepId ?? 'drep-trend', 14, 100)}
+          smooth
+          gradientId={`drep-trend-${drepId ?? 'demo'}`}
+          height={120}
+        />
       </div>
 
       {/* Members */}

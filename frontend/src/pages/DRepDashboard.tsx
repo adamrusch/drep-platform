@@ -8,6 +8,8 @@ import { GovernanceActionCard } from '@/components/GovernanceActionCard';
 import { HeroBand } from '@/components/HeroBand';
 import { StatTile } from '@/components/ui/StatTile';
 import { Button } from '@/components/ui/Button';
+import { DashboardRail } from '@/components/rails/DashboardRail';
+import { PageWithRail } from '@/components/Layout';
 import { formatRelativeTime } from '@/lib/utils';
 
 function formatCountdown(seconds: number): string {
@@ -41,8 +43,8 @@ export function DRepDashboard(): React.ReactElement {
     .sort()
     .reverse()[0];
 
-  return (
-    <div className="space-y-6">
+  const center = (
+    <>
       <HeroBand
         title={`Welcome back${roles.includes('lead_drep') ? ', DRep' : ''}`}
         subtitle="Review active governance, track your committee's positions, and respond to delegators."
@@ -135,6 +137,8 @@ export function DRepDashboard(): React.ReactElement {
           </div>
         )}
       </div>
-    </div>
+    </>
   );
+
+  return <PageWithRail rail={<DashboardRail />}>{center}</PageWithRail>;
 }
