@@ -34,6 +34,29 @@ export interface GovernanceAction {
   ingestedAt?: string;
   lastSyncedAt?: string;
   adminOverrideLabel?: string;
+  // ---- Anchor (CIP-100/108 off-chain metadata) ----
+  anchorUrl?: string;
+  anchorHash?: string;
+  anchorVerified?: boolean;
+  abstract?: string;
+  motivation?: string;
+  rationale?: string;
+  references?: GovernanceReference[];
+  // ---- On-chain summary (built from governance_description) ----
+  summary?: string;
+  details?: GovernanceDetail[];
+  // ---- On-chain misc ----
+  proposerAddress?: string;
+}
+
+export interface GovernanceReference {
+  label: string;
+  uri: string;
+}
+
+export interface GovernanceDetail {
+  label: string;
+  value: string;
 }
 
 export interface DRepCommittee {

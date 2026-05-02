@@ -119,7 +119,8 @@ export class ApiStack extends cdk.Stack {
         // See scheduler-stack.ts for rationale — CSL ships a .wasm file
         // that esbuild can't inline. nodeModules causes npm-install at
         // bundle time so the WASM lands in the Lambda zip intact.
-        nodeModules: ['@emurgo/cardano-serialization-lib-nodejs'],
+        // blake2b dynamically require()s blake2b-wasm; same treatment.
+        nodeModules: ['@emurgo/cardano-serialization-lib-nodejs', 'blake2b'],
         forceDockerBundling: false,
       },
       depsLockFilePath: path.join(backendDir, 'package-lock.json'),

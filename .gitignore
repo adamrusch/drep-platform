@@ -18,6 +18,8 @@ cdk.out/
 *.d.ts
 *.js
 !jest.config.js
+# Source-level type augmentations (hand-written, NOT generated)
+!**/src/types/*.d.ts
 
 # IDE
 .vscode/
