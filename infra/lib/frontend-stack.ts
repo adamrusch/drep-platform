@@ -59,6 +59,74 @@ export class FrontendStack extends cdk.Stack {
       domainNames = [customDomain.apexDomain, customDomain.wwwDomain];
     }
 
+    // ---- Response headers policy (security + CSP) ----
+    // CSP is required to mitigate XSS — the AWS-managed `SECURITY_HEADERS`
+    // policy stamps HSTS / X-Frame / X-Content-Type / Referrer-Policy but
+    // does NOT include a Content-Security-Policy directive. We add one
+    // explicitly here.
+    //
+    // Allowed sources reflect what the SPA actually loads:
+    //   - default 'self' (same-origin assets out of S3 via CloudFront)
+    //   - 'unsafe-inline' on style-src (Tailwind ships utility classes
+    //     fine, but the `style=` props we set per-component need it; can
+    //     be tightened later with hash/nonce)
+    //   - https://fonts.googleapis.com for the Inter <link rel="stylesheet">
+    //   - https://fonts.gstatic.com for the @font-face binary fonts
+    //   - https://api.drep.tools for XHR (api.drep.tools)
+    //   - 'wasm-unsafe-eval' so MeshSDK can compile the CSL .wasm file
+    //   - frame-ancestors 'none' belt-and-suspenders with X-Frame-Options
+    const apiOriginsForCsp = customDomain ? `https://${customDomain.apiDomain}` : '';
+    // NOTE on 'unsafe-eval': MeshSDK + vm-browserify bundle a runtime eval()
+    // call (see vm-browserify/index.js:110 and @meshsdk/react). Removing
+    // 'unsafe-eval' breaks wallet connect immediately. Documented as a
+    // tightening target in QA_FINAL.md once we can shim or vendor those
+    // call sites; until then a CSP with 'unsafe-eval' is *still* much
+    // stronger than the (no-CSP) baseline that shipped before.
+    const cspDirective = [
+      "default-src 'self'",
+      "script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'",
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+      "font-src 'self' https://fonts.gstatic.com data:",
+      "img-src 'self' data: blob: https:",
+      `connect-src 'self' ${apiOriginsForCsp} https://*.blockfrost.io`.trim(),
+      "frame-ancestors 'none'",
+      "base-uri 'self'",
+      "form-action 'self'",
+      "object-src 'none'",
+      "upgrade-insecure-requests",
+    ].join('; ');
+
+    const responseHeadersPolicy = new cloudfront.ResponseHeadersPolicy(
+      this,
+      'FrontendResponseHeadersPolicy',
+      {
+        responseHeadersPolicyName: `drep-platform-${stage}-frontend-headers`,
+        comment: 'Frontend security headers — adds CSP on top of the AWS managed defaults.',
+        securityHeadersBehavior: {
+          contentSecurityPolicy: {
+            contentSecurityPolicy: cspDirective,
+            override: true,
+          },
+          strictTransportSecurity: {
+            accessControlMaxAge: cdk.Duration.days(365),
+            includeSubdomains: true,
+            preload: false,
+            override: true,
+          },
+          contentTypeOptions: { override: true },
+          frameOptions: {
+            frameOption: cloudfront.HeadersFrameOption.DENY,
+            override: true,
+          },
+          referrerPolicy: {
+            referrerPolicy: cloudfront.HeadersReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN,
+            override: true,
+          },
+          xssProtection: { protection: false, override: true },
+        },
+      },
+    );
+
     // ---- CloudFront distribution ----
     this.distribution = new cloudfront.Distribution(this, 'FrontendDistribution', {
       comment: `drep-platform ${stage} frontend`,
@@ -72,7 +140,7 @@ export class FrontendStack extends cdk.Stack {
         }),
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
-        responseHeadersPolicy: cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS,
+        responseHeadersPolicy,
         allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
         compress: true,
       },
