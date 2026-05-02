@@ -43,7 +43,7 @@ export function WalletButton({ className }: WalletButtonProps): React.ReactEleme
         );
       }
 
-      await authenticate(api);
+      await authenticate(api, false, walletName);
       setShowWalletList(false);
       addToast({ title: 'Wallet connected', variant: 'success' });
     } catch (err) {

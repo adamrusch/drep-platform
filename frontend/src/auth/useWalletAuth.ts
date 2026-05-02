@@ -29,7 +29,7 @@ interface WalletApi {
 export interface UseWalletAuthReturn {
   isLoading: boolean;
   error: string | null;
-  authenticate: (walletApi: WalletApi, rememberMe?: boolean) => Promise<void>;
+  authenticate: (walletApi: WalletApi, rememberMe?: boolean, walletName?: string) => Promise<void>;
   logout: () => Promise<void>;
   clearError: () => void;
 }
@@ -41,7 +41,7 @@ export function useWalletAuth(): UseWalletAuthReturn {
   const { setAuth, setProfile, clearAuth } = useAuthStore();
 
   const authenticate = useCallback(
-    async (walletApi: WalletApi, rememberMe = false): Promise<void> => {
+    async (walletApi: WalletApi, rememberMe = false, walletName?: string): Promise<void> => {
       setIsLoading(true);
       setError(null);
 
@@ -76,9 +76,11 @@ export function useWalletAuth(): UseWalletAuthReturn {
           rememberMe,
         });
 
-        // 6. Store auth state
+        // 6. Store auth state — including the CIP-30 wallet name so we can
+        // re-enable for mutation-nonce signing later.
         setAuth({
           walletAddress: authResult.walletAddress,
+          walletName,
           roles: authResult.roles,
           sessionType: authResult.sessionType,
           expiresAt: authResult.expiresAt,
