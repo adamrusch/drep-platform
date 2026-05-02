@@ -3,8 +3,8 @@ import type { APIGatewayProxyResultV2 } from 'aws-lambda';
 // CORS_ORIGIN must be a specific origin (not "*") because we use credentialed
 // requests. The browser CORS spec requires Allow-Credentials: true with an
 // explicit origin. The CDK stack sets CORS_ORIGIN per Lambda; this default
-// matches the deployed CloudFront frontend.
-const DEFAULT_CORS_ORIGIN = 'https://d31k3mmkrkmdvl.cloudfront.net';
+// is only used in local dev / unit tests where the env var is unset.
+const DEFAULT_CORS_ORIGIN = 'https://drep.tools';
 
 export const corsHeaders: Record<string, string> = {
   'Content-Type': 'application/json',
@@ -15,14 +15,23 @@ export const corsHeaders: Record<string, string> = {
   'Vary': 'Origin',
 };
 
-export function ok<T>(data: T, setCookies?: string[]): APIGatewayProxyResultV2 {
+export function ok<T>(
+  data: T,
+  extraHeadersOrCookies?: Record<string, string> | string[],
+  setCookies?: string[],
+): APIGatewayProxyResultV2 {
+  // Back-compat: callers that pass a `string[]` get cookie behaviour;
+  // callers that pass a `Record<string,string>` get extra response headers.
+  const isCookieArray = Array.isArray(extraHeadersOrCookies);
+  const extraHeaders = !isCookieArray && extraHeadersOrCookies ? extraHeadersOrCookies : undefined;
+  const cookies = isCookieArray ? extraHeadersOrCookies : setCookies;
   const response: APIGatewayProxyResultV2 = {
     statusCode: 200,
-    headers: corsHeaders,
+    headers: extraHeaders ? { ...corsHeaders, ...extraHeaders } : corsHeaders,
     body: JSON.stringify({ data }),
   };
-  if (setCookies?.length) {
-    (response as Record<string, unknown>)['cookies'] = setCookies;
+  if (cookies?.length) {
+    (response as Record<string, unknown>)['cookies'] = cookies;
   }
   return response;
 }
