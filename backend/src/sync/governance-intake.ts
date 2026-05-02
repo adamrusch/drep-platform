@@ -4,6 +4,7 @@ import {
   getGovernanceAction,
   getLatestEpoch,
   getProposalAnchor,
+  getProposalVotes,
   getTx,
   resolveAnchor,
   mapBlockfrostProposalToGovernanceAction,
@@ -12,7 +13,7 @@ import {
   type BlockfrostProposal,
 } from '../lib/blockfrost';
 import { getItem, putItem, tableNames } from '../lib/dynamodb';
-import type { GovernanceActionItem } from '../lib/types';
+import type { GovernanceActionItem, VoteTally } from '../lib/types';
 
 export interface IntakeResult {
   synced: number;
@@ -42,8 +43,11 @@ const ITEM_CONCURRENCY = 4;
  *
  * v1 → v2: hot path no longer re-runs the mapper against the listing
  * stub (which was clobbering correct enrichment with empty values).
+ * v2 → v3: cold path now fetches and stores `votes` (DRep / SPO / CC tally)
+ * via `getProposalVotes`. Hot path also refreshes votes — they mutate as
+ * voting progresses, so a 24h enrichment-fresh skip would freeze tallies.
  */
-const ENRICHMENT_VERSION = 2;
+const ENRICHMENT_VERSION = 3;
 
 function isEnrichmentFresh(existing: GovernanceActionItem | undefined, now: number): boolean {
   if (!existing) return false;
@@ -87,28 +91,34 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
         const skipEnrichment = isEnrichmentFresh(existing, nowMs);
 
         // Hot path: enrichment is recent. We still need the full proposal
-        // for status/epochDeadline (those mutate per epoch), but we do NOT
-        // need to re-fetch the tx (block_time is immutable) or anchor
-        // (immutable per-action). Keep all existing enrichment fields and
-        // only refresh what can change.
+        // for status/epochDeadline (those mutate per epoch) AND the vote
+        // tally (votes change as voting progresses). Anchor + tx block_time
+        // are immutable so we keep them. Run the two refreshes in parallel.
         if (skipEnrichment && existing) {
-          const proposalResult = await getGovernanceAction(rawAction.tx_hash, rawAction.cert_index)
-            .then((p) => ({ ok: true as const, value: p }))
-            .catch((err) => {
-              console.warn(`proposal refresh failed for ${actionId}:`, err);
-              return { ok: false as const };
-            });
-          const fullProposal: BlockfrostProposal = proposalResult.ok
-            ? proposalResult.value
-            : rawAction;
+          const [proposalResult, votesResult] = await Promise.allSettled([
+            getGovernanceAction(rawAction.tx_hash, rawAction.cert_index),
+            getProposalVotes(rawAction.tx_hash, rawAction.cert_index),
+          ]);
+          const fullProposal: BlockfrostProposal =
+            proposalResult.status === 'fulfilled' ? proposalResult.value : rawAction;
+          if (proposalResult.status === 'rejected') {
+            console.warn(`proposal refresh failed for ${actionId}:`, proposalResult.reason);
+          }
+          let votes: VoteTally | undefined = existing['votes'] as VoteTally | undefined;
+          if (votesResult.status === 'fulfilled') {
+            votes = votesResult.value ?? votes;
+          } else {
+            console.warn(`votes refresh failed for ${actionId}:`, votesResult.reason);
+          }
           const updated: GovernanceActionItem = {
             ...(existing as GovernanceActionItem),
-            // Refresh only status/deadline — everything else is already correct.
+            // Refresh status/deadline/votes — the only fields that mutate.
             status: mapStatus(fullProposal, currentEpoch),
             epochDeadline:
               typeof fullProposal.expiration === 'number'
                 ? fullProposal.expiration
                 : (existing.epochDeadline as number) ?? 0,
+            votes,
             lastSyncedAt: now,
             enrichmentVersion: ENRICHMENT_VERSION,
           };
@@ -121,14 +131,16 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
         let anchor: AnchorContent | null = null;
         let submittedAt: string | undefined;
         let fullProposal: BlockfrostProposal = rawAction;
+        let votes: VoteTally | undefined;
 
         // The list response omits `governance_description` — we need the
-        // full proposal to render an on-chain summary. Fetch all three in
+        // full proposal to render an on-chain summary. Fetch all four in
         // parallel to keep the per-item latency low.
-        const [proposalResult, txResult, metaResult] = await Promise.allSettled([
+        const [proposalResult, txResult, metaResult, votesResult] = await Promise.allSettled([
           getGovernanceAction(rawAction.tx_hash, rawAction.cert_index),
           getTx(rawAction.tx_hash),
           getProposalAnchor(rawAction.tx_hash, rawAction.cert_index),
+          getProposalVotes(rawAction.tx_hash, rawAction.cert_index),
         ]);
         if (proposalResult.status === 'fulfilled') {
           fullProposal = proposalResult.value;
@@ -149,10 +161,16 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
         } else {
           console.warn(`anchor fetch failed for ${actionId}:`, metaResult.reason);
         }
+        if (votesResult.status === 'fulfilled') {
+          votes = votesResult.value ?? undefined;
+        } else {
+          console.warn(`votes fetch failed for ${actionId}:`, votesResult.reason);
+        }
 
         const mapped = mapBlockfrostProposalToGovernanceAction(fullProposal, currentEpoch, {
           anchor,
           submittedAt,
+          votes,
         });
 
         const item: GovernanceActionItem = {
@@ -186,6 +204,7 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
           summary: mapped.summary,
           details: mapped.details,
           proposerAddress: mapped.proposerAddress,
+          votes: mapped.votes,
           enrichmentVersion: ENRICHMENT_VERSION,
         };
 

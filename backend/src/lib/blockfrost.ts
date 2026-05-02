@@ -6,6 +6,7 @@ import type {
   GovernanceActionType,
   GovernanceActionStatus,
   GovernanceReference,
+  VoteTally,
 } from './types';
 import { summarizeGovernanceDescription } from './governanceSummary';
 
@@ -262,6 +263,84 @@ export async function getLatestEpoch(): Promise<BlockfrostEpoch> {
   return result as unknown as BlockfrostEpoch;
 }
 
+// ---- Proposal vote tally ----
+
+export interface BlockfrostProposalVote {
+  tx_hash: string;
+  cert_index: number;
+  voter_role: 'constitutional_committee' | 'drep' | 'spo';
+  voter: string;
+  vote: 'yes' | 'no' | 'abstain';
+}
+
+/** Maximum number of vote pages we paginate per action. Page size is 100,
+ *  so this caps us at 500 votes per action. Vote-heavy proposals can have
+ *  thousands of votes on-chain — but we only need the bucket aggregate, so
+ *  capping prevents blowing the Blockfrost quota on a single proposal. */
+const VOTE_MAX_PAGES = 5;
+const VOTE_PAGE_SIZE = 100;
+
+/** Empty/zeroed tally — used as the starting accumulator and as a fallback
+ *  when fetching votes fails. */
+function emptyTally(): VoteTally {
+  return {
+    drep: { yes: 0, no: 0, abstain: 0 },
+    spo: { yes: 0, no: 0, abstain: 0 },
+    cc: { yes: 0, no: 0, abstain: 0 },
+  };
+}
+
+/** Bucket a list of raw votes into a VoteTally. */
+export function tallyVotes(votes: readonly BlockfrostProposalVote[]): VoteTally {
+  const tally = emptyTally();
+  for (const v of votes) {
+    const bucket =
+      v.voter_role === 'drep'
+        ? tally.drep
+        : v.voter_role === 'spo'
+          ? tally.spo
+          : tally.cc;
+    if (v.vote === 'yes') bucket.yes += 1;
+    else if (v.vote === 'no') bucket.no += 1;
+    else if (v.vote === 'abstain') bucket.abstain += 1;
+  }
+  return tally;
+}
+
+/**
+ * Paginated fetch of all votes for a proposal, bucketed into a VoteTally.
+ * Bounded by `VOTE_MAX_PAGES` so a single high-vote proposal cannot exhaust
+ * the Blockfrost rate budget. Returns null if the votes endpoint 404s
+ * (some governance types — e.g. info actions — may have no vote endpoint
+ * exposed yet on certain Blockfrost stages).
+ */
+export async function getProposalVotes(
+  txHash: string,
+  certIndex: number,
+): Promise<VoteTally | null> {
+  const client = await getClient();
+  const acc: BlockfrostProposalVote[] = [];
+  for (let page = 1; page <= VOTE_MAX_PAGES; page++) {
+    let pageVotes: BlockfrostProposalVote[];
+    try {
+      const result = await client.governance.proposalVotes(txHash, certIndex, {
+        page,
+        count: VOTE_PAGE_SIZE,
+        order: 'asc',
+      });
+      pageVotes = result as unknown as BlockfrostProposalVote[];
+    } catch (err) {
+      const e = err as { status_code?: number; statusCode?: number };
+      if (e?.status_code === 404 || e?.statusCode === 404) return null;
+      throw err;
+    }
+    if (pageVotes.length === 0) break;
+    acc.push(...pageVotes);
+    if (pageVotes.length < VOTE_PAGE_SIZE) break;
+  }
+  return tallyVotes(acc);
+}
+
 // ---- Anchor fetching & verification ----
 
 const ANCHOR_FETCH_TIMEOUT_MS = 5_000;
@@ -461,6 +540,8 @@ export interface MapperContext {
   anchor?: AnchorContent | null;
   /** Optional tx submission time as ISO8601 (caller fetched the tx). */
   submittedAt?: string;
+  /** Optional vote tally for this proposal (caller fetched proposalVotes). */
+  votes?: VoteTally | null;
 }
 
 export function mapBlockfrostProposalToGovernanceAction(
@@ -501,5 +582,6 @@ export function mapBlockfrostProposalToGovernanceAction(
     summary: onchain.summary || undefined,
     details: onchain.details.length > 0 ? onchain.details : undefined,
     proposerAddress: raw.return_address,
+    votes: ctx.votes ?? undefined,
   };
 }
