@@ -156,7 +156,12 @@ export interface BlockfrostEpoch {
 
 // ---- Map governance_type to our enum ----
 
-function mapActionType(raw: string): GovernanceActionType {
+/**
+ * Normalize the upstream `proposal_type` / `governance_type` string to our
+ * internal enum. Exported so the Koios adapter (which sees Pascal-case
+ * variants like `NewCommittee`) can share the same mapping table.
+ */
+export function mapActionType(raw: string): GovernanceActionType {
   const mapping: Record<string, GovernanceActionType> = {
     // Snake-case (Blockfrost current schema)
     parameter_change: 'ParameterChange',
@@ -167,12 +172,15 @@ function mapActionType(raw: string): GovernanceActionType {
     new_committee: 'UpdateCommittee', // Alternate name in some payloads
     new_constitution: 'NewConstitution',
     info_action: 'InfoAction',
-    // PascalCase (defensive — older Blockfrost docs and some indexers)
+    // PascalCase (Koios + older Blockfrost docs + some indexers)
     ParameterChange: 'ParameterChange',
     HardForkInitiation: 'HardForkInitiation',
     TreasuryWithdrawals: 'TreasuryWithdrawals',
     NoConfidence: 'NoConfidence',
     UpdateCommittee: 'UpdateCommittee',
+    // Koios labels what the ledger now calls "UpdateCommittee" as
+    // "NewCommittee" — same on-chain action, different alias.
+    NewCommittee: 'UpdateCommittee',
     NewConstitution: 'NewConstitution',
     InfoAction: 'InfoAction',
   };
@@ -506,6 +514,46 @@ export interface ParsedCip108 {
   references?: GovernanceReference[];
 }
 
+/**
+ * Per-field cap on body text we store in DynamoDB. Real-world anchors range
+ * from a few KB to a few MB (some embed full HTML/markdown reports inline).
+ * DynamoDB items are capped at 400KB total, so writing an unbounded body
+ * field — especially when there are several of them — will fail with a
+ * `ValidationException: Item size has exceeded the maximum allowed size`.
+ *
+ * 60KB per field gives plenty of room for prose (60K UTF-8 ≈ 30+ pages of
+ * text) while leaving comfortable headroom: 4 fields × 60KB + references
+ * + on-chain summary + envelope ≈ 250KB worst case, well under the limit.
+ *
+ * When a field is truncated we append a marker pointing the reader at the
+ * canonical anchor URL — the full body remains accessible off-chain.
+ */
+const BODY_FIELD_MAX_BYTES = 60_000;
+const TRUNCATION_MARKER = '\n\n…[truncated for storage; full text at the anchor URL]';
+
+function truncateField(s: string | undefined): string | undefined {
+  if (typeof s !== 'string') return undefined;
+  const trimmed = s.trim();
+  if (trimmed.length === 0) return undefined;
+  // Use byte length, not char count: DDB's limit is bytes, and CIP-108 bodies
+  // commonly contain UTF-8 with multi-byte runes (em-dashes, accents, emoji).
+  const bytes = Buffer.byteLength(trimmed, 'utf-8');
+  if (bytes <= BODY_FIELD_MAX_BYTES) return trimmed;
+  // Slice by chars first, then iteratively trim until the byte budget fits.
+  // Char-budget heuristic gets us close on first attempt; we refine after.
+  let charBudget = Math.floor(BODY_FIELD_MAX_BYTES * (trimmed.length / bytes));
+  let candidate = trimmed.slice(0, charBudget);
+  while (Buffer.byteLength(candidate + TRUNCATION_MARKER, 'utf-8') > BODY_FIELD_MAX_BYTES) {
+    charBudget = Math.floor(charBudget * 0.95);
+    candidate = trimmed.slice(0, charBudget);
+    if (charBudget <= 0) {
+      candidate = '';
+      break;
+    }
+  }
+  return candidate + TRUNCATION_MARKER;
+}
+
 export function parseCip108Body(json: Record<string, unknown> | null): ParsedCip108 {
   if (!json) return {};
   // CIP-108 wraps the user-readable content under `body`.
@@ -513,10 +561,19 @@ export function parseCip108Body(json: Record<string, unknown> | null): ParsedCip
   if (!bodyRaw || typeof bodyRaw !== 'object') return {};
   const body = bodyRaw as Record<string, unknown>;
   const result: ParsedCip108 = {};
-  if (typeof body['title'] === 'string') result.title = body['title'].trim();
-  if (typeof body['abstract'] === 'string') result.abstract = body['abstract'].trim();
-  if (typeof body['motivation'] === 'string') result.motivation = body['motivation'].trim();
-  if (typeof body['rationale'] === 'string') result.rationale = body['rationale'].trim();
+  if (typeof body['title'] === 'string') {
+    // Titles never need truncation — DDB can hold a 1KB title without issue.
+    result.title = body['title'].trim();
+  }
+  if (typeof body['abstract'] === 'string') {
+    result.abstract = truncateField(body['abstract']);
+  }
+  if (typeof body['motivation'] === 'string') {
+    result.motivation = truncateField(body['motivation']);
+  }
+  if (typeof body['rationale'] === 'string') {
+    result.rationale = truncateField(body['rationale']);
+  }
   const refsRaw = body['references'];
   if (Array.isArray(refsRaw)) {
     const refs: GovernanceReference[] = [];
@@ -586,6 +643,92 @@ export function mapBlockfrostProposalToGovernanceAction(
     summary: onchain.summary || undefined,
     details: onchain.details.length > 0 ? onchain.details : undefined,
     proposerAddress: raw.return_address,
+    votes: ctx.votes ?? undefined,
+  };
+}
+
+// ---- Koios → GovernanceAction adapter ----
+//
+// Phase A primary metadata source. Produces the exact same `GovernanceAction`
+// shape as `mapBlockfrostProposalToGovernanceAction` so the sync writer can
+// switch sources without touching downstream code.
+//
+// Differences vs. the Blockfrost mapper:
+// - Koios's `meta_json.body` IS the parsed CIP-108 body — no anchor-fetch /
+//   blake2b verification here. We trust the indexer's `meta_is_valid` verdict
+//   and surface it through `anchorVerified`.
+// - `meta_is_valid` can be null (indexer hasn't checked yet). We coerce that
+//   to `false` so the UI's "verified" pill never lies — only `true` means
+//   verified.
+// - `block_time` (Unix seconds) replaces the Blockfrost `tx.block_time` round-trip.
+// - Status is computed from Koios's own ratified/enacted/dropped/expired_epoch
+//   fields plus `expiration` — same logic as `mapStatus`, just on a different
+//   container shape.
+
+import type { KoiosProposal } from './koios';
+
+export interface KoiosMapperContext {
+  /** Optional vote tally (still sourced from Blockfrost in Phase A). */
+  votes?: VoteTally | null;
+}
+
+function mapKoiosStatus(p: KoiosProposal, currentEpoch: number): GovernanceActionStatus {
+  if (p.enacted_epoch != null) return 'enacted';
+  if (p.dropped_epoch != null) return 'dropped';
+  if (p.expired_epoch != null) return 'expired';
+  if (p.expiration != null && p.expiration < currentEpoch) return 'expired';
+  return 'active';
+}
+
+export function mapKoiosProposalToGovernanceAction(
+  p: KoiosProposal,
+  currentEpoch: number,
+  ctx: KoiosMapperContext = {},
+): Omit<GovernanceAction, 'ingestedAt' | 'lastSyncedAt'> {
+  const actionId = `${p.proposal_tx_hash}#${p.proposal_index}`;
+  const actionType = mapActionType(p.proposal_type);
+  // `meta_json` from Koios already has the CIP-108 body parsed — feed it
+  // through the SAME extractor we use for the anchor-fetched JSON so any
+  // future schema tweaks affect both code paths identically.
+  const cip108 = parseCip108Body(p.meta_json ?? null);
+  const onchain = summarizeGovernanceDescription(actionType, p.proposal_description ?? null);
+
+  const submittedAt =
+    typeof p.block_time === 'number' && p.block_time > 0
+      ? new Date(p.block_time * 1000).toISOString()
+      : new Date(0).toISOString();
+
+  // Tri-state coercion: only an explicit `true` from the indexer means
+  // verified. `null` (not yet checked) and `false` (failed) both land as
+  // false so the UI doesn't claim verification we don't have.
+  const anchorVerified = p.meta_is_valid === true;
+
+  const title = cip108.title;
+  const description =
+    cip108.abstract ?? cip108.motivation ?? cip108.rationale ?? onchain.summary ?? '';
+
+  return {
+    actionId,
+    actionType,
+    title,
+    description,
+    submittedAt,
+    epochDeadline: p.expiration ?? 0,
+    status: mapKoiosStatus(p, currentEpoch),
+    sourceMetadata: undefined,
+    links: cip108.references?.map((r) => r.uri),
+    // ---- Anchor fields (Koios IS the on-chain anchor source semantically) ----
+    anchorUrl: p.meta_url ?? undefined,
+    anchorHash: p.meta_hash ?? undefined,
+    anchorVerified: p.meta_url ? anchorVerified : undefined,
+    abstract: cip108.abstract,
+    motivation: cip108.motivation,
+    rationale: cip108.rationale,
+    references: cip108.references,
+    // ---- On-chain summary ----
+    summary: onchain.summary || undefined,
+    details: onchain.details.length > 0 ? onchain.details : undefined,
+    proposerAddress: p.return_address ?? undefined,
     votes: ctx.votes ?? undefined,
   };
 }
