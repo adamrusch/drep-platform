@@ -39,6 +39,29 @@ export interface GovernanceAction {
   lastSyncedAt?: string;
   adminOverrideLabel?: string;
   editLog?: GovernanceActionEdit[];
+  // ---- Anchor (CIP-100/108 off-chain metadata) ----
+  anchorUrl?: string;
+  anchorHash?: string;
+  anchorVerified?: boolean;
+  abstract?: string;
+  motivation?: string;
+  rationale?: string;
+  references?: GovernanceReference[];
+  // ---- On-chain summary (built from governance_description) ----
+  summary?: string;
+  details?: GovernanceDetail[];
+  // ---- On-chain misc ----
+  proposerAddress?: string;
+}
+
+export interface GovernanceReference {
+  label: string;
+  uri: string;
+}
+
+export interface GovernanceDetail {
+  label: string;
+  value: string;
 }
 
 export interface GovernanceActionEdit {
@@ -252,6 +275,18 @@ export interface GovernanceActionItem {
   lastSyncedAt?: string;
   adminOverrideLabel?: string;
   editLog?: GovernanceEditItem[];
+  // ---- Anchor (CIP-100/108 off-chain metadata) ----
+  anchorUrl?: string;
+  anchorHash?: string;
+  anchorVerified?: boolean;
+  abstract?: string;
+  motivation?: string;
+  rationale?: string;
+  references?: GovernanceReference[];
+  // ---- On-chain summary ----
+  summary?: string;
+  details?: GovernanceDetail[];
+  proposerAddress?: string;
   [key: string]: unknown;
 }
 

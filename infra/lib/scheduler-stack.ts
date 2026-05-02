@@ -49,7 +49,10 @@ export class SchedulerStack extends cdk.Stack {
       runtime: lambda.Runtime.NODEJS_20_X,
       architecture: lambda.Architecture.ARM_64,
       memorySize: 1024,
-      timeout: cdk.Duration.minutes(5),
+      // Cold first-time enrichment passes ~3 Blockfrost calls per action; a
+      // mainnet sync of ~110 actions takes ~30s with concurrency, but we
+      // keep generous headroom for retries / rate-limit backoff.
+      timeout: cdk.Duration.minutes(10),
       role: syncRole,
       environment: {
         DYNAMODB_TABLE_PREFIX: `drep-platform-${stage}-`,
@@ -69,7 +72,9 @@ export class SchedulerStack extends cdk.Stack {
         // it ships a .wasm file that esbuild cannot inline. Listing it under
         // nodeModules causes CDK to npm-install it into the Lambda zip with
         // its WASM intact.
-        nodeModules: ['@emurgo/cardano-serialization-lib-nodejs'],
+        // blake2b uses dynamic require() of blake2b-wasm at runtime which
+        // also confuses esbuild — install it the same way.
+        nodeModules: ['@emurgo/cardano-serialization-lib-nodejs', 'blake2b'],
         forceDockerBundling: false,
       },
       depsLockFilePath: path.join(backendDir, 'package-lock.json'),

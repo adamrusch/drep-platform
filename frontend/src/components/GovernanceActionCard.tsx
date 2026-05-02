@@ -25,7 +25,29 @@ const TYPE_LABELS: Record<GovernanceAction['actionType'], string> = {
   InfoAction: 'Info',
 };
 
-export function GovernanceActionCard({ action, className }: GovernanceActionCardProps): React.ReactElement {
+/**
+ * If the title is just the bare actionId hash (sync hasn't enriched the
+ * record yet), display "Untitled action" so users don't see a 64-char hex
+ * blob as the prominent header.
+ */
+function displayTitle(action: GovernanceAction): string {
+  if (!action.title || action.title === action.actionId) {
+    return 'Untitled governance action';
+  }
+  return action.title;
+}
+
+function shortActionId(actionId: string): string {
+  const [hash, idx] = actionId.split('#');
+  if (!hash) return actionId;
+  return `${hash.slice(0, 8)}…${hash.slice(-4)}#${idx ?? '0'}`;
+}
+
+export function GovernanceActionCard({
+  action,
+  className,
+}: GovernanceActionCardProps): React.ReactElement {
+  const subtitle = action.summary && action.summary.length > 0 ? action.summary : action.description;
   return (
     <Link
       to={`/governance/${encodeURIComponent(action.actionId)}`}
@@ -50,14 +72,24 @@ export function GovernanceActionCard({ action, className }: GovernanceActionCard
               {action.adminOverrideLabel ?? action.status}
             </span>
           </div>
-          <h3 className="font-semibold text-sm leading-tight truncate">{action.title}</h3>
-          <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{action.description}</p>
+          <h3 className="font-semibold text-sm leading-tight line-clamp-2">{displayTitle(action)}</h3>
+          {subtitle && (
+            <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{subtitle}</p>
+          )}
+          <code
+            className="mt-2 inline-block text-[10px] text-muted-foreground/70 font-mono"
+            title={action.actionId}
+          >
+            {shortActionId(action.actionId)}
+          </code>
         </div>
       </div>
 
       <div className="mt-3 flex items-center justify-between text-xs text-muted-foreground">
         <span>Submitted {formatRelativeTime(action.submittedAt)}</span>
-        <span>Deadline: Epoch {action.epochDeadline} ({epochsToDate(action.epochDeadline)})</span>
+        <span>
+          Deadline: Epoch {action.epochDeadline} ({epochsToDate(action.epochDeadline)})
+        </span>
       </div>
     </Link>
   );
