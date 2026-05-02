@@ -18,6 +18,10 @@ cdk.out/
 *.d.ts
 *.js
 !jest.config.js
+# Frontend build configs (hand-written, NOT generated)
+!frontend/tailwind.config.js
+!frontend/postcss.config.js
+!frontend/vite.config.js
 # Source-level type augmentations (hand-written, NOT generated)
 !**/src/types/*.d.ts
 

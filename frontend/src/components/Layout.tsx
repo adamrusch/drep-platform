@@ -1,7 +1,22 @@
 import React from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
+import {
+  Home,
+  FileText,
+  MessageSquare,
+  Shield,
+  Users,
+  Lightbulb,
+  Bell,
+  Sun,
+  Moon,
+  Search,
+  Wallet,
+  type LucideIcon,
+} from 'lucide-react';
 import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
 import { useUiStore } from '@/stores/uiStore';
+import { useThemeStore } from '@/stores/themeStore';
 import { WalletButton } from './WalletButton';
 import { cn, formatWalletAddress } from '@/lib/utils';
 import type { UserRole } from '@/types';
@@ -14,6 +29,7 @@ interface NavItem {
   id: string;
   label: string;
   href: string;
+  icon: LucideIcon;
   match: (path: string) => boolean;
   roles?: UserRole[];
   badge?: number;
@@ -24,6 +40,7 @@ const NAV_ITEMS: NavItem[] = [
     id: 'dashboard',
     label: 'Dashboard',
     href: '/dashboard',
+    icon: Home,
     match: (p) => p === '/' || p.startsWith('/dashboard'),
     roles: ['delegator', 'committee_member', 'lead_drep', 'trusted_delegator'],
   },
@@ -31,41 +48,61 @@ const NAV_ITEMS: NavItem[] = [
     id: 'governance',
     label: 'Governance Actions',
     href: '/governance',
+    icon: FileText,
     match: (p) => p.startsWith('/governance'),
   },
   {
     id: 'clubhouse',
     label: 'Delegator Clubhouse',
-    href: '/drep',
-    match: (p) => p.startsWith('/drep') && p.includes('/delegators'),
+    href: '/clubhouse',
+    icon: MessageSquare,
+    match: (p) => p.startsWith('/clubhouse') || (p.startsWith('/drep') && p.includes('/delegators')),
   },
   {
-    id: 'profile',
+    id: 'committee',
+    label: 'Committee',
+    href: '/committee',
+    icon: Shield,
+    match: (p) => p.startsWith('/committee'),
+  },
+  {
+    id: 'dreps',
     label: 'DReps',
-    href: '/drep',
-    match: (p) => p.startsWith('/drep') && !p.includes('/delegators'),
+    href: '/dreps',
+    icon: Users,
+    match: (p) => p === '/dreps' || (p.startsWith('/drep') && !p.includes('/delegators')),
   },
   {
-    id: 'me',
-    label: 'My Profile',
-    href: '/profile/setup',
-    match: (p) => p.startsWith('/profile'),
-    roles: ['delegator', 'committee_member', 'lead_drep', 'trusted_delegator'],
+    id: 'rationales',
+    label: 'Rationales',
+    href: '/rationales',
+    icon: Lightbulb,
+    match: (p) => p.startsWith('/rationales'),
+  },
+  {
+    id: 'notifications',
+    label: 'Notifications',
+    href: '/notifications',
+    icon: Bell,
+    match: (p) => p.startsWith('/notifications'),
   },
 ];
 
 export function Layout({ children }: LayoutProps): React.ReactElement {
-  const roles = useAuthStore((s) => s.roles);
   const walletAddress = useAuthStore((s) => s.walletAddress);
   const profile = useAuthStore((s) => s.profile);
   const isAuthenticated = useIsAuthenticated();
   useUiStore();
   const location = useLocation();
   const navigate = useNavigate();
+  const theme = useThemeStore((s) => s.theme);
+  const toggleTheme = useThemeStore((s) => s.toggle);
 
-  const visibleNav = NAV_ITEMS.filter(
-    (item) => !item.roles || item.roles.some((r) => roles.includes(r)),
-  );
+  // Show all 7 nav items to everyone — guest visitors can see Dashboard
+  // (it redirects to wallet connect under the hood). Hiding nav items
+  // hides primary surfaces and is what the audit flagged. Routes are still
+  // protected by RoleGuard, so revealing the chrome is safe.
+  const visibleNav = NAV_ITEMS;
 
   const displayInitials =
     profile?.displayName
@@ -102,44 +139,42 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
         </div>
 
         <div className="topbar__search">
-          <svg
+          <Search
             className="topbar__search-icon"
-            width={16}
-            height={16}
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
+            size={16}
             strokeWidth={1.75}
-            strokeLinecap="round"
-            strokeLinejoin="round"
             aria-hidden="true"
-          >
-            <circle cx="11" cy="11" r="7" />
-            <line x1="21" y1="21" x2="16.65" y2="16.65" />
-          </svg>
+          />
           <input placeholder="Search proposals, DReps, topics…" />
           <span className="kbd">⌘K</span>
         </div>
 
         <div className="topbar__actions">
+          <button
+            type="button"
+            onClick={toggleTheme}
+            aria-label={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
+            title={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
+            className={cn(
+              'inline-flex items-center justify-center w-[38px] h-[38px]',
+              'rounded-token-md text-[var(--text-secondary)]',
+              'transition-colors hover:bg-[var(--bg-muted)] hover:text-[var(--text-primary)]',
+            )}
+          >
+            {theme === 'light' ? (
+              <Moon size={18} strokeWidth={1.75} />
+            ) : (
+              <Sun size={18} strokeWidth={1.75} />
+            )}
+          </button>
           {isAuthenticated && walletAddress ? (
             <>
-              <button className="wallet-pill" type="button" onClick={() => navigate('/profile/setup')}>
-                <svg
-                  width={16}
-                  height={16}
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth={1.75}
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  aria-hidden="true"
-                >
-                  <path d="M21 12V7a2 2 0 0 0-2-2H5a2 2 0 0 0 0 4h16v2" />
-                  <path d="M3 5v14a2 2 0 0 0 2 2h16v-5" />
-                  <circle cx="17" cy="14" r="1.5" fill="currentColor" />
-                </svg>
+              <button
+                className="wallet-pill"
+                type="button"
+                onClick={() => navigate('/profile/setup')}
+              >
+                <Wallet size={16} strokeWidth={1.75} aria-hidden="true" />
                 <span>{formatWalletAddress(walletAddress, 6)}</span>
               </button>
               <button
@@ -160,18 +195,23 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
       {/* Sidebar */}
       <aside className="sidebar">
         <nav className="nav">
-          {visibleNav.map((item) => (
-            <Link
-              key={item.id}
-              to={item.href}
-              className={cn('nav__item', item.match(location.pathname) && 'nav__item--active')}
-            >
-              <span>{item.label}</span>
-              {item.badge !== undefined && (
-                <span className="nav__item-badge">{item.badge}</span>
-              )}
-            </Link>
-          ))}
+          {visibleNav.map((item) => {
+            const Icon = item.icon;
+            const isActive = item.match(location.pathname);
+            return (
+              <Link
+                key={item.id}
+                to={item.href}
+                className={cn('nav__item', isActive && 'nav__item--active')}
+              >
+                <Icon size={18} strokeWidth={1.75} aria-hidden="true" />
+                <span>{item.label}</span>
+                {item.badge !== undefined && (
+                  <span className="nav__item-badge">{item.badge}</span>
+                )}
+              </Link>
+            );
+          })}
         </nav>
         <div className="sidebar__footer">
           <div className="epoch-card">
@@ -179,7 +219,7 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
               <span>Network</span>
               <span>
                 <span className="network-dot" />
-                Preview
+                Mainnet
               </span>
             </div>
             <div
