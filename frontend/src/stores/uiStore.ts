@@ -15,6 +15,11 @@ interface UiStore {
   toggleSidebar: () => void;
   setSidebarOpen: (open: boolean) => void;
 
+  // Mobile drawer (sidebar visibility on narrow viewports)
+  mobileMenuOpen: boolean;
+  toggleMobileMenu: () => void;
+  closeMobileMenu: () => void;
+
   // Wallet connect modal
   isWalletModalOpen: boolean;
   openWalletModal: () => void;
@@ -37,6 +42,10 @@ export const useUiStore = create<UiStore>((set, get) => ({
   toggleSidebar: () => set((s) => ({ isSidebarOpen: !s.isSidebarOpen })),
   setSidebarOpen: (open) => set({ isSidebarOpen: open }),
 
+  mobileMenuOpen: false,
+  toggleMobileMenu: () => set((s) => ({ mobileMenuOpen: !s.mobileMenuOpen })),
+  closeMobileMenu: () => set({ mobileMenuOpen: false }),
+
   isWalletModalOpen: false,
   openWalletModal: () => set({ isWalletModalOpen: true }),
   closeWalletModal: () => set({ isWalletModalOpen: false }),
@@ -45,10 +54,11 @@ export const useUiStore = create<UiStore>((set, get) => ({
   addToast: (toast) => {
     const id = `toast-${++toastCounter}`;
     set((s) => ({ toasts: [...s.toasts, { ...toast, id }] }));
-    // Auto-remove after 5 seconds
+    // Auto-remove after 4 seconds (Day 3 brief — was 5s before
+    // any renderer existed, so the change is harmless to callers).
     setTimeout(() => {
       get().removeToast(id);
-    }, 5_000);
+    }, 4_000);
   },
   removeToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
 

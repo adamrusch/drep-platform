@@ -7,6 +7,7 @@ import { queryClient } from '@/lib/api';
 import { WalletAuthProvider } from '@/auth/WalletAuthProvider';
 import { Layout } from '@/components/Layout';
 import { RoleGuard } from '@/components/RoleGuard';
+import { Toaster } from '@/components/ui/Toaster';
 import { useAuthStore } from '@/stores/authStore';
 import { useThemeStore } from '@/stores/themeStore';
 
@@ -22,6 +23,7 @@ import { DelegatorDashboard } from '@/pages/DelegatorDashboard';
 import { ProfileSetup } from '@/pages/ProfileSetup';
 import { PublicProfilePage } from '@/pages/PublicProfilePage';
 import { ComingSoon } from '@/pages/ComingSoon';
+import { ClubhouseLanding } from '@/pages/ClubhouseLanding';
 
 /**
  * Routes the user to the correct dashboard based on their role.
@@ -130,16 +132,10 @@ function App(): React.ReactElement {
               />
               <Route path="/profile/:walletAddress" element={<PublicProfilePage />} />
 
-              {/* Coming-soon stubs — referenced by sidebar nav so links resolve */}
-              <Route
-                path="/clubhouse"
-                element={
-                  <ComingSoon
-                    title="Delegator Clubhouse"
-                    description="Browse the public lobby and find a DRep clubhouse to join. The lobby and your subscribed clubhouses will land here next."
-                  />
-                }
-              />
+              {/* Clubhouse — the README's hero flow. The /clubhouse landing
+                  route picks the right DRep clubhouse for the signed-in
+                  user (or shows a Discover CTA for guests). */}
+              <Route path="/clubhouse" element={<ClubhouseLanding />} />
               <Route
                 path="/committee"
                 element={
@@ -181,6 +177,8 @@ function App(): React.ReactElement {
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </Layout>
+          {/* Toast renderer — overlays everything (z-index handled by .toast-stack). */}
+          <Toaster />
         </WalletAuthProvider>
       </BrowserRouter>
       {import.meta.env.DEV && <ReactQueryDevtools initialIsOpen={false} />}
