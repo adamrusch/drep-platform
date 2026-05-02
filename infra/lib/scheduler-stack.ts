@@ -80,11 +80,20 @@ export class SchedulerStack extends cdk.Stack {
       depsLockFilePath: path.join(backendDir, 'package-lock.json'),
     });
 
-    // ---- EventBridge rule: every 2 minutes ----
+    // ---- EventBridge rule: every 10 minutes ----
+    // Was 2 minutes. The sync touches ~110 governance actions × 2 Blockfrost
+    // hot-path calls per action, plus an epochs-latest call — about 220
+    // requests per cycle. At every-2-min that's ~158k Blockfrost calls/day,
+    // which trips the free-tier project quota (50k/day) and blackholes
+    // every other API path that needs Blockfrost (notably /epoch). Vote
+    // tallies and proposal status mutate over hours, not minutes, so a
+    // 10-min cadence still feels instantaneous to humans while leaving
+    // headroom for /epoch and /profile/*/delegation-history to share the
+    // same Blockfrost project.
     const syncRule = new events.Rule(this, 'GovernanceSyncRule', {
       ruleName: `drep-platform-${stage}-governance-sync`,
-      description: 'Triggers governance intake sync from Blockfrost every 2 minutes',
-      schedule: events.Schedule.rate(cdk.Duration.minutes(2)),
+      description: 'Triggers governance intake sync from Blockfrost every 10 minutes',
+      schedule: events.Schedule.rate(cdk.Duration.minutes(10)),
       enabled: true,
     });
 
