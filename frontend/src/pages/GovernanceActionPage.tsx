@@ -92,6 +92,12 @@ export function GovernanceActionPage(): React.ReactElement {
   const { data: commentsData, isLoading: commentsLoading } = useComments(actionId ?? '');
   const roles = useAuthStore((s) => s.roles);
   const canVote = roles.includes('lead_drep') || roles.includes('committee_member');
+  // ⚠ All hooks must be called above the conditional returns below.
+  // React's rules-of-hooks: every render must call the same number of
+  // hooks in the same order. Calling useUiStore after early returns
+  // produces React error #310 (Rendered more hooks than during the
+  // previous render) the moment isLoading flips from true to false.
+  const addToast = useUiStore((s) => s.addToast);
 
   if (isLoading) {
     return (
@@ -131,7 +137,6 @@ export function GovernanceActionPage(): React.ReactElement {
       ? `${window.location.origin}/governance/${encodeURIComponent(action.actionId)}`
       : `https://drep.tools/governance/${encodeURIComponent(action.actionId)}`;
   const explorers = explorerUrls(action.actionId);
-  const addToast = useUiStore((s) => s.addToast);
   const handleCopyHash = async (): Promise<void> => {
     try {
       await navigator.clipboard.writeText(action.actionId);
