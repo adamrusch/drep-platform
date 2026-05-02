@@ -25,12 +25,22 @@ export type GovernanceActionStatus = 'active' | 'expired' | 'enacted' | 'dropped
 
 export type SessionType = 'normal' | 'remember_me';
 
+/** Where the human-readable metadata (title/abstract/...) on this action
+ *  came from. `on-chain-anchor` = the CIP-100/108 anchor body that was
+ *  fetched and parsed. `proposal-pillar` = a fallback draft from the
+ *  gov.tools proposal-discussion forum (used when the on-chain anchor
+ *  is missing or had no usable title). `none` = neither source produced
+ *  metadata; the UI shows the synthesized on-chain summary only. */
+export type GovernanceMetadataSource = 'on-chain-anchor' | 'proposal-pillar' | 'none';
+
 export interface GovernanceAction {
   actionId: string;
   actionType: GovernanceActionType;
-  /** Title comes only from the off-chain CIP-108 anchor body. When the
-   *  anchor is missing or has no title, this is undefined. The frontend
-   *  uses the on-chain `summary` as a subtitle in that case. */
+  /** Title comes from the off-chain CIP-108 anchor body or, as a fallback,
+   *  from a matched proposal-pillar (gov.tools) draft. Undefined when
+   *  neither source yields a title. The frontend uses the synthesized
+   *  on-chain `summary` as a subtitle in that case. See `metadataSource`
+   *  to disambiguate. */
   title?: string;
   description: string;
   submittedAt: string;
@@ -50,6 +60,17 @@ export interface GovernanceAction {
   motivation?: string;
   rationale?: string;
   references?: GovernanceReference[];
+  // ---- Proposal-pillar (gov.tools forum draft) fallback metadata ----
+  /** Public discussion URL. Synthesized as
+   *  `https://gov.tools/proposal_discussion/{id}`. Present only when this
+   *  action was matched to a forum draft. */
+  proposalPillarUrl?: string;
+  /** Numeric forum proposal ID. Stored for traceability. */
+  proposalPillarId?: number;
+  /** Indicates which off-chain source produced the displayed metadata.
+   *  Useful for the UI to render a "Discussion forum" pill when a
+   *  proposal-pillar fallback was used. */
+  metadataSource?: GovernanceMetadataSource;
   // ---- On-chain summary (built from governance_description) ----
   summary?: string;
   details?: GovernanceDetail[];
@@ -281,8 +302,9 @@ export interface GovernanceActionItem {
   actionId: string;
   SK: 'ACTION';
   actionType: string;
-  /** Off-chain CIP-108 anchor title, when present. Undefined when the
-   *  proposal has no anchor or the anchor body has no `title` field. */
+  /** Off-chain title — from the CIP-108 anchor body when present, else
+   *  from a matched gov.tools forum draft (see `metadataSource`).
+   *  Undefined when neither source yields a title. */
   title?: string;
   description: string;
   submittedAt: string;
@@ -302,6 +324,10 @@ export interface GovernanceActionItem {
   motivation?: string;
   rationale?: string;
   references?: GovernanceReference[];
+  // ---- Proposal-pillar (gov.tools forum draft) fallback metadata ----
+  proposalPillarUrl?: string;
+  proposalPillarId?: number;
+  metadataSource?: GovernanceMetadataSource;
   // ---- On-chain summary ----
   summary?: string;
   details?: GovernanceDetail[];
