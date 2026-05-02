@@ -148,6 +148,14 @@ export interface Comment {
   drep?: string;
 }
 
+export type ClubhousePostType = 'discussion' | 'question' | 'poll';
+
+export interface ClubhousePollOption {
+  id: string;
+  label: string;
+  votes: number;
+}
+
 export interface ClubhousePost {
   drepId: string;
   postId: string;
@@ -158,6 +166,19 @@ export interface ClubhousePost {
   comments: ClubhouseComment[];
   createdAt: string;
   updatedAt: string;
+  // ---- Day 3 additions: post type + (when type=poll) poll fields. ----
+  type?: ClubhousePostType;
+  title?: string;
+  pollOptions?: ClubhousePollOption[];
+  pollMultiple?: boolean;
+  pollClosesAt?: string;
+  /** wallet → option index. The current user can read their own choice
+   *  by indexing into this with their walletAddress. */
+  pollVotes?: Record<string, number>;
+  /** Stake / DRep pills for the post header. Optional, populated
+   *  best-effort by the backend. Mirrors the comment header pattern. */
+  stakeAda?: string;
+  drep?: string;
 }
 
 export interface ClubhouseComment {
