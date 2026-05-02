@@ -3,7 +3,11 @@ import { ulid } from 'ulid';
 import { putItem, getItem, tableNames } from '../../lib/dynamodb';
 import type { CommentItem } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
-import { validateMutationNonce, verifyWalletSignature } from '../../lib/auth';
+import {
+  validateMutationNonce,
+  verifyWalletSignature,
+  buildMutationMessage,
+} from '../../lib/auth';
 import { created, badRequest, unauthorized, notFound, internalError, handleError } from '../_response';
 
 interface CreateCommentBody {
@@ -55,8 +59,11 @@ export const handler = async (
       return unauthorized(nonceResult.reason ?? 'Invalid mutation nonce');
     }
 
-    // Verify mutation signature
-    const mutationMessage = `drep-platform mutation authorization:\n\nWallet: ${authCtx.walletAddress}\nNonce: ${body.mutationNonce}`;
+    // Verify mutation signature. `buildMutationMessage` is the single source
+    // of truth for the signed-message format — the nonce issuer uses the
+    // same helper, so the byte string we verify here matches exactly what
+    // the wallet signed.
+    const mutationMessage = buildMutationMessage(body.mutationNonce, authCtx.walletAddress);
     const sigResult = verifyWalletSignature(authCtx.walletAddress, mutationMessage, {
       signature: body.mutationSignature,
       key: body.mutationKey,

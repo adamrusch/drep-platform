@@ -389,9 +389,22 @@ export async function generateMutationNonce(walletAddress: string): Promise<{
     '#nonce': 'nonce',
   });
 
-  const message = `drep-platform mutation authorization:\n\nWallet: ${walletAddress}\nNonce: ${nonce}\nExpires: ${expiresAtDate.toISOString()}`;
+  // IMPORTANT: keep this format identical to `buildMutationMessage` below.
+  // The verifier reconstructs the message from { walletAddress, nonce } and
+  // both the issuer and verifier MUST produce byte-identical strings or
+  // signatures will never match. Expiry is NOT included in the signed
+  // message — it's enforced server-side via the DynamoDB record (TTL +
+  // explicit expiry check), so the wallet doesn't need to attest to it.
+  const message = buildMutationMessage(nonce, walletAddress);
 
   return { nonce, message, expiresAt: expiresAtDate.toISOString() };
+}
+
+/** Single source of truth for the mutation-signing message format.
+ *  The issuer (`generateMutationNonce`) and verifier (`comments/create`,
+ *  any future mutation handler) BOTH call this. */
+export function buildMutationMessage(nonce: string, walletAddress: string): string {
+  return `drep-platform mutation authorization:\n\nWallet: ${walletAddress}\nNonce: ${nonce}`;
 }
 
 export async function validateMutationNonce(
