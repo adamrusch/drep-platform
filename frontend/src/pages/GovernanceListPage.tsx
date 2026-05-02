@@ -26,7 +26,7 @@ export function GovernanceListPage(): React.ReactElement {
           Governance Actions
         </h1>
         <p className="text-sm text-[var(--text-secondary)]">
-          Live from the Cardano mainnet. Updated every 2 minutes.
+          Live from the Cardano mainnet. Updated every 10 minutes.
         </p>
       </header>
 
