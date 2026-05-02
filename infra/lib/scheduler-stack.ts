@@ -53,9 +53,10 @@ export class SchedulerStack extends cdk.Stack {
       runtime: lambda.Runtime.NODEJS_20_X,
       architecture: lambda.Architecture.ARM_64,
       memorySize: 1024,
-      // Cold first-time enrichment passes ~3 Blockfrost calls per action; a
-      // mainnet sync of ~110 actions takes ~30s with concurrency, but we
-      // keep generous headroom for retries / rate-limit backoff.
+      // With Koios as primary metadata source the cold pass is one bulk
+      // Koios call + ~110 Blockfrost vote calls; observed runtime is 5–10s.
+      // Keep the timeout generous to absorb retries / rate-limit backoff
+      // on either upstream.
       timeout: cdk.Duration.minutes(10),
       role: syncRole,
       environment: {
@@ -84,20 +85,22 @@ export class SchedulerStack extends cdk.Stack {
       depsLockFilePath: path.join(backendDir, 'package-lock.json'),
     });
 
-    // ---- EventBridge rule: every 10 minutes ----
-    // Was 2 minutes. The sync touches ~110 governance actions × 2 Blockfrost
-    // hot-path calls per action, plus an epochs-latest call — about 220
-    // requests per cycle. At every-2-min that's ~158k Blockfrost calls/day,
-    // which trips the free-tier project quota (50k/day) and blackholes
-    // every other API path that needs Blockfrost (notably /epoch). Vote
-    // tallies and proposal status mutate over hours, not minutes, so a
-    // 10-min cadence still feels instantaneous to humans while leaving
-    // headroom for /epoch and /profile/*/delegation-history to share the
-    // same Blockfrost project.
+    // ---- EventBridge rule: every 1 minute (Phase A) ----
+    // Phase A migrates the metadata-source primary to Koios `/proposal_list`
+    // — one bulk call per cycle replaces 4 Blockfrost calls per action.
+    // Per-cycle Blockfrost volume drops to ~110 vote-tally calls + 1
+    // epochs-latest = ~111 requests, plus 1 Koios call.
+    // At every-1-min that's ~160k Blockfrost calls/day on the sync path,
+    // sharing budget with /epoch and /profile/*/delegation-history. The
+    // Discovery tier (1M req/day) accommodates an expected ~316k/day total
+    // with comfortable headroom. Sync cycle observed at 5-10s, so the
+    // 1-min cadence has plenty of room for retries and rate-limit backoff.
+    // The persistent circuit breaker (backend/src/lib/circuitBreaker.ts)
+    // still guards against quota cascades — leave it in place.
     const syncRule = new events.Rule(this, 'GovernanceSyncRule', {
       ruleName: `drep-platform-${stage}-governance-sync`,
-      description: 'Triggers governance intake sync from Blockfrost every 10 minutes',
-      schedule: events.Schedule.rate(cdk.Duration.minutes(10)),
+      description: 'Triggers governance intake sync (Koios primary, Blockfrost votes) every 1 minute',
+      schedule: events.Schedule.rate(cdk.Duration.minutes(1)),
       enabled: true,
     });
 
