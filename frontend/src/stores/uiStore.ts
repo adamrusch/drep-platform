@@ -29,10 +29,6 @@ interface UiStore {
   toasts: Toast[];
   addToast: (toast: Omit<Toast, 'id'>) => void;
   removeToast: (id: string) => void;
-
-  // Global loading
-  isGlobalLoading: boolean;
-  setGlobalLoading: (loading: boolean) => void;
 }
 
 let toastCounter = 0;
@@ -61,7 +57,4 @@ export const useUiStore = create<UiStore>((set, get) => ({
     }, 4_000);
   },
   removeToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
-
-  isGlobalLoading: false,
-  setGlobalLoading: (loading) => set({ isGlobalLoading: loading }),
 }));
