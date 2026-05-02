@@ -52,6 +52,20 @@ export interface GovernanceAction {
   details?: GovernanceDetail[];
   // ---- On-chain misc ----
   proposerAddress?: string;
+  // ---- On-chain vote tally (split by voter role) ----
+  votes?: VoteTally;
+}
+
+/**
+ * Aggregated vote counts for a governance action, bucketed by voter role.
+ * Each bucket tracks the count of yes/no/abstain votes from that role.
+ *
+ * `cc` = constitutional committee. `drep` and `spo` are self-explanatory.
+ */
+export interface VoteTally {
+  drep: { yes: number; no: number; abstain: number };
+  spo: { yes: number; no: number; abstain: number };
+  cc: { yes: number; no: number; abstain: number };
 }
 
 export interface GovernanceReference {
@@ -287,6 +301,7 @@ export interface GovernanceActionItem {
   summary?: string;
   details?: GovernanceDetail[];
   proposerAddress?: string;
+  votes?: VoteTally;
   [key: string]: unknown;
 }
 

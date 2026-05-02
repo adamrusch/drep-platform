@@ -148,6 +148,9 @@ export class ApiStack extends cdk.Stack {
     const govGetFn = fn('GovGetFn', 'handlers/governance/get.ts');
     const govSyncFn = fn('GovSyncFn', 'handlers/governance/sync.ts');
 
+    // ---- Epoch handler ----
+    const epochGetFn = fn('EpochGetFn', 'handlers/epoch/get.ts');
+
     // ---- DRep handlers ----
     const drepListFn = fn('DRepListFn', 'handlers/drep/list.ts');
     const drepGetFn = fn('DRepGetFn', 'handlers/drep/get.ts');
@@ -270,6 +273,9 @@ export class ApiStack extends cdk.Stack {
     addRoute(apigwv2.HttpMethod.GET, '/governance', govListFn, 'GovList');
     addRoute(apigwv2.HttpMethod.GET, '/governance/{actionId}', govGetFn, 'GovGet');
     addRoute(apigwv2.HttpMethod.POST, '/governance/sync', govSyncFn, 'GovSync', true);
+
+    // ---- Epoch route (public, hits Blockfrost on every call) ----
+    addRoute(apigwv2.HttpMethod.GET, '/epoch', epochGetFn, 'EpochGet');
 
     // ---- DRep routes ----
     addRoute(apigwv2.HttpMethod.GET, '/drep', drepListFn, 'DRepList');
