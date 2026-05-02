@@ -47,6 +47,26 @@ export interface GovernanceAction {
   details?: GovernanceDetail[];
   // ---- On-chain misc ----
   proposerAddress?: string;
+  // ---- On-chain vote tally (split by voter role) ----
+  votes?: VoteTally;
+}
+
+/**
+ * Aggregated vote counts for a governance action, bucketed by voter role.
+ * `cc` = constitutional committee.
+ */
+export interface VoteTally {
+  drep: { yes: number; no: number; abstain: number };
+  spo: { yes: number; no: number; abstain: number };
+  cc: { yes: number; no: number; abstain: number };
+}
+
+export interface EpochInfo {
+  epoch: number;
+  startTime: string;
+  endTime: string;
+  /** Seconds until this epoch ends. */
+  endsInSeconds: number;
 }
 
 export interface GovernanceReference {
@@ -116,6 +136,16 @@ export interface Comment {
   isDRep: boolean;
   createdAt: string;
   updatedAt: string;
+  // ---- Optional display metadata (Day 2 groundwork — backend not yet
+  // populated; types in place so the design pattern can render once the
+  // sync layer fills these in). See `governance.jsx:294–305`. ----
+  /** True when the author is recognized by the action's lead DRep
+   *  (gold-star badge in design). */
+  starred?: boolean;
+  /** ADA stake amount, displayed as a "5.2M ₳ stake" pill. */
+  stakeAda?: string;
+  /** Display name of the DRep this commenter delegates to, shown as a pill. */
+  drep?: string;
 }
 
 export interface ClubhousePost {
