@@ -7,11 +7,34 @@ import { StatusPill } from '@/components/ui/StatusPill';
 import { SentimentBar } from '@/components/ui/SentimentBar';
 import { useUiStore } from '@/stores/uiStore';
 
-function tallyTotals(votes: VoteTally): { yes: number; no: number; abstain: number; total: number } {
-  const yes = votes.drep.yes + votes.spo.yes + votes.cc.yes;
-  const no = votes.drep.no + votes.spo.no + votes.cc.no;
-  const abstain = votes.drep.abstain + votes.spo.abstain + votes.cc.abstain;
-  return { yes, no, abstain, total: yes + no + abstain };
+/** Sum the per-role power slices into top-level totals. Power is summed
+ *  as BigInt (DRep totals exceed 2^53 lovelace) and returned as
+ *  stringified integers for the SentimentBar's prop shape. */
+function tallyPowerTotals(votes: VoteTally): {
+  yes: string;
+  no: string;
+  abstain: string;
+  notVoted: string;
+  totalActive: string;
+} {
+  const parse = (s: string): bigint => {
+    try {
+      return BigInt(s);
+    } catch {
+      return 0n;
+    }
+  };
+  const sum = (key: 'yes' | 'no' | 'abstain' | 'notVoted' | 'totalActive'): bigint =>
+    parse(votes.drep[key].power) +
+    parse(votes.spo[key].power) +
+    parse(votes.cc[key].power);
+  return {
+    yes: sum('yes').toString(),
+    no: sum('no').toString(),
+    abstain: sum('abstain').toString(),
+    notVoted: sum('notVoted').toString(),
+    totalActive: sum('totalActive').toString(),
+  };
 }
 
 interface GovernanceActionCardProps {
@@ -184,14 +207,13 @@ export function GovernanceActionCard({
       {/* Footer: timestamp + sentiment bar + epoch + explorer links */}
       <div className="mt-3 pt-3 border-t border-[var(--border-subtle)] flex items-center justify-between gap-4 text-[11.5px] text-[var(--text-tertiary)] tabular-nums">
         <span className="flex-shrink-0">Submitted {formatRelativeTime(action.submittedAt)}</span>
-        {action.votes && tallyTotals(action.votes).total > 0 ? (
+        {action.votes && tallyPowerTotals(action.votes).totalActive !== '0' ? (
           <div className="flex-1 max-w-[180px]">
             <SentimentBar
-              yes={action.votes.drep.yes + action.votes.spo.yes + action.votes.cc.yes}
-              no={action.votes.drep.no + action.votes.spo.no + action.votes.cc.no}
-              abstain={
-                action.votes.drep.abstain + action.votes.spo.abstain + action.votes.cc.abstain
-              }
+              yes={tallyPowerTotals(action.votes).yes}
+              no={tallyPowerTotals(action.votes).no}
+              abstain={tallyPowerTotals(action.votes).abstain}
+              notVoted={tallyPowerTotals(action.votes).notVoted}
               height={6}
             />
           </div>
