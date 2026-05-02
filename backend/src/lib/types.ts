@@ -323,7 +323,31 @@ export interface CommentItem {
   isDRep: boolean;
   createdAt: string;
   updatedAt: string;
+  /** True when the action's lead DRep has marked this commenter as
+   *  "recognized" (gold-star badge). Set via a future moderation action,
+   *  unused at write time today. */
+  starred?: boolean;
+  /** ADA stake amount as a pre-formatted display string ("5.2M ₳").
+   *  Populated best-effort from Blockfrost at comment-create time. */
+  stakeAda?: string;
+  /** Display name (or DRep ID prefix) of the DRep this commenter
+   *  delegates to, populated at comment-create time. */
+  drep?: string;
   [key: string]: unknown;
+}
+
+/** A clubhouse post may be a free-form discussion, an explicit question,
+ *  or a poll. Polls carry the option list + the multi-choice flag. */
+export type ClubhousePostType = 'discussion' | 'question' | 'poll';
+
+export interface ClubhousePollOption {
+  /** Stable identifier for the option ("a", "b", …). Used as the
+   *  composite vote key. */
+  id: string;
+  label: string;
+  /** Raw vote count. Update path is `vote.handler` — this is the
+   *  authoritative tally, recomputed from individual vote records. */
+  votes: number;
 }
 
 export interface ClubhousePostItem {
@@ -336,6 +360,20 @@ export interface ClubhousePostItem {
   comments: ClubhouseCommentItem[];
   createdAt: string;
   updatedAt: string;
+  /** Day-3 additions — optional, rolled-out post-deploy. */
+  type?: ClubhousePostType;
+  /** Title is optional and primarily used by polls (poll question). */
+  title?: string;
+  pollOptions?: ClubhousePollOption[];
+  pollMultiple?: boolean;
+  pollClosesAt?: string;
+  /** Wallet → option-index map of votes. Stored alongside the post item;
+   *  votes are low-stakes, so we trade query efficiency for atomicity. */
+  pollVotes?: Record<string, number>;
+  /** Display-only stake/DRep info for the post author, mirroring the
+   *  comment header pill stack. Populated best-effort at create time. */
+  stakeAda?: string;
+  drep?: string;
   [key: string]: unknown;
 }
 

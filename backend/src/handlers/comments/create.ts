@@ -8,7 +8,8 @@ import {
   verifyWalletSignature,
   buildMutationMessage,
 } from '../../lib/auth';
-import { created, badRequest, unauthorized, notFound, internalError, handleError } from '../_response';
+import { lookupRecognition } from '../../lib/recognition';
+import { created, badRequest, unauthorized, notFound, handleError } from '../_response';
 
 interface CreateCommentBody {
   body: string;
@@ -85,6 +86,11 @@ export const handler = async (
     const now = new Date().toISOString();
     const commentId = ulid();
 
+    // Best-effort recognition lookup — populates the design's stake-ada
+    // pill and DRep pill on the comment header. Failures are silent so
+    // a Blockfrost outage cannot block a comment from being posted.
+    const recognition = await lookupRecognition(authCtx.walletAddress);
+
     const commentItem: CommentItem = {
       actionId: decodeURIComponent(actionId),
       commentId,
@@ -94,6 +100,8 @@ export const handler = async (
       isDRep,
       createdAt: now,
       updatedAt: now,
+      ...(recognition.stakeAda ? { stakeAda: recognition.stakeAda } : {}),
+      ...(recognition.drep ? { drep: recognition.drep } : {}),
     };
 
     await putItem(tableNames.comments, commentItem as unknown as Record<string, unknown>);
