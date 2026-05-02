@@ -35,7 +35,21 @@
 - Profile: drep-platform
 - Blockfrost key: stored in Secrets Manager at `drep-platform/dev/blockfrost-api-key`
 - JWT secret: stored in Secrets Manager at `drep-platform/dev/jwt-secret`
-- EventBridge sync: every 2 minutes
+- EventBridge sync: every 10 minutes (lowered from 2min after the dev Blockfrost project hit its daily quota — see QA_FINAL.md)
+
+## Day 4 — adastat-style governance card layout
+- Backend mapper (`mapBlockfrostProposalToGovernanceAction`) no longer
+  synthesizes `title` from the on-chain summary. `title` is now optional
+  and populated only from CIP-108 anchor body. `summary` stays as the
+  human-readable subtitle. `ENRICHMENT_VERSION` bumped 3 → 4.
+- Frontend cards + detail page re-laid out around Title / Type / Hash /
+  Metadata. Hash is click-to-copy with a toast. Metadata link opens the
+  CIP-108 anchor URL. Footer links to adastat + cardanoscan (`#`
+  percent-encoded). Bundle delta: +0.06 kB gzipped.
+- Re-enrichment to v4 is gated on the Blockfrost daily quota recovering;
+  the frontend has a defensive fallback that detects legacy synthetic
+  titles (title === summary || title === actionId, no anchorUrl) so the
+  new UX renders today regardless of the backend record version.
 
 ## Remaining / Phase 1-D+
 - [ ] Phase 1-D: Write tests (unit tests for auth.ts, integration tests for key flows)
