@@ -7,13 +7,30 @@ import {
   getProposalVotes,
   getTx,
   resolveAnchor,
+  mapActionType,
   mapBlockfrostProposalToGovernanceAction,
   mapKoiosProposalToGovernanceAction,
   mapStatus,
   type AnchorContent,
   type BlockfrostProposal,
+  type BlockfrostProposalVote,
 } from '../lib/blockfrost';
-import { listProposals as listKoiosProposals, KoiosError, type KoiosProposal } from '../lib/koios';
+import {
+  listProposals as listKoiosProposals,
+  listActiveDReps,
+  listActivePools,
+  getCommitteeMembers,
+  getPredefinedDRepPower,
+  KoiosError,
+  type KoiosProposal,
+} from '../lib/koios';
+import {
+  tallyVotesWithPower,
+  emptyTally as emptyVoteTally,
+  DREP_ALWAYS_ABSTAIN,
+  DREP_ALWAYS_NO_CONFIDENCE,
+  type TallyLookups,
+} from '../lib/voteTally';
 import { getItem, putItem, tableNames } from '../lib/dynamodb';
 import {
   findByAnchorUrl as findPillarByAnchorUrl,
@@ -28,6 +45,7 @@ import {
 import type {
   GovernanceAction,
   GovernanceActionItem,
+  GovernanceActionType,
   GovernanceMetadataSource,
   VoteTally,
 } from '../lib/types';
@@ -82,8 +100,18 @@ const ITEM_CONCURRENCY = 4;
  * tallies and as a graceful-fallback path when Koios is unreachable.
  * The proposal-pillar fallback is preserved for actions that have no
  * usable on-chain anchor body in either source.
+ * v6 → v7: `votes` shape now includes per-role `notVoted` and `totalActive`
+ * slices, computed from global active-voter lookups (Koios `drep_list` +
+ * `drep_info`, `pool_list`, `committee_info`). Each slice carries both a
+ * voter `count` and a `power` (lovelace, stringified). This lets the UI
+ * report "what fraction of total active voting power hasn't yet voted",
+ * which is the actual ratification denominator under CIP-1694 — distinct
+ * from "fraction of those who voted". Predefined DReps
+ * (drep_always_abstain, drep_always_no_confidence) contribute auto-votes
+ * to the DRep slices. Sync continues with empty `notVoted` if any active-
+ * voter lookup fails this cycle (graceful degradation).
  */
-const ENRICHMENT_VERSION = 6;
+const ENRICHMENT_VERSION = 7;
 
 function isEnrichmentFresh(existing: GovernanceActionItem | undefined, now: number): boolean {
   if (!existing) return false;
@@ -134,14 +162,27 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
   // record in O(1). Any failure (network, 5xx, 429, oversize) lands as a
   // null map and the per-item loop falls back to the legacy Blockfrost
   // enrichment path — sync MUST never fail because Koios is down.
+  //
+  // We also build the active-voter lookups (DRep / SPO / CC) in parallel
+  // with the proposal listing — they all hit Koios anyway and the per-
+  // action loop needs both. Lookup failures are independent (a missing
+  // pool list still lets us compute notVoted for DReps + CC, and so on);
+  // each failed lookup leaves its bundle slot undefined and the tally
+  // builder treats that role's notVoted as zero rather than lying about
+  // a denominator we don't know.
+  const [proposalsRes, lookupsRes] = await Promise.allSettled([
+    listKoiosProposals(),
+    buildVoterLookups(),
+  ]);
+
   let koiosByActionId: Map<string, KoiosProposal> | null = null;
-  try {
-    const koiosList = await listKoiosProposals();
+  if (proposalsRes.status === 'fulfilled') {
     koiosByActionId = new Map(
-      koiosList.map((p) => [`${p.proposal_tx_hash}#${p.proposal_index}`, p]),
+      proposalsRes.value.map((p) => [`${p.proposal_tx_hash}#${p.proposal_index}`, p]),
     );
-    console.log(`Governance intake: Koios returned ${koiosList.length} proposals`);
-  } catch (err) {
+    console.log(`Governance intake: Koios returned ${proposalsRes.value.length} proposals`);
+  } else {
+    const err = proposalsRes.reason;
     if (err instanceof KoiosError) {
       console.warn(
         `Governance intake: Koios unavailable (${err.message}); falling back to Blockfrost-only path`,
@@ -149,7 +190,12 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
     } else {
       console.warn('Governance intake: unexpected Koios error:', err);
     }
-    koiosByActionId = null;
+  }
+
+  const lookupBundle: VoterLookupBundle =
+    lookupsRes.status === 'fulfilled' ? lookupsRes.value : EMPTY_LOOKUPS;
+  if (lookupsRes.status === 'rejected') {
+    console.warn('Governance intake: voter-lookups build failed:', lookupsRes.reason);
   }
 
   let page = 1;
@@ -176,6 +222,16 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
         const now = new Date(nowMs).toISOString();
         const skipEnrichment = isEnrichmentFresh(existing, nowMs);
 
+        // The action type is needed up-front so the vote-tally builder can
+        // direction-flip the `drep_always_no_confidence` auto-vote. We
+        // prefer the Koios proposal record when available (the listing was
+        // fetched once at top of cycle); otherwise the Blockfrost stub
+        // already carries `governance_type`.
+        const koiosRecord = koiosByActionId?.get(actionId) ?? null;
+        const actionType: GovernanceActionType = koiosRecord
+          ? mapActionType(koiosRecord.proposal_type)
+          : mapActionType(rawAction.governance_type);
+
         // Hot path: enrichment is recent. We still need the full proposal
         // for status/epochDeadline (those mutate per epoch) AND the vote
         // tally (votes change as voting progresses). Anchor + tx block_time
@@ -190,9 +246,13 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
           if (proposalResult.status === 'rejected') {
             console.warn(`proposal refresh failed for ${actionId}:`, proposalResult.reason);
           }
+          // Re-tally on every cycle so notVoted/totalActive reflect the
+          // latest active-voter snapshot (totals can shift epoch-to-epoch).
+          // If the votes endpoint failed, keep the previously-stored tally
+          // rather than zeroing it out — stale-but-real beats fresh-but-empty.
           let votes: VoteTally | undefined = existing['votes'] as VoteTally | undefined;
           if (votesResult.status === 'fulfilled') {
-            votes = votesResult.value ?? votes;
+            votes = buildTallyFromRawVotes(votesResult.value, lookupBundle, actionType);
           } else {
             console.warn(`votes refresh failed for ${actionId}:`, votesResult.reason);
           }
@@ -218,7 +278,6 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
         // listing carried enough data. We still fetch votes from Blockfrost
         // (Koios's vote endpoints are paid-tier; Phase A keeps votes on the
         // existing path).
-        const koiosRecord = koiosByActionId?.get(actionId) ?? null;
         let votes: VoteTally | undefined;
         let mapped: Omit<GovernanceAction, 'ingestedAt' | 'lastSyncedAt'>;
 
@@ -233,7 +292,7 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
           ]);
           const voteRes = votesResult[0]!;
           if (voteRes.status === 'fulfilled') {
-            votes = voteRes.value ?? undefined;
+            votes = buildTallyFromRawVotes(voteRes.value, lookupBundle, actionType);
           } else {
             console.warn(`votes fetch failed for ${actionId}:`, voteRes.reason);
           }
@@ -273,7 +332,7 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
             console.warn(`anchor fetch failed for ${actionId}:`, metaResult.reason);
           }
           if (votesResult.status === 'fulfilled') {
-            votes = votesResult.value ?? undefined;
+            votes = buildTallyFromRawVotes(votesResult.value, lookupBundle, actionType);
           } else {
             console.warn(`votes fetch failed for ${actionId}:`, votesResult.reason);
           }
@@ -370,9 +429,179 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
   }
 
   console.log(
-    `Governance intake complete: written=${result.synced}, enrichmentSkipped=${result.skipped}, errors=${result.errors}`,
+    `Governance intake complete: written=${result.synced}, enrichmentSkipped=${result.skipped}, errors=${result.errors}; ` +
+      `lookups: drep=${lookupBundle.lookups.drepPower?.size ?? 0}/${lookupBundle.totals.totalDrepCount} pools=${lookupBundle.lookups.poolStake?.size ?? 0}/${lookupBundle.totals.totalPoolCount} cc=${lookupBundle.totals.totalCcCount}`,
   );
   return result;
+}
+
+// ---- Voter lookup bundle ----
+//
+// Built once per cycle. Contains:
+//   - drepPower / poolStake / committeeIds: the maps the tally builder
+//     uses to convert each raw vote into a power contribution.
+//   - alwaysAbstainPower / alwaysNoConfidencePower: predefined-DRep
+//     auto-vote totals, applied to every action's DRep slice.
+//   - totals: the role-level denominators (count + power), used by the
+//     tally builder to compute notVoted = totalActive - cast.
+
+interface VoterLookupBundle {
+  lookups: TallyLookups;
+  totals: {
+    totalDrepCount: number;
+    totalDrepPower: bigint;
+    totalPoolCount: number;
+    totalPoolPower: bigint;
+    totalCcCount: number;
+    totalCcPower: bigint;
+  };
+}
+
+const EMPTY_LOOKUPS: VoterLookupBundle = {
+  lookups: {},
+  totals: {
+    totalDrepCount: 0,
+    totalDrepPower: 0n,
+    totalPoolCount: 0,
+    totalPoolPower: 0n,
+    totalCcCount: 0,
+    totalCcPower: 0n,
+  },
+};
+
+/**
+ * Build the active-voter lookup bundle for one sync cycle. Each role's
+ * lookup is independent — if `pool_list` 5xxs we still get DRep + CC, and
+ * the resulting tally just reports zero notVoted for SPOs. The user sees
+ * partial-but-honest data rather than a stale or fabricated denominator.
+ *
+ * Predefined-DRep auto-votes are fetched separately because they're not
+ * in `drep_list`. If that call fails we treat them as zero — the basic
+ * notVoted math is the headline; predefined-DRep accounting is a
+ * refinement and can be backfilled in the next cycle.
+ */
+async function buildVoterLookups(): Promise<VoterLookupBundle> {
+  const [drepRes, poolRes, ccRes, predefRes] = await Promise.allSettled([
+    listActiveDReps(),
+    listActivePools(),
+    getCommitteeMembers(),
+    getPredefinedDRepPower([DREP_ALWAYS_ABSTAIN, DREP_ALWAYS_NO_CONFIDENCE]),
+  ]);
+
+  const lookups: TallyLookups = {};
+  const totals = {
+    totalDrepCount: 0,
+    totalDrepPower: 0n,
+    totalPoolCount: 0,
+    totalPoolPower: 0n,
+    totalCcCount: 0,
+    totalCcPower: 0n,
+  };
+
+  if (drepRes.status === 'fulfilled') {
+    const drepPower = new Map<string, bigint>();
+    let total = 0n;
+    for (const d of drepRes.value) {
+      try {
+        const amt = BigInt(d.amount);
+        drepPower.set(d.drep_id, amt);
+        total += amt;
+      } catch {
+        // Skip malformed amounts rather than throwing — one bad row
+        // shouldn't take down the whole bundle.
+      }
+    }
+    lookups.drepPower = drepPower;
+    totals.totalDrepCount = drepPower.size;
+    totals.totalDrepPower = total;
+  } else {
+    console.warn('Governance intake: listActiveDReps failed:', drepRes.reason);
+  }
+
+  if (poolRes.status === 'fulfilled') {
+    const poolStake = new Map<string, bigint>();
+    let total = 0n;
+    for (const p of poolRes.value) {
+      try {
+        const amt = BigInt(p.active_stake);
+        poolStake.set(p.pool_id_bech32, amt);
+        total += amt;
+      } catch {
+        // Skip malformed stake values.
+      }
+    }
+    lookups.poolStake = poolStake;
+    totals.totalPoolCount = poolStake.size;
+    totals.totalPoolPower = total;
+  } else {
+    console.warn('Governance intake: listActivePools failed:', poolRes.reason);
+  }
+
+  if (ccRes.status === 'fulfilled') {
+    const committeeIds = new Set<string>();
+    for (const m of ccRes.value) {
+      if (typeof m.cc_hot_id === 'string') committeeIds.add(m.cc_hot_id);
+    }
+    lookups.committeeIds = committeeIds;
+    totals.totalCcCount = committeeIds.size;
+    // CC has no per-voter weighting on mainnet today — power == count.
+    totals.totalCcPower = BigInt(committeeIds.size);
+  } else {
+    console.warn('Governance intake: getCommitteeMembers failed:', ccRes.reason);
+  }
+
+  if (predefRes.status === 'fulfilled') {
+    lookups.alwaysAbstainPower = predefRes.value.get(DREP_ALWAYS_ABSTAIN) ?? 0n;
+    lookups.alwaysNoConfidencePower =
+      predefRes.value.get(DREP_ALWAYS_NO_CONFIDENCE) ?? 0n;
+    // Predefined DReps aren't in `drep_list`, so their stake is NOT in
+    // `totalDrepPower` after the loop above. But the "active voting power"
+    // a user wants to see in the DRep totalActive denominator is the FULL
+    // amount of stake that COULD vote — which includes stake delegated to
+    // the predefined auto-voters. Without this addition, the auto-voted
+    // power gets counted in cast slices (abstain / no) without being in
+    // totalActive, and `notVoted.power` floors to zero on every action.
+    totals.totalDrepPower +=
+      lookups.alwaysAbstainPower + lookups.alwaysNoConfidencePower;
+    // We do NOT add predefined DReps to totalDrepCount — they aren't
+    // individual "voters" in the headcount sense; they're auto-vote
+    // delegations aggregating many delegators. Reporting "1 DRep voted"
+    // because of `drep_always_abstain` would be misleading.
+  } else {
+    console.warn(
+      'Governance intake: getPredefinedDRepPower failed; auto-votes treated as zero:',
+      predefRes.reason,
+    );
+  }
+
+  return { lookups, totals };
+}
+
+/**
+ * Wrap the pure `tallyVotesWithPower` so the per-action paths can call it
+ * without re-passing the totals every time. Returns `undefined` (not an
+ * empty tally) when the votes endpoint reported 404 — the action genuinely
+ * has no vote endpoint exposed, and the caller leaves the field unset.
+ */
+function buildTallyFromRawVotes(
+  votes: BlockfrostProposalVote[] | null,
+  bundle: VoterLookupBundle,
+  actionType: GovernanceActionType,
+): VoteTally | undefined {
+  if (votes === null) return undefined;
+  // If we have no lookups at all (every Koios call failed this cycle),
+  // emit the zero-totals tally — accurate counts, zero denominators —
+  // so the API consumer can tell the data is degraded but not stale.
+  // This is rare; the per-role lookups land independently.
+  if (
+    bundle.totals.totalDrepCount === 0 &&
+    bundle.totals.totalPoolCount === 0 &&
+    bundle.totals.totalCcCount === 0
+  ) {
+    // If there are also no votes, there's nothing useful to record.
+    if (votes.length === 0) return emptyVoteTally();
+  }
+  return tallyVotesWithPower(votes, bundle.totals, bundle.lookups, actionType);
 }
 
 /**
