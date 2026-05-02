@@ -8,10 +8,12 @@ import {
   getTx,
   resolveAnchor,
   mapBlockfrostProposalToGovernanceAction,
+  mapKoiosProposalToGovernanceAction,
   mapStatus,
   type AnchorContent,
   type BlockfrostProposal,
 } from '../lib/blockfrost';
+import { listProposals as listKoiosProposals, KoiosError, type KoiosProposal } from '../lib/koios';
 import { getItem, putItem, tableNames } from '../lib/dynamodb';
 import {
   findByAnchorUrl as findPillarByAnchorUrl,
@@ -24,6 +26,7 @@ import {
   isBlockfrostQuotaError,
 } from '../lib/circuitBreaker';
 import type {
+  GovernanceAction,
   GovernanceActionItem,
   GovernanceMetadataSource,
   VoteTally,
@@ -71,8 +74,16 @@ const ITEM_CONCURRENCY = 4;
  * `proposalPillarUrl` / `proposalPillarId` fields and a `metadataSource`
  * tag indicating where the data came from. On-chain anchor data still
  * wins when both sources exist.
+ * v5 → v6: Koios (`/proposal_list`) is now the primary metadata source.
+ * One bulk call returns the parsed CIP-108 body (`meta_json`), the on-chain
+ * description (`proposal_description`), lifecycle epoch fields, and
+ * `meta_is_valid` for every action — replacing 4 Blockfrost calls per
+ * action with one shared call. Blockfrost remains the source for vote
+ * tallies and as a graceful-fallback path when Koios is unreachable.
+ * The proposal-pillar fallback is preserved for actions that have no
+ * usable on-chain anchor body in either source.
  */
-const ENRICHMENT_VERSION = 5;
+const ENRICHMENT_VERSION = 6;
 
 function isEnrichmentFresh(existing: GovernanceActionItem | undefined, now: number): boolean {
   if (!existing) return false;
@@ -116,6 +127,30 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
     throw err;
   }
   const currentEpoch = epochInfo.epoch;
+
+  // ---- Koios primary fetch (Phase A) ----
+  // One bulk call replaces 4 Blockfrost calls per action. We index the
+  // result by `tx_hash#cert_index` so the per-item loop can look up its
+  // record in O(1). Any failure (network, 5xx, 429, oversize) lands as a
+  // null map and the per-item loop falls back to the legacy Blockfrost
+  // enrichment path — sync MUST never fail because Koios is down.
+  let koiosByActionId: Map<string, KoiosProposal> | null = null;
+  try {
+    const koiosList = await listKoiosProposals();
+    koiosByActionId = new Map(
+      koiosList.map((p) => [`${p.proposal_tx_hash}#${p.proposal_index}`, p]),
+    );
+    console.log(`Governance intake: Koios returned ${koiosList.length} proposals`);
+  } catch (err) {
+    if (err instanceof KoiosError) {
+      console.warn(
+        `Governance intake: Koios unavailable (${err.message}); falling back to Blockfrost-only path`,
+      );
+    } else {
+      console.warn('Governance intake: unexpected Koios error:', err);
+    }
+    koiosByActionId = null;
+  }
 
   let page = 1;
   const pageSize = 100;
@@ -178,51 +213,77 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
           return;
         }
 
-        // Cold path: full enrichment fetch.
-        let anchor: AnchorContent | null = null;
-        let submittedAt: string | undefined;
-        let fullProposal: BlockfrostProposal = rawAction;
+        // Cold path: full enrichment fetch. With Koios as primary we can
+        // skip the Blockfrost detail/anchor/tx round-trips when the bulk
+        // listing carried enough data. We still fetch votes from Blockfrost
+        // (Koios's vote endpoints are paid-tier; Phase A keeps votes on the
+        // existing path).
+        const koiosRecord = koiosByActionId?.get(actionId) ?? null;
         let votes: VoteTally | undefined;
+        let mapped: Omit<GovernanceAction, 'ingestedAt' | 'lastSyncedAt'>;
 
-        // The list response omits `governance_description` — we need the
-        // full proposal to render an on-chain summary. Fetch all four in
-        // parallel to keep the per-item latency low.
-        const [proposalResult, txResult, metaResult, votesResult] = await Promise.allSettled([
-          getGovernanceAction(rawAction.tx_hash, rawAction.cert_index),
-          getTx(rawAction.tx_hash),
-          getProposalAnchor(rawAction.tx_hash, rawAction.cert_index),
-          getProposalVotes(rawAction.tx_hash, rawAction.cert_index),
-        ]);
-        if (proposalResult.status === 'fulfilled') {
-          fullProposal = proposalResult.value;
-        } else {
-          console.warn(`proposal fetch failed for ${actionId}:`, proposalResult.reason);
-        }
-        if (txResult.status === 'fulfilled' && typeof txResult.value.block_time === 'number') {
-          submittedAt = new Date(txResult.value.block_time * 1000).toISOString();
-        } else if (txResult.status === 'rejected') {
-          console.warn(`tx fetch failed for ${actionId}:`, txResult.reason);
-        }
-        if (metaResult.status === 'fulfilled') {
-          try {
-            anchor = await resolveAnchor(metaResult.value);
-          } catch (err) {
-            console.warn(`anchor resolve failed for ${actionId}:`, err);
+        if (koiosRecord) {
+          // ---- Koios fast path ----
+          // Bulk listing already gave us metadata, on-chain description,
+          // submittedAt, anchor URL/hash/validity, and lifecycle epochs.
+          // Only votes are missing — fetch them from Blockfrost in parallel
+          // with the mapping work (which is just CPU).
+          const votesResult = await Promise.allSettled([
+            getProposalVotes(rawAction.tx_hash, rawAction.cert_index),
+          ]);
+          const voteRes = votesResult[0]!;
+          if (voteRes.status === 'fulfilled') {
+            votes = voteRes.value ?? undefined;
+          } else {
+            console.warn(`votes fetch failed for ${actionId}:`, voteRes.reason);
           }
+          mapped = mapKoiosProposalToGovernanceAction(koiosRecord, currentEpoch, { votes });
         } else {
-          console.warn(`anchor fetch failed for ${actionId}:`, metaResult.reason);
-        }
-        if (votesResult.status === 'fulfilled') {
-          votes = votesResult.value ?? undefined;
-        } else {
-          console.warn(`votes fetch failed for ${actionId}:`, votesResult.reason);
-        }
+          // ---- Legacy Blockfrost fallback ----
+          // Koios was unreachable OR didn't carry this specific action.
+          // Run the original 4-call enrichment chain so we degrade gracefully
+          // to the pre-Koios behavior.
+          let anchor: AnchorContent | null = null;
+          let submittedAt: string | undefined;
+          let fullProposal: BlockfrostProposal = rawAction;
 
-        const mapped = mapBlockfrostProposalToGovernanceAction(fullProposal, currentEpoch, {
-          anchor,
-          submittedAt,
-          votes,
-        });
+          const [proposalResult, txResult, metaResult, votesResult] = await Promise.allSettled([
+            getGovernanceAction(rawAction.tx_hash, rawAction.cert_index),
+            getTx(rawAction.tx_hash),
+            getProposalAnchor(rawAction.tx_hash, rawAction.cert_index),
+            getProposalVotes(rawAction.tx_hash, rawAction.cert_index),
+          ]);
+          if (proposalResult.status === 'fulfilled') {
+            fullProposal = proposalResult.value;
+          } else {
+            console.warn(`proposal fetch failed for ${actionId}:`, proposalResult.reason);
+          }
+          if (txResult.status === 'fulfilled' && typeof txResult.value.block_time === 'number') {
+            submittedAt = new Date(txResult.value.block_time * 1000).toISOString();
+          } else if (txResult.status === 'rejected') {
+            console.warn(`tx fetch failed for ${actionId}:`, txResult.reason);
+          }
+          if (metaResult.status === 'fulfilled') {
+            try {
+              anchor = await resolveAnchor(metaResult.value);
+            } catch (err) {
+              console.warn(`anchor resolve failed for ${actionId}:`, err);
+            }
+          } else {
+            console.warn(`anchor fetch failed for ${actionId}:`, metaResult.reason);
+          }
+          if (votesResult.status === 'fulfilled') {
+            votes = votesResult.value ?? undefined;
+          } else {
+            console.warn(`votes fetch failed for ${actionId}:`, votesResult.reason);
+          }
+
+          mapped = mapBlockfrostProposalToGovernanceAction(fullProposal, currentEpoch, {
+            anchor,
+            submittedAt,
+            votes,
+          });
+        }
 
         // ---- Proposal-pillar fallback ----
         // If the CIP-108 anchor produced a title, the on-chain source is
@@ -347,7 +408,9 @@ async function processWithConcurrency<T>(
 }
 
 /**
- * EventBridge scheduled Lambda handler — fires every 2 minutes via SchedulerStack.
+ * EventBridge scheduled Lambda handler — cadence is owned by SchedulerStack
+ * (Phase A: every 1 minute, with Koios as the primary metadata source so
+ * Blockfrost call volume comfortably fits within the Discovery tier budget).
  */
 export const handler = async (
   _event: ScheduledEvent,
