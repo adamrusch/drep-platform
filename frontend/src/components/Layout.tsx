@@ -18,6 +18,7 @@ import {
 import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
 import { useUiStore } from '@/stores/uiStore';
 import { useThemeStore } from '@/stores/themeStore';
+import { useEpoch } from '@/hooks/useEpoch';
 import { WalletButton } from './WalletButton';
 import { cn, formatWalletAddress } from '@/lib/utils';
 import type { UserRole } from '@/types';
@@ -100,6 +101,7 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
   const navigate = useNavigate();
   const theme = useThemeStore((s) => s.theme);
   const toggleTheme = useThemeStore((s) => s.toggle);
+  const { data: epochInfo } = useEpoch();
 
   // Auto-close mobile drawer on route change so a tap on a nav item
   // navigates *and* clears the overlay.
@@ -247,7 +249,7 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
             >
               <span>Epoch</span>
             </div>
-            <div className="epoch-card__num">—</div>
+            <div className="epoch-card__num">{epochInfo?.epoch ?? '—'}</div>
             <div className="epoch-card__sub">Synced from Blockfrost</div>
           </div>
         </div>
