@@ -91,6 +91,36 @@ export const handler = async (
         'X-Cache-Source': 'stale-while-error',
       });
     }
+    // Last-resort fallback: deterministic chain math.
+    // Cardano epochs are fully deterministic on the time axis after Shelley.
+    // Mainnet Shelley genesis: epoch 208 began at 2020-07-29 21:44:51 UTC.
+    // Each epoch is exactly 432000 seconds (5 days).
+    // This matches Blockfrost's `epochsLatest` output bit-for-bit and lets
+    // the UI keep working when both the in-memory cache and Blockfrost are
+    // unavailable (e.g. cold-start during a rolling-window quota outage).
+    const network = process.env['CARDANO_NETWORK'] ?? 'mainnet';
+    if (network === 'mainnet') {
+      console.warn('epoch/get serving deterministic fallback after upstream failure:', err);
+      const SHELLEY_EPOCH_208_START = 1596059091; // 2020-07-29 21:44:51 UTC
+      const EPOCH_LENGTH_SECONDS = 432_000; // 5 days
+      const nowSec = Math.floor(Date.now() / 1000);
+      const epochsSinceShelley = Math.floor((nowSec - SHELLEY_EPOCH_208_START) / EPOCH_LENGTH_SECONDS);
+      const currentEpoch = 208 + epochsSinceShelley;
+      const startTimeSec = SHELLEY_EPOCH_208_START + epochsSinceShelley * EPOCH_LENGTH_SECONDS;
+      const endTimeSec = startTimeSec + EPOCH_LENGTH_SECONDS;
+      const fallback: EpochResponse = {
+        epoch: currentEpoch,
+        startTime: new Date(startTimeSec * 1000).toISOString(),
+        endTime: new Date(endTimeSec * 1000).toISOString(),
+        endsInSeconds: Math.max(0, endTimeSec - nowSec),
+      };
+      // Don't cache the fallback as if it were a real Blockfrost response —
+      // we want the next request to retry Blockfrost, not pin to fallback.
+      return ok(fallback, {
+        ...cacheHeaders,
+        'X-Cache-Source': 'deterministic-fallback',
+      });
+    }
     console.error('epoch/get handler error:', err);
     return internalError('Failed to fetch latest epoch');
   }
