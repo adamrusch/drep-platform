@@ -13,7 +13,16 @@ import {
   type BlockfrostProposal,
 } from '../lib/blockfrost';
 import { getItem, putItem, tableNames } from '../lib/dynamodb';
-import type { GovernanceActionItem, VoteTally } from '../lib/types';
+import {
+  findByAnchorUrl as findPillarByAnchorUrl,
+  findByOnChainTxHash as findPillarByTxHash,
+  type ProposalPillarEntry,
+} from '../lib/proposalPillar';
+import type {
+  GovernanceActionItem,
+  GovernanceMetadataSource,
+  VoteTally,
+} from '../lib/types';
 
 export interface IntakeResult {
   synced: number;
@@ -51,8 +60,14 @@ const ITEM_CONCURRENCY = 4;
  * body title (or undefined). The frontend surfaces the synthesized
  * `summary` as a subtitle. Bumping the version forces all rows to
  * re-enrich so stale "Withdraw …" titles get cleared to undefined.
+ * v4 → v5: when the on-chain CIP-108 anchor is missing or has no title,
+ * fall back to the gov.tools proposal-discussion forum API to populate
+ * `title` / `abstract` / `motivation` / `rationale`, plus the new
+ * `proposalPillarUrl` / `proposalPillarId` fields and a `metadataSource`
+ * tag indicating where the data came from. On-chain anchor data still
+ * wins when both sources exist.
  */
-const ENRICHMENT_VERSION = 4;
+const ENRICHMENT_VERSION = 5;
 
 function isEnrichmentFresh(existing: GovernanceActionItem | undefined, now: number): boolean {
   if (!existing) return false;
@@ -178,11 +193,40 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
           votes,
         });
 
+        // ---- Proposal-pillar fallback ----
+        // If the CIP-108 anchor produced a title, the on-chain source is
+        // canonical and we skip the fallback entirely. Otherwise try the
+        // gov.tools forum API: first by tx hash (most reliable when the
+        // draft was actually submitted), then by anchor URL (handles the
+        // case where the anchor exists but is unparseable, or where the
+        // forum draft links to the eventual on-chain anchor URL).
+        let pillarEntry: ProposalPillarEntry | null = null;
+        let metadataSource: GovernanceMetadataSource = 'none';
+        if (mapped.title) {
+          metadataSource = 'on-chain-anchor';
+        } else {
+          if (rawAction.tx_hash) {
+            pillarEntry = await findPillarByTxHash(rawAction.tx_hash);
+          }
+          if (!pillarEntry && mapped.anchorUrl) {
+            pillarEntry = await findPillarByAnchorUrl(mapped.anchorUrl);
+          }
+          if (pillarEntry) {
+            metadataSource = 'proposal-pillar';
+            console.log(
+              `proposal-pillar fallback applied: actionId=${actionId} pillarId=${pillarEntry.id}`,
+            );
+          } else if (mapped.abstract || mapped.motivation || mapped.rationale) {
+            // Anchor was present and gave us body text but no title.
+            metadataSource = 'on-chain-anchor';
+          }
+        }
         const item: GovernanceActionItem = {
           actionId,
           SK: 'ACTION',
           actionType: mapped.actionType,
-          title: mapped.title,
+          // `title` precedence: on-chain anchor → pillar fallback.
+          title: mapped.title ?? pillarEntry?.prop_name,
           description: mapped.description,
           submittedAt:
             mapped.submittedAt && !mapped.submittedAt.startsWith('1970-01-01')
@@ -202,10 +246,15 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
           anchorUrl: mapped.anchorUrl,
           anchorHash: mapped.anchorHash,
           anchorVerified: mapped.anchorVerified,
-          abstract: mapped.abstract,
-          motivation: mapped.motivation,
-          rationale: mapped.rationale,
-          references: mapped.references,
+          // Each body field falls back independently — on-chain anchor data
+          // is canonical when present, pillar fills only the gaps.
+          abstract: mapped.abstract ?? pillarEntry?.prop_abstract,
+          motivation: mapped.motivation ?? pillarEntry?.prop_motivation,
+          rationale: mapped.rationale ?? pillarEntry?.prop_rationale,
+          references: mapped.references ?? pillarEntry?.references,
+          proposalPillarUrl: pillarEntry?.proposalPillarUrl,
+          proposalPillarId: pillarEntry?.id,
+          metadataSource,
           summary: mapped.summary,
           details: mapped.details,
           proposerAddress: mapped.proposerAddress,

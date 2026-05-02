@@ -54,9 +54,11 @@ export function GovernanceActionCard({
   // Until the backend re-enriches (Blockfrost daily quota gate), some rows
   // still carry a legacy synthetic `title` equal to the on-chain summary or
   // the bare actionId. Treat those as "no anchor" so the UI reflects the
-  // intended Title / Type / Hash / Metadata separation either way.
+  // intended Title / Type / Hash / Metadata separation either way. Pillar
+  // titles are never legacy-synthetic.
   const isSyntheticTitle =
     !action.anchorUrl &&
+    action.metadataSource !== 'proposal-pillar' &&
     typeof action.title === 'string' &&
     (action.title === action.actionId || action.title === summary);
   const hasTitle =
@@ -80,6 +82,8 @@ export function GovernanceActionCard({
     }
   };
 
+  const isPillarSourced = action.metadataSource === 'proposal-pillar';
+
   return (
     <Link
       to={`/governance/${encodeURIComponent(action.actionId)}`}
@@ -99,6 +103,13 @@ export function GovernanceActionCard({
             {TYPE_LABELS[action.actionType]}
           </span>
           <StatusPill status={action.status} label={action.adminOverrideLabel ?? undefined} />
+          {isPillarSourced && (
+            <StatusPill
+              status="discussion"
+              label="Discussion forum"
+              title="Title and abstract sourced from gov.tools proposal-discussion forum (no on-chain anchor)"
+            />
+          )}
         </div>
         {action.anchorUrl ? (
           <a
@@ -110,6 +121,18 @@ export function GovernanceActionCard({
             title={action.anchorUrl}
           >
             Metadata
+            <ExternalLink size={11} strokeWidth={2} aria-hidden="true" />
+          </a>
+        ) : action.proposalPillarUrl ? (
+          <a
+            href={action.proposalPillarUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={stopRowNav}
+            className="flex-shrink-0 inline-flex items-center gap-1 text-[11.5px] text-[var(--text-tertiary)] hover:text-[var(--brand-primary)] hover:underline"
+            title="View on gov.tools proposal-discussion forum"
+          >
+            Discussion
             <ExternalLink size={11} strokeWidth={2} aria-hidden="true" />
           </a>
         ) : (

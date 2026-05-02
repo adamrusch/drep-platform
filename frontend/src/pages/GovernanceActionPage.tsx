@@ -29,6 +29,9 @@ import type { GovernanceAction } from '@/types';
  *  both the new and old data shapes. */
 function displayTitle(action: GovernanceAction): string | null {
   if (typeof action.title !== 'string' || action.title.length === 0) return null;
+  // Pillar-sourced titles are real off-chain titles — never treat them as
+  // legacy synthetic placeholders even though `anchorUrl` is absent.
+  if (action.metadataSource === 'proposal-pillar') return action.title;
   if (!action.anchorUrl) {
     if (action.title === action.actionId) return null;
     if (action.summary && action.title === action.summary) return null;
@@ -168,6 +171,13 @@ export function GovernanceActionPage(): React.ReactElement {
           ) : hasAnchorIndicator ? (
             <StatusPill status="warning" label="Anchor mismatch" />
           ) : null}
+          {action.metadataSource === 'proposal-pillar' && (
+            <StatusPill
+              status="discussion"
+              label="Discussion forum"
+              title="Title and abstract sourced from gov.tools proposal-discussion forum (no on-chain anchor)"
+            />
+          )}
           <span className="ml-auto flex items-center gap-1.5">
             {action.anchorUrl && (
               <a
@@ -256,6 +266,18 @@ export function GovernanceActionPage(): React.ReactElement {
             cardanoscan
             <ExternalLink size={11} strokeWidth={2} aria-hidden="true" />
           </a>
+          {action.proposalPillarUrl && (
+            <a
+              href={action.proposalPillarUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-[11.5px] text-[var(--text-tertiary)] hover:text-[var(--brand-primary)] hover:underline"
+              title="View discussion thread on gov.tools"
+            >
+              View discussion thread
+              <ExternalLink size={11} strokeWidth={2} aria-hidden="true" />
+            </a>
+          )}
         </div>
       </div>
 

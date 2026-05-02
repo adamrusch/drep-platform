@@ -21,12 +21,20 @@ export type GovernanceActionStatus = 'active' | 'expired' | 'enacted' | 'dropped
 
 export type SessionType = 'normal' | 'remember_me';
 
+/** Where the off-chain metadata (title/abstract/...) on this action came
+ *  from. `on-chain-anchor` = parsed CIP-108 anchor body. `proposal-pillar`
+ *  = matched gov.tools forum draft (fallback when the on-chain anchor is
+ *  missing or has no title). `none` = neither — the UI falls back to the
+ *  synthesized on-chain summary only. */
+export type GovernanceMetadataSource = 'on-chain-anchor' | 'proposal-pillar' | 'none';
+
 export interface GovernanceAction {
   actionId: string;
   actionType: GovernanceActionType;
-  /** Off-chain CIP-108 anchor title. Undefined when the proposal has no
-   *  anchor or the anchor body has no `title` field. The synthesized
-   *  on-chain `summary` is rendered as a subtitle in that case. */
+  /** Off-chain title — from the CIP-108 anchor body when present, else
+   *  from a matched gov.tools forum draft. Undefined when neither source
+   *  yields a title; `summary` is rendered as a subtitle in that case.
+   *  See `metadataSource` to disambiguate. */
   title?: string;
   description: string;
   submittedAt: string;
@@ -45,6 +53,15 @@ export interface GovernanceAction {
   motivation?: string;
   rationale?: string;
   references?: GovernanceReference[];
+  // ---- Proposal-pillar (gov.tools forum draft) fallback metadata ----
+  /** Public discussion-thread URL. Synthesized as
+   *  `https://gov.tools/proposal_discussion/{id}`. Present only when this
+   *  action was matched to a forum draft. */
+  proposalPillarUrl?: string;
+  /** Numeric forum proposal ID. Stored for traceability. */
+  proposalPillarId?: number;
+  /** Indicates which off-chain source produced the displayed metadata. */
+  metadataSource?: GovernanceMetadataSource;
   // ---- On-chain summary (built from governance_description) ----
   summary?: string;
   details?: GovernanceDetail[];
