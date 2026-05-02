@@ -9,7 +9,7 @@ import { putItem, getItem, deleteItem, tableNames } from './dynamodb';
 
 interface AuthNonceItem extends Record<string, unknown> {
   nonce: string;
-  kind: 'challenge' | 'mutation';
+  kind: 'challenge' | 'mutation' | 'circuit';
   walletAddress: string;
   expiresAt: number; // epoch seconds for DynamoDB TTL
 }

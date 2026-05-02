@@ -39,6 +39,10 @@ export class SchedulerStack extends cdk.Stack {
     });
 
     databaseStack.governanceActionsTable.grantReadWriteData(syncRole);
+    // The sync writes a circuit-breaker marker to the auth_nonces table when
+    // Blockfrost rate-limits us, so it can skip subsequent runs cleanly
+    // (see backend/src/lib/circuitBreaker.ts).
+    databaseStack.authNoncesTable.grantReadWriteData(syncRole);
     blockfrostSecret.grantRead(syncRole);
 
     // ---- Governance sync Lambda ----
