@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
@@ -8,6 +8,7 @@ import { WalletAuthProvider } from '@/auth/WalletAuthProvider';
 import { Layout } from '@/components/Layout';
 import { RoleGuard } from '@/components/RoleGuard';
 import { useAuthStore } from '@/stores/authStore';
+import { useThemeStore } from '@/stores/themeStore';
 
 import { Home } from '@/pages/Home';
 import { GuestLanding } from '@/pages/GuestLanding';
@@ -20,6 +21,7 @@ import { DRepDashboard } from '@/pages/DRepDashboard';
 import { DelegatorDashboard } from '@/pages/DelegatorDashboard';
 import { ProfileSetup } from '@/pages/ProfileSetup';
 import { PublicProfilePage } from '@/pages/PublicProfilePage';
+import { ComingSoon } from '@/pages/ComingSoon';
 
 /**
  * Routes the user to the correct dashboard based on their role.
@@ -35,6 +37,14 @@ function DashboardRouter(): React.ReactElement {
 }
 
 function App(): React.ReactElement {
+  const theme = useThemeStore((s) => s.theme);
+
+  // Mirror the persisted theme onto the root <html> element so the
+  // [data-theme="dark"] CSS block in design-system.css activates.
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
+
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
@@ -119,6 +129,53 @@ function App(): React.ReactElement {
                 }
               />
               <Route path="/profile/:walletAddress" element={<PublicProfilePage />} />
+
+              {/* Coming-soon stubs — referenced by sidebar nav so links resolve */}
+              <Route
+                path="/clubhouse"
+                element={
+                  <ComingSoon
+                    title="Delegator Clubhouse"
+                    description="Browse the public lobby and find a DRep clubhouse to join. The lobby and your subscribed clubhouses will land here next."
+                  />
+                }
+              />
+              <Route
+                path="/committee"
+                element={
+                  <ComingSoon
+                    title="Committee"
+                    description="Constitutional Committee directory, voting power, and cross-DRep coordination. Coming soon."
+                  />
+                }
+              />
+              <Route
+                path="/dreps"
+                element={
+                  <ComingSoon
+                    title="DRep Directory"
+                    description="Search every DRep by stake, expertise, and recent activity. Coming soon."
+                  />
+                }
+              />
+              <Route
+                path="/rationales"
+                element={
+                  <ComingSoon
+                    title="Rationales"
+                    description="Browse vote rationales from active DReps and committee members. Coming soon."
+                  />
+                }
+              />
+              <Route
+                path="/notifications"
+                element={
+                  <ComingSoon
+                    title="Notifications"
+                    description="Track replies, mentions, governance updates, and clubhouse activity. Coming soon."
+                  />
+                }
+              />
 
               {/* Catch-all redirect */}
               <Route path="*" element={<Navigate to="/" replace />} />

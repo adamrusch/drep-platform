@@ -2,18 +2,12 @@ import React from 'react';
 import { Link } from 'react-router-dom';
 import type { GovernanceAction } from '@/types';
 import { formatRelativeTime, epochsToDate, cn } from '@/lib/utils';
+import { StatusPill } from '@/components/ui/StatusPill';
 
 interface GovernanceActionCardProps {
   action: GovernanceAction;
   className?: string;
 }
-
-const STATUS_CLASSES: Record<GovernanceAction['status'], string> = {
-  active: 'bg-green-100 text-green-800',
-  expired: 'bg-gray-100 text-gray-600',
-  enacted: 'bg-blue-100 text-blue-800',
-  dropped: 'bg-red-100 text-red-700',
-};
 
 const TYPE_LABELS: Record<GovernanceAction['actionType'], string> = {
   ParameterChange: 'Parameter Change',
@@ -52,32 +46,35 @@ export function GovernanceActionCard({
     <Link
       to={`/governance/${encodeURIComponent(action.actionId)}`}
       className={cn(
-        'block rounded-lg border border-border bg-card p-4',
-        'hover:border-primary/50 hover:shadow-sm transition-all',
+        // Card chrome — design system spec, NOT the harsh hand-rolled border.
+        'block bg-[var(--bg-canvas)] border border-[var(--border-default)]',
+        'rounded-token-xl shadow-token-sm p-5',
+        'transition-all duration-150',
+        'hover:border-[var(--border-strong)] hover:shadow-token-md hover:-translate-y-px',
         className,
       )}
     >
       <div className="flex items-start justify-between gap-3">
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-xs font-medium text-muted-foreground">
+          <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+            <span className="text-[11.5px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">
               {TYPE_LABELS[action.actionType]}
             </span>
-            <span
-              className={cn(
-                'text-xs font-medium px-1.5 py-0.5 rounded-full',
-                STATUS_CLASSES[action.status],
-              )}
-            >
-              {action.adminOverrideLabel ?? action.status}
-            </span>
+            <StatusPill
+              status={action.status}
+              label={action.adminOverrideLabel ?? undefined}
+            />
           </div>
-          <h3 className="font-semibold text-sm leading-tight line-clamp-2">{displayTitle(action)}</h3>
+          <h3 className="font-semibold text-[15px] leading-snug line-clamp-2 text-[var(--text-primary)] tracking-tight">
+            {displayTitle(action)}
+          </h3>
           {subtitle && (
-            <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{subtitle}</p>
+            <p className="text-[13px] text-[var(--text-secondary)] mt-1.5 line-clamp-2 leading-relaxed">
+              {subtitle}
+            </p>
           )}
           <code
-            className="mt-2 inline-block text-[10px] text-muted-foreground/70 font-mono"
+            className="mt-2.5 inline-block text-[11px] text-[var(--text-muted)] font-mono"
             title={action.actionId}
           >
             {shortActionId(action.actionId)}
@@ -85,7 +82,7 @@ export function GovernanceActionCard({
         </div>
       </div>
 
-      <div className="mt-3 flex items-center justify-between text-xs text-muted-foreground">
+      <div className="mt-3 pt-3 border-t border-[var(--border-subtle)] flex items-center justify-between text-[11.5px] text-[var(--text-tertiary)] tabular-nums">
         <span>Submitted {formatRelativeTime(action.submittedAt)}</span>
         <span>
           Deadline: Epoch {action.epochDeadline} ({epochsToDate(action.epochDeadline)})

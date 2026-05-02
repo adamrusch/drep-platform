@@ -4,14 +4,16 @@ import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
 import { useWalletAuth } from '@/auth/useWalletAuth';
 import { CARDANO_NETWORK } from '@/auth/WalletAuthProvider';
 import { useUiStore } from '@/stores/uiStore';
-import { cn } from '@/lib/utils';
+import { Button } from '@/components/ui/Button';
 
 interface WalletButtonProps {
   className?: string;
 }
 
 export function WalletButton({ className }: WalletButtonProps): React.ReactElement {
-  const { wallet, connected } = useWallet();
+  const { wallet: _wallet, connected: _connected } = useWallet();
+  void _wallet;
+  void _connected;
   const walletList = useWalletList();
   const isAuthenticated = useIsAuthenticated();
   const walletAddress = useAuthStore((s) => s.walletAddress);
@@ -57,40 +59,34 @@ export function WalletButton({ className }: WalletButtonProps): React.ReactEleme
 
   if (isAuthenticated && walletAddress) {
     return (
-      <button
-        onClick={handleDisconnect}
+      <Button
+        variant="secondary"
+        onClick={() => void handleDisconnect()}
         disabled={isLoading}
-        className={cn(
-          'rounded-md border border-border px-3 py-1.5 text-sm font-medium',
-          'hover:bg-accent hover:text-accent-foreground transition-colors',
-          'disabled:opacity-50',
-          className,
-        )}
+        className={className}
       >
         {isLoading ? 'Disconnecting…' : `${walletAddress.slice(0, 8)}…`}
-      </button>
+      </Button>
     );
   }
 
   return (
     <div className="relative">
-      <button
+      <Button
+        variant="primary"
         onClick={() => setShowWalletList(!showWalletList)}
         disabled={isLoading}
-        className={cn(
-          'rounded-md bg-primary text-primary-foreground px-3 py-1.5 text-sm font-medium',
-          'hover:bg-primary/90 transition-colors',
-          'disabled:opacity-50',
-          className,
-        )}
+        className={className}
       >
         {isLoading ? 'Connecting…' : 'Connect Wallet'}
-      </button>
+      </Button>
 
       {showWalletList && (
-        <div className="absolute right-0 top-full mt-1 w-48 rounded-md border border-border bg-popover shadow-lg z-50">
+        <div
+          className="absolute right-0 top-full mt-2 w-56 rounded-token-lg border border-[var(--border-default)] bg-[var(--bg-canvas)] shadow-token-lg z-50 py-1"
+        >
           {walletList.length === 0 ? (
-            <div className="p-3 text-sm text-muted-foreground">
+            <div className="p-3 text-sm text-[var(--text-secondary)]">
               No Cardano wallets detected.
               <br />
               Install Nami, Eternl, or Flint.
@@ -100,7 +96,7 @@ export function WalletButton({ className }: WalletButtonProps): React.ReactEleme
               <button
                 key={w.name}
                 onClick={() => void handleConnectWallet(w.name)}
-                className="flex w-full items-center gap-2 px-3 py-2 text-sm hover:bg-accent transition-colors"
+                className="flex w-full items-center gap-2 px-3 py-2 text-sm hover:bg-[var(--bg-muted)] transition-colors text-[var(--text-primary)]"
               >
                 {w.icon && (
                   <img src={w.icon} alt={w.name} className="h-5 w-5 rounded" />
@@ -113,7 +109,7 @@ export function WalletButton({ className }: WalletButtonProps): React.ReactEleme
       )}
 
       {error && (
-        <p className="absolute top-full mt-1 right-0 text-xs text-destructive w-48 text-right">
+        <p className="absolute top-full mt-1 right-0 text-xs text-[var(--danger)] w-56 text-right">
           {error}
         </p>
       )}

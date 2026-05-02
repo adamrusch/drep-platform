@@ -42,28 +42,29 @@ export function CommentList({ comments, actionId, isLoading }: CommentListProps)
         <div
           key={comment.commentId}
           className={cn(
-            'rounded-md border border-border bg-card p-3',
-            comment.isDRep && 'border-cardano-blue/30 bg-blue-50/30',
+            'rounded-token-lg border border-[var(--border-default)] bg-[var(--bg-canvas)] p-4 shadow-token-sm',
+            comment.isDRep &&
+              'border-[var(--brand-primary)]/30 bg-[var(--brand-primary-soft)]/30',
           )}
         >
           <div className="flex items-start justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sm font-semibold text-[var(--text-primary)]">
                 {comment.displayName ?? formatWalletAddress(comment.walletAddress)}
               </span>
               {comment.isDRep && (
-                <span className="text-xs bg-cardano-blue text-white px-1.5 py-0.5 rounded-full font-medium">
+                <span className="text-[11.5px] font-semibold bg-[var(--brand-primary-soft)] text-[var(--brand-primary)] px-2 py-0.5 rounded-token-full">
                   DRep
                 </span>
               )}
               {!comment.isPublic && (
-                <span className="text-xs bg-muted text-muted-foreground px-1.5 py-0.5 rounded-full">
+                <span className="text-[11.5px] font-semibold bg-[var(--bg-muted)] text-[var(--text-secondary)] px-2 py-0.5 rounded-token-full">
                   Members only
                 </span>
               )}
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-xs text-muted-foreground">
+              <span className="text-xs text-[var(--text-tertiary)]">
                 {formatRelativeTime(comment.createdAt)}
               </span>
               {canDelete(comment) && (
@@ -75,14 +76,16 @@ export function CommentList({ comments, actionId, isLoading }: CommentListProps)
                     })
                   }
                   disabled={deleteComment.isPending}
-                  className="text-xs text-destructive hover:underline disabled:opacity-50"
+                  className="text-xs text-[var(--danger)] hover:underline disabled:opacity-50"
                 >
                   Delete
                 </button>
               )}
             </div>
           </div>
-          <p className="text-sm mt-2 text-foreground/90 whitespace-pre-wrap">{comment.body}</p>
+          <p className="text-sm mt-2 text-[var(--text-secondary)] whitespace-pre-wrap leading-relaxed">
+            {comment.body}
+          </p>
         </div>
       ))}
     </div>
