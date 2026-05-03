@@ -472,29 +472,14 @@ export class ApiStack extends cdk.Stack {
         },
       );
 
-      // No-cache (passthrough) cache + origin policies. Used for /auth/*
-      // and any mutation route. Cookies + Authorization + everything else
-      // forward verbatim, and we explicitly disable caching.
-      const passthroughCachePolicy = new cloudfront.CachePolicy(
-        this,
-        'ApiPassthroughCachePolicy',
-        {
-          cachePolicyName: `drep-platform-${stage}-api-passthrough`,
-          comment: 'No edge caching — pass through to origin.',
-          defaultTtl: cdk.Duration.seconds(0),
-          minTtl: cdk.Duration.seconds(0),
-          maxTtl: cdk.Duration.seconds(0),
-          cookieBehavior: cloudfront.CacheCookieBehavior.all(),
-          headerBehavior: cloudfront.CacheHeaderBehavior.allowList(
-            'Authorization',
-            'Origin',
-            'Content-Type',
-          ),
-          queryStringBehavior: cloudfront.CacheQueryStringBehavior.all(),
-          enableAcceptEncodingGzip: true,
-          enableAcceptEncodingBrotli: true,
-        },
-      );
+      // No-cache (passthrough) for /auth/* and mutation routes. Use the
+      // AWS-managed `CachingDisabled` policy — CloudFront rejects custom
+      // cache policies with TTL=0 that also set HeaderBehavior, since
+      // header inclusion in the cache key is meaningless when nothing is
+      // cached. The managed CachingDisabled policy correctly omits cache-
+      // key fields entirely. Origin behavior (what gets forwarded) is
+      // controlled separately by the origin request policy below.
+      const passthroughCachePolicy = cloudfront.CachePolicy.CACHING_DISABLED;
       // ALL_VIEWER_EXCEPT_HOST_HEADER is a CloudFront-managed origin
       // request policy that forwards every header / cookie / query string
       // from the viewer EXCEPT Host (which CloudFront overwrites with the
