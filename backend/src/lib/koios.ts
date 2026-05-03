@@ -316,6 +316,7 @@ export function _resetCache(): void {
   _poolCache = null;
   _committeeCache = null;
   _voteCache = null;
+  _tipCache = null;
 }
 
 // ---- Internal helpers ----
@@ -771,6 +772,62 @@ export async function listAllVotes(): Promise<KoiosVote[]> {
   }
   _voteCache = { fetchedAt: now, value: all };
   return all;
+}
+
+/**
+ * Group an already-fetched vote list by `actionId` (`tx_hash#cert_index`).
+ * Used by the governance-intake sync to convert the global `vote_list` feed
+ * into per-proposal slices in O(N) once per cycle, replacing the per-action
+ * Blockfrost `proposalVotes` calls (which were costing ~109 calls/cycle on
+ * mainnet today).
+ *
+ * The map key matches the `actionId` shape used everywhere else in the sync
+ * so callers can pluck their votes with a single `.get(actionId)`.
+ */
+export function groupVotesByProposal(
+  votes: readonly KoiosVote[],
+): Map<string, KoiosVote[]> {
+  const out = new Map<string, KoiosVote[]>();
+  for (const v of votes) {
+    if (typeof v.proposal_tx_hash !== 'string') continue;
+    if (typeof v.proposal_index !== 'number') continue;
+    const key = `${v.proposal_tx_hash}#${v.proposal_index}`;
+    const bucket = out.get(key);
+    if (bucket) bucket.push(v);
+    else out.set(key, [v]);
+  }
+  return out;
+}
+
+// ---- Tip / current epoch ----
+
+/** `/tip` returns one row with the current chain tip (epoch, slot, block). We
+ *  only consume `.epoch_no` today. Cached briefly — the sync calls this once
+ *  per cycle but the cache lets a future warm-Lambda re-invocation skip the
+ *  redundant call. Throws `KoiosError` so the caller can fall back to
+ *  Blockfrost's `epochsLatest`. */
+const TIP_CACHE_TTL_MS = 30_000;
+let _tipCache: CacheEntry<{ epoch_no: number }> | null = null;
+
+export async function getCurrentEpoch(): Promise<number> {
+  const now = Date.now();
+  if (_tipCache && now - _tipCache.fetchedAt < TIP_CACHE_TTL_MS) {
+    return _tipCache.value.epoch_no;
+  }
+  const res = await koiosFetch('/tip', { method: 'GET', timeoutMs: 5_000 });
+  if (!res.ok) {
+    _tipCache = null;
+    throw new KoiosError('/tip', `HTTP ${res.status} ${res.statusText}`, res.status);
+  }
+  const parsed = (await readJsonCapped(res, '/tip')) as unknown;
+  const row = Array.isArray(parsed) ? parsed[0] : parsed;
+  if (!row || typeof row !== 'object' || typeof (row as { epoch_no?: unknown }).epoch_no !== 'number') {
+    _tipCache = null;
+    throw new KoiosError('/tip', 'missing epoch_no');
+  }
+  const epoch = (row as { epoch_no: number }).epoch_no;
+  _tipCache = { fetchedAt: now, value: { epoch_no: epoch } };
+  return epoch;
 }
 
 /**
