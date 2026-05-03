@@ -90,6 +90,7 @@ export class ApiStack extends cdk.Stack {
     for (const table of [
       databaseStack.usersTable,
       databaseStack.drepCommitteesTable,
+      databaseStack.drepDirectoryTable,
       databaseStack.governanceActionsTable,
       databaseStack.commentsTable,
       databaseStack.clubhousePostsTable,
@@ -151,11 +152,19 @@ export class ApiStack extends cdk.Stack {
     // ---- Epoch handler ----
     const epochGetFn = fn('EpochGetFn', 'handlers/epoch/get.ts');
 
-    // ---- DRep handlers ----
+    // ---- DRep committee handlers (existing /drep routes) ----
     const drepListFn = fn('DRepListFn', 'handlers/drep/list.ts');
     const drepGetFn = fn('DRepGetFn', 'handlers/drep/get.ts');
     const drepRegisterFn = fn('DRepRegisterFn', 'handlers/drep/register.ts');
     const drepUpdateFn = fn('DRepUpdateFn', 'handlers/drep/update.ts');
+
+    // ---- DRep directory handlers (chain-state read; /dreps routes) ----
+    // The directory is the global registry of mainnet DReps with their
+    // CIP-119 anchor metadata. It's separate from /drep (committees) on
+    // purpose — committees are platform-internal coordination records,
+    // while this is a chain-state read of every registered DRep.
+    const drepDirectoryListFn = fn('DRepDirectoryListFn', 'handlers/directory/list.ts');
+    const drepDirectoryGetFn = fn('DRepDirectoryGetFn', 'handlers/directory/get.ts');
 
     // ---- Comments handlers ----
     const commentsListFn = fn('CommentsListFn', 'handlers/comments/list.ts');
@@ -278,11 +287,15 @@ export class ApiStack extends cdk.Stack {
     // ---- Epoch route (public, hits Blockfrost on every call) ----
     addRoute(apigwv2.HttpMethod.GET, '/epoch', epochGetFn, 'EpochGet');
 
-    // ---- DRep routes ----
+    // ---- DRep committee routes (existing) ----
     addRoute(apigwv2.HttpMethod.GET, '/drep', drepListFn, 'DRepList');
     addRoute(apigwv2.HttpMethod.POST, '/drep', drepRegisterFn, 'DRepRegister', true);
     addRoute(apigwv2.HttpMethod.GET, '/drep/{drepId}', drepGetFn, 'DRepGet');
     addRoute(apigwv2.HttpMethod.PUT, '/drep/{drepId}', drepUpdateFn, 'DRepUpdate', true);
+
+    // ---- DRep directory routes (chain-state) ----
+    addRoute(apigwv2.HttpMethod.GET, '/dreps', drepDirectoryListFn, 'DRepDirectoryList');
+    addRoute(apigwv2.HttpMethod.GET, '/dreps/{drepId}', drepDirectoryGetFn, 'DRepDirectoryGet');
 
     // ---- Comments routes ----
     addRoute(apigwv2.HttpMethod.GET, '/comments/{actionId}', commentsListFn, 'CommentsList');
