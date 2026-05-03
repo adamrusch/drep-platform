@@ -130,10 +130,15 @@ export class SchedulerStack extends cdk.Stack {
     });
 
     // ---- DRep directory sync Lambda ----
-    // Cadence: every 5 minutes. DRep registrations move slower than
-    // governance votes, and the cycle's three Koios calls (drep_list +
-    // batched drep_info + batched drep_metadata) take ~30s on mainnet
-    // today. 5 min is a comfortable cushion; tightening it later is cheap.
+    // Cadence: every 30 minutes. DRep registrations / retirements / vote
+    // activity move slowly, so the lower frequency is fine — the
+    // user-visible "Last Voted" timestamps come from the governance sync
+    // (1 min cadence) anyway. Bumped from 5 min as part of an emergency
+    // cost fix: at 5 min the Put-every-row hot path was burning ~38k
+    // WCU/hour on `drep_directory` for ~zero changes per cycle. The hot
+    // path now Batch-Gets and compares before writing, so quiet cycles
+    // are near-free; combined with the 6× cadence drop the table's
+    // steady-state WCU should fall by >95%.
     this.directorySyncFn = new lambdaNodejs.NodejsFunction(this, 'DirectorySyncFn', {
       functionName: `drep-platform-${stage}-drep-directory-sync`,
       entry: path.join(backendDir, 'src/sync/drep-directory.ts'),
@@ -162,8 +167,8 @@ export class SchedulerStack extends cdk.Stack {
 
     const directorySyncRule = new events.Rule(this, 'DirectorySyncRule', {
       ruleName: `drep-platform-${stage}-drep-directory-sync`,
-      description: 'Triggers DRep directory sync (Koios drep_list/info/metadata) every 5 minutes',
-      schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
+      description: 'Triggers DRep directory sync (Koios drep_list/info/metadata) every 30 minutes',
+      schedule: events.Schedule.rate(cdk.Duration.minutes(30)),
       enabled: true,
     });
 
