@@ -143,6 +143,65 @@ export interface KoiosActiveDRep {
 }
 
 /**
+ * One row of `drep_metadata`. Contains the parsed CIP-119 anchor body
+ * (`meta_json`) when the indexer has fetched and validated it, plus the
+ * raw bytes/hash and a tri-state `is_valid` (true / false / null).
+ *
+ * The `meta_json` field is a free-form record because CIP-119 bodies in
+ * the wild are not strictly conformant — the schema mandates `body` with
+ * `givenName`, but real submissions sometimes nest fields differently or
+ * omit them. The directory-builder is responsible for extracting fields
+ * defensively.
+ */
+export interface KoiosDRepMetadata {
+  drep_id: string;
+  hex: string | null;
+  has_script: boolean;
+  meta_url: string | null;
+  meta_hash: string | null;
+  /** Parsed CIP-119 body. May be null when the anchor is unreachable
+   *  or fails to parse. */
+  meta_json: Record<string, unknown> | null;
+  bytes: string | null;
+  warning: string | null;
+  language: string | null;
+  comment: string | null;
+  /** Indexer's verdict on whether the body matches its declared hash.
+   *  Tri-state: true / false / null (not yet checked). */
+  is_valid: boolean | null;
+}
+
+/**
+ * One row of `drep_voters` — every governance action this DRep has voted
+ * on, with their vote and the block context. Sorted newest-first by the
+ * upstream PostgREST default; we don't reorder.
+ */
+export interface KoiosDRepVote {
+  proposal_tx_hash: string;
+  proposal_index: number;
+  proposal_type: string;
+  /** "Yes" | "No" | "Abstain" — verbatim from the upstream. */
+  vote: string;
+  block_time: number;
+  meta_url: string | null;
+  meta_hash: string | null;
+}
+
+/**
+ * One row of `drep_delegators` — a stake account that has delegated its
+ * vote weight to this DRep, with the lovelace amount currently delegated.
+ * Used for the per-DRep delegator count.
+ */
+export interface KoiosDRepDelegator {
+  stake_address: string;
+  stake_address_hex: string | null;
+  /** Stake amount in lovelace, stringified. */
+  amount: string;
+  /** Epoch when the delegation was last updated. */
+  epoch_no: number | null;
+}
+
+/**
  * One row of `pool_list`. `active_stake` is the delegated stake currently
  * counted toward block production — also what governance uses for SPO
  * voting power. `pool_status === 'registered'` AND `retiring_epoch === null`
@@ -538,6 +597,163 @@ export async function getPredefinedDRepPower(
     console.warn('[Koios /drep_info predefined] fetch failed; treating as zero:', err);
   }
   return out;
+}
+
+/**
+ * Fetch DRep metadata in batches. Wraps `/drep_metadata` — cheaper than
+ * `/drep_info` because it omits voting power / lifecycle fields. Used by
+ * the directory sync to populate the CIP-119 `body` (givenName, image,
+ * objectives, motivations, qualifications, references) for every DRep.
+ *
+ * The caller passes a flat list of DRep IDs; we batch into chunks of 50
+ * (Koios's payload-size sweet spot — 200 returned 413 in our probe).
+ * Failure of one batch logs but does not poison the rest; the caller
+ * accumulates whatever succeeded.
+ */
+export async function fetchDRepMetadata(
+  drepIds: readonly string[],
+): Promise<KoiosDRepMetadata[]> {
+  if (drepIds.length === 0) return [];
+  const all: KoiosDRepMetadata[] = [];
+  for (let i = 0; i < drepIds.length; i += DREP_INFO_BATCH_SIZE) {
+    const batch = drepIds.slice(i, i + DREP_INFO_BATCH_SIZE);
+    try {
+      const res = await koiosFetch('/drep_metadata', {
+        method: 'POST',
+        body: JSON.stringify({ _drep_ids: batch }),
+        timeoutMs: 8_000,
+      });
+      if (!res.ok) {
+        console.warn(
+          `[Koios /drep_metadata] HTTP ${res.status} ${res.statusText} on batch ${i}-${i + batch.length}; skipping`,
+        );
+        continue;
+      }
+      const parsed = (await readJsonCapped(res, '/drep_metadata')) as unknown;
+      if (!Array.isArray(parsed)) {
+        console.warn('[Koios /drep_metadata] non-array response; skipping batch');
+        continue;
+      }
+      all.push(...(parsed as KoiosDRepMetadata[]));
+    } catch (err) {
+      console.warn(`[Koios /drep_metadata] batch ${i} failed:`, err);
+    }
+  }
+  return all;
+}
+
+/**
+ * Fetch full DRep info (lifecycle + voting power + meta_url/hash) for a
+ * batch of IDs. Returns the raw `KoiosDRepInfo` rows so the caller can
+ * keep the registered/expired/active fields.
+ *
+ * Used by the directory sync (which needs `expires_epoch_no`, `deposit`,
+ * `drep_status`, `amount`) and by the per-DRep detail handler. Caching
+ * is the caller's responsibility — this function does not cache.
+ */
+export async function fetchDRepInfoBatch(
+  drepIds: readonly string[],
+): Promise<KoiosDRepInfo[]> {
+  if (drepIds.length === 0) return [];
+  const all: KoiosDRepInfo[] = [];
+  for (let i = 0; i < drepIds.length; i += DREP_INFO_BATCH_SIZE) {
+    const batch = drepIds.slice(i, i + DREP_INFO_BATCH_SIZE);
+    try {
+      const res = await koiosFetch('/drep_info', {
+        method: 'POST',
+        body: JSON.stringify({ _drep_ids: batch }),
+        timeoutMs: 8_000,
+      });
+      if (!res.ok) {
+        console.warn(
+          `[Koios /drep_info] HTTP ${res.status} ${res.statusText} on batch ${i}-${i + batch.length}; skipping`,
+        );
+        continue;
+      }
+      const parsed = (await readJsonCapped(res, '/drep_info')) as unknown;
+      if (!Array.isArray(parsed)) {
+        console.warn('[Koios /drep_info] non-array response; skipping batch');
+        continue;
+      }
+      all.push(...(parsed as KoiosDRepInfo[]));
+    } catch (err) {
+      console.warn(`[Koios /drep_info] batch ${i} failed:`, err);
+    }
+  }
+  return all;
+}
+
+/**
+ * List the full DRep registry. Wrapper over the paged `drep_list` call
+ * used by `listActiveDReps`, exposed so the directory sync can iterate
+ * every registered DRep (active OR not — `notRegistered` is the signal
+ * that they should drop off the directory entirely).
+ */
+export async function listAllDReps(): Promise<KoiosDRepListEntry[]> {
+  return fetchAllPaged<KoiosDRepListEntry>('/drep_list', '{}', MAX_PAGES);
+}
+
+/**
+ * Fetch every action this DRep has voted on. Single endpoint; not paged
+ * server-side beyond Koios's default 1000-row cap, which is far more
+ * than any DRep has voted on today. No caching — the per-DRep detail
+ * handler caches at its own scope.
+ *
+ * Returns null on any failure — voting history is best-effort and the
+ * detail handler must continue without it. The DRep page just won't
+ * show the recent-votes table.
+ */
+export async function fetchDRepVotes(
+  drepId: string,
+): Promise<KoiosDRepVote[] | null> {
+  try {
+    const res = await koiosFetch('/drep_voters', {
+      method: 'POST',
+      body: JSON.stringify({ _drep_id: drepId }),
+      timeoutMs: 8_000,
+    });
+    if (!res.ok) {
+      console.warn(`[Koios /drep_voters] HTTP ${res.status} for ${drepId}`);
+      return null;
+    }
+    const parsed = (await readJsonCapped(res, '/drep_voters')) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    return parsed as KoiosDRepVote[];
+  } catch (err) {
+    console.warn(`[Koios /drep_voters] fetch failed for ${drepId}:`, err);
+    return null;
+  }
+}
+
+/**
+ * Fetch the list of stake addresses delegated to this DRep. Returns null
+ * on any failure. The detail handler uses the length of this array as
+ * the delegator count — full account list is overkill but Koios's only
+ * paid-tier-free endpoint here doesn't expose a count-only variant.
+ *
+ * For DReps with thousands of delegators this can be a few KB — well
+ * under the 10MB cap.
+ */
+export async function fetchDRepDelegators(
+  drepId: string,
+): Promise<KoiosDRepDelegator[] | null> {
+  try {
+    const res = await koiosFetch('/drep_delegators', {
+      method: 'POST',
+      body: JSON.stringify({ _drep_id: drepId }),
+      timeoutMs: 8_000,
+    });
+    if (!res.ok) {
+      console.warn(`[Koios /drep_delegators] HTTP ${res.status} for ${drepId}`);
+      return null;
+    }
+    const parsed = (await readJsonCapped(res, '/drep_delegators')) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    return parsed as KoiosDRepDelegator[];
+  } catch (err) {
+    console.warn(`[Koios /drep_delegators] fetch failed for ${drepId}:`, err);
+    return null;
+  }
 }
 
 /**

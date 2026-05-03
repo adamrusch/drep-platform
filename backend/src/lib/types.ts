@@ -187,6 +187,68 @@ export interface DRepCommittee {
   updatedAt: string;
 }
 
+/** One reference entry from the CIP-119 anchor body. `kind` mirrors the
+ *  upstream `@type`: `Identity` is a social-handle reference (Twitter,
+ *  GitHub, etc.) and the UI surfaces it under "Social handles"; `Link`
+ *  / `Other` are general references rendered under "References". */
+export type DRepReferenceKind = 'Identity' | 'Link' | 'Other';
+
+export interface DRepReference {
+  kind: DRepReferenceKind;
+  label: string;
+  uri: string;
+}
+
+/**
+ * One row of the DRep directory — synthesized from `drep_list` (lifecycle
+ * flags) + `drep_info` (voting power, deposit, expiration epoch) +
+ * `drep_metadata` (CIP-119 anchor body, where the bio lives). Stored in
+ * the `drep_directory` table and surfaced verbatim by the `/dreps`
+ * listing endpoint.
+ *
+ * Fields are intentionally flat (not nested under `body`) so DynamoDB
+ * GSIs can sort/filter on them without document-projection workarounds.
+ * Anything optional may be absent on rows where the upstream had no
+ * data — DReps without an anchor have no `givenName`, no `image`, etc.
+ */
+export interface DRepDirectoryEntry {
+  drepId: string;
+  hex: string | null;
+  /** From `drep_info.active` — registered AND not expired. Inactive DReps
+   *  still appear in the directory (with the "Inactive" pill) until they
+   *  formally retire. */
+  isActive: boolean;
+  /** From `drep_info.drep_status` — "registered" | "retired" | unknown. */
+  status: string;
+  /** Registration deposit in lovelace, stringified. Null when unknown. */
+  deposit: string | null;
+  hasScript: boolean;
+  /** Voting power in lovelace, stringified BigInt. Mirrors `drep_info.amount`. */
+  votingPower: string;
+  /** Epoch at which this DRep expires unless re-registered. */
+  expiresEpoch: number | null;
+  /** Total delegator count. Populated on-demand by the detail handler;
+   *  the directory sync skips this to avoid one Koios call per DRep. */
+  delegatorCount?: number;
+  // ---- Anchor (CIP-119 metadata) ----
+  anchorUrl: string | null;
+  anchorHash: string | null;
+  /** Indexer's verdict on whether the anchor body matches its declared
+   *  hash. Tri-state: true / false / null (not yet checked or no anchor). */
+  anchorVerified: boolean | null;
+  // ---- CIP-119 body fields ----
+  givenName?: string;
+  image?: string;
+  objectives?: string;
+  motivations?: string;
+  qualifications?: string;
+  paymentAddress?: string;
+  references?: DRepReference[];
+  // ---- Sync bookkeeping ----
+  lastSyncedAt: string;
+  enrichmentVersion: number;
+}
+
 export interface CommitteeMember {
   walletAddress: string;
   displayName?: string;
@@ -355,6 +417,83 @@ export interface DRepCommitteeItem {
   createdAt: string;
   updatedAt: string;
   [key: string]: unknown;
+}
+
+/**
+ * DynamoDB item shape for the `drep_directory` table. PK=`drepId`,
+ * SK=`'PROFILE'`. Mirrors `DRepDirectoryEntry` plus a few sortable
+ * GSI keys (`votingPowerSort`, `delegatorCountSort`) — these duplicate
+ * the data fields with constant partition keys so a Query can scan them
+ * sorted, since DynamoDB cannot sort an entire table by a non-key field
+ * without a GSI.
+ */
+export interface DRepDirectoryItem {
+  drepId: string;
+  SK: 'PROFILE';
+  hex: string | null;
+  isActive: boolean;
+  status: string;
+  deposit: string | null;
+  hasScript: boolean;
+  votingPower: string;
+  /** `'ALL'` — constant value used as the partition key on the
+   *  `votingPower-index` GSI so we can globally sort all DReps by power. */
+  votingPowerPartition: 'ALL';
+  /** Voting power as a fixed-width zero-padded numeric string for
+   *  lexicographic-sortable GSI sort key (DynamoDB sort keys are
+   *  byte-compared). 24 digits is plenty: 10^24 lovelace = 10^18 ADA,
+   *  far past total supply (45×10^9 ADA = 4.5×10^16 lovelace). */
+  votingPowerSort: string;
+  expiresEpoch: number | null;
+  delegatorCount?: number;
+  /** Constant `'ALL'` partition for the `delegatorCount-index` GSI. */
+  delegatorCountPartition?: 'ALL';
+  /** Same fixed-width trick for delegator count sorting — 12 digits
+   *  covers any plausible delegator count (mainnet has ~1.2M total
+   *  stake addresses; this fits 9999...). */
+  delegatorCountSort?: string;
+  anchorUrl: string | null;
+  anchorHash: string | null;
+  anchorVerified: boolean | null;
+  givenName?: string;
+  /** Lowercased `givenName` for case-insensitive search filtering on
+   *  the listing handler. Set when `givenName` is set. */
+  givenNameLower?: string;
+  image?: string;
+  objectives?: string;
+  motivations?: string;
+  qualifications?: string;
+  paymentAddress?: string;
+  references?: DRepReference[];
+  lastSyncedAt: string;
+  enrichmentVersion: number;
+  [key: string]: unknown;
+}
+
+/**
+ * Detail-page shape returned by `GET /dreps/{drepId}`. Wraps the cached
+ * directory item with on-demand fields (recent votes, full delegator list)
+ * fetched from Koios at request time.
+ */
+export interface DRepDetail extends DRepDirectoryEntry {
+  /** Recent votes — last ~10 actions this DRep voted on, newest first.
+   *  Populated from `/drep_voters` at request time; undefined if Koios
+   *  was unreachable. */
+  recentVotes?: DRepRecentVote[];
+  /** Total count of stake addresses delegating to this DRep. Populated
+   *  from `/drep_delegators` length at request time; undefined if Koios
+   *  was unreachable. */
+  delegatorCountLive?: number;
+}
+
+export interface DRepRecentVote {
+  proposalTxHash: string;
+  proposalIndex: number;
+  proposalType: string;
+  /** Vote verbatim from Koios — "Yes" | "No" | "Abstain". */
+  vote: string;
+  /** Block time as ISO-8601 string (Koios returns Unix seconds). */
+  votedAt: string;
 }
 
 export interface CommitteeMemberItem {
