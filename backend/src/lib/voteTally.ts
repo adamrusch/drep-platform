@@ -33,6 +33,7 @@
  *     NoConfidence) are non-trivial and benefit from a focused module.
  */
 import type { BlockfrostProposalVote } from './blockfrost';
+import type { KoiosVote } from './koios';
 import type {
   GovernanceActionType,
   VoteRoleTally,
@@ -40,6 +41,70 @@ import type {
   VoteTally,
   VotingRoles,
 } from './types';
+
+/**
+ * Adapter from the Koios `vote_list` row shape to the Blockfrost-shaped
+ * `BlockfrostProposalVote` the tally builder consumes. Phase B of the
+ * Blockfrost-to-Koios migration: votes now flow from Koios's free `vote_list`
+ * endpoint, but the math is identical and the easiest way to keep the
+ * `tallyVotesWithPower` function untouched is to normalize at the boundary.
+ *
+ * Field-name differences:
+ *   - Koios: `voter_id` / `voter_role: 'DRep' | 'SPO' | 'ConstitutionalCommittee'` /
+ *     `vote: 'Yes' | 'No' | 'Abstain'` (TitleCase)
+ *   - Blockfrost: `voter` / `voter_role: 'drep' | 'spo' | 'constitutional_committee'` /
+ *     `vote: 'yes' | 'no' | 'abstain'` (lowercase)
+ *
+ * Rows with unrecognizable role/vote labels are dropped — those are
+ * indexer-side anomalies and silently filtering them avoids polluting the
+ * tally with garbage. The underlying db-sync data is identical between the
+ * two providers (both source from cardano-node), so the normalized rows
+ * round-trip the math byte-for-byte.
+ */
+export function koiosVotesToBlockfrostShape(
+  votes: readonly KoiosVote[],
+): BlockfrostProposalVote[] {
+  const out: BlockfrostProposalVote[] = [];
+  for (const v of votes) {
+    let role: BlockfrostProposalVote['voter_role'];
+    switch (v.voter_role) {
+      case 'DRep':
+        role = 'drep';
+        break;
+      case 'SPO':
+        role = 'spo';
+        break;
+      case 'ConstitutionalCommittee':
+        role = 'constitutional_committee';
+        break;
+      default:
+        continue;
+    }
+    let vote: BlockfrostProposalVote['vote'];
+    switch (v.vote) {
+      case 'Yes':
+        vote = 'yes';
+        break;
+      case 'No':
+        vote = 'no';
+        break;
+      case 'Abstain':
+        vote = 'abstain';
+        break;
+      default:
+        continue;
+    }
+    if (typeof v.voter_id !== 'string' || v.voter_id.length === 0) continue;
+    out.push({
+      tx_hash: v.proposal_tx_hash,
+      cert_index: v.proposal_index,
+      voter_role: role,
+      voter: v.voter_id,
+      vote,
+    });
+  }
+  return out;
+}
 
 // ---- Predefined DRep IDs ----
 //
