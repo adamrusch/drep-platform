@@ -1,3 +1,30 @@
+/**
+ * Shared HTTP response helpers for API handlers.
+ *
+ * Why this file exists:
+ *   - Every handler needs to emit JSON with the right CORS headers AND
+ *     the right status code AND (for /auth/* responses) cookies. Doing
+ *     that inline in 22 handlers is begging for inconsistency.
+ *   - The error path (`{"error", "message", "statusCode"}`) is what the
+ *     SPA matches on; standardize the shape here so a misbehaving
+ *     handler can't break the frontend's error-handling contract.
+ *   - CORS allow-origin must be specific (not `*`) because we use
+ *     `credentials: include` for the JWT cookie. CORS_ORIGIN is set
+ *     per-Lambda in the CDK stack.
+ *
+ * Conventions for callers:
+ *   - Return `ok(data)` for 200 with a single value. The data is wrapped
+ *     in `{data: ...}` on the wire.
+ *   - Use `created()` for 201, `noContent()` for 204.
+ *   - Error helpers (`badRequest`, `unauthorized`, ...) all emit the
+ *     same `{error, message, statusCode}` envelope.
+ *   - For unhandled exceptions, call `handleError(err)` — it pattern-
+ *     matches on common error names (`AuthorizationError`,
+ *     `ConditionalCheckFailedException`) and falls through to 500.
+ *   - Pass extra response headers as the second argument to `ok()`,
+ *     and Set-Cookie strings as a `string[]` (HTTP API v2 splits
+ *     cookies into a separate `cookies` field on the response).
+ */
 import type { APIGatewayProxyResultV2 } from 'aws-lambda';
 
 // CORS_ORIGIN must be a specific origin (not "*") because we use credentialed
