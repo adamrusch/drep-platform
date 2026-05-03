@@ -6,9 +6,14 @@
  *     - `power`: voting power desc (uses `votingPower-index` GSI)
  *     - `delegators`: delegator count desc (uses `delegatorCount-index` GSI;
  *       falls back to `power` for rows without delegator counts)
- *     - `recent`: not yet wired — falls back to `power` until the per-DRep
- *       last-voted timestamp lands. Documented intent here so the frontend
- *       can ship the dropdown today.
+ *     - `recent`: most-recent vote desc (uses `lastVoted-index` GSI).
+ *       Never-voted DReps are absent from the index — they sort to the
+ *       bottom naturally (i.e. they don't appear in the recent-activity
+ *       view at all, which is the intended behavior).
+ *   - `?includeInactive=true` — by default the listing filters to
+ *     `isActive=true`. With this param, inactive (expired-but-still-
+ *     registered) DReps are returned mixed in. Search and recent-activity
+ *     paths apply the same filter unless overridden.
  *   - `?search=<text>` — case-insensitive substring match against
  *     `givenName`. Implemented as a Scan with FilterExpression — fine at
  *     ~2000 rows, replace with OpenSearch when scale demands it.
@@ -33,12 +38,22 @@ function parseSort(raw: string | undefined): SortKey {
   return 'power';
 }
 
+/** Parse the `?includeInactive=` flag. Accept the truthy spellings used
+ *  by the frontend (`true`, `1`); everything else falls through to false
+ *  (active-only is the default). */
+function parseIncludeInactive(raw: string | undefined): boolean {
+  if (raw == null) return false;
+  const v = raw.trim().toLowerCase();
+  return v === 'true' || v === '1' || v === 'yes';
+}
+
 export const handler = async (
   event: APIGatewayProxyEventV2,
 ): Promise<APIGatewayProxyResultV2> => {
   try {
     const qs = event.queryStringParameters ?? {};
     const sort = parseSort(qs['sort']);
+    const includeInactive = parseIncludeInactive(qs['includeInactive']);
     const search = qs['search']?.trim();
     const limit = qs['limit']
       ? Math.min(Math.max(parseInt(qs['limit'], 10) || DEFAULT_LIMIT, 1), MAX_LIMIT)
@@ -49,6 +64,22 @@ export const handler = async (
           unknown
         >)
       : undefined;
+
+    // Build the optional `isActive=true` filter once. Applied on top of
+    // every code path (Scan and Query both accept FilterExpression).
+    // DynamoDB filters AFTER Limit on Scan and AFTER read on Query, so
+    // we over-fetch by 2x to give the filter some headroom on the active
+    // sort paths — most rows are active so this rarely costs us anything.
+    const activeFilter = includeInactive
+      ? null
+      : {
+          filterExpression: '#isActive = :true',
+          expressionAttributeNames: { '#isActive': 'isActive' },
+          expressionAttributeValues: { ':true': true },
+        };
+    // 2x over-fetch when we're filtering, capped at 100 (DynamoDB's
+    // own per-request hard cap is 1MB; 100 rows is well under).
+    const fetchLimit = activeFilter ? Math.min(limit * 2, 100) : limit;
 
     // Search path: Scan with a contains() filter on the lower-cased
     // `givenName`. DynamoDB applies FilterExpression *after* Limit, so
@@ -70,11 +101,22 @@ export const handler = async (
       // relative to the round-trip; we still trim to `limit` before
       // returning.
       const PER_ROUND_LIMIT = 200;
+      // Compose the search filter with the optional active filter. If
+      // both apply we AND them; otherwise just the search filter.
+      const filterExpression: string = activeFilter
+        ? 'contains(#givenNameLower, :q) AND #isActive = :true'
+        : 'contains(#givenNameLower, :q)';
+      const expressionAttributeNames: Record<string, string> = activeFilter
+        ? { '#givenNameLower': 'givenNameLower', '#isActive': 'isActive' }
+        : { '#givenNameLower': 'givenNameLower' };
+      const expressionAttributeValues: Record<string, unknown> = activeFilter
+        ? { ':q': lower, ':true': true }
+        : { ':q': lower };
       for (let round = 0; round < MAX_ROUNDS && collected.length < limit; round++) {
         const page = await scanItems<DRepDirectoryItem>(tableNames.drepDirectory, {
-          filterExpression: 'contains(#givenNameLower, :q)',
-          expressionAttributeNames: { '#givenNameLower': 'givenNameLower' },
-          expressionAttributeValues: { ':q': lower },
+          filterExpression,
+          expressionAttributeNames,
+          expressionAttributeValues,
           limit: PER_ROUND_LIMIT,
           ...(cursor ? { exclusiveStartKey: cursor } : {}),
         });
@@ -102,19 +144,34 @@ export const handler = async (
     // Sort path: Query against a constant-partition GSI, sorted desc.
     // `delegators` falls back to `power` when no rows have a delegator
     // count yet (the directory sync defers this; the detail handler
-    // populates it on-demand). `recent` is also stubbed to `power`
-    // until per-DRep recent-vote timestamps land.
-    const indexName =
-      sort === 'delegators' ? 'delegatorCount-index' : 'votingPower-index';
-    const partitionAttr =
-      sort === 'delegators' ? 'delegatorCountPartition' : 'votingPowerPartition';
+    // populates it on-demand). `recent` queries `lastVoted-index` —
+    // never-voted DReps are absent from the index by design.
+    let indexName: string;
+    let partitionAttr: string;
+    if (sort === 'delegators') {
+      indexName = 'delegatorCount-index';
+      partitionAttr = 'delegatorCountPartition';
+    } else if (sort === 'recent') {
+      indexName = 'lastVoted-index';
+      partitionAttr = 'lastVotedPartition';
+    } else {
+      indexName = 'votingPower-index';
+      partitionAttr = 'votingPowerPartition';
+    }
 
     const result = await queryItems<DRepDirectoryItem>(tableNames.drepDirectory, {
       indexName,
       keyConditionExpression: '#part = :all',
-      expressionAttributeNames: { '#part': partitionAttr },
-      expressionAttributeValues: { ':all': 'ALL' },
-      limit,
+      expressionAttributeNames: {
+        '#part': partitionAttr,
+        ...(activeFilter?.expressionAttributeNames ?? {}),
+      },
+      expressionAttributeValues: {
+        ':all': 'ALL',
+        ...(activeFilter?.expressionAttributeValues ?? {}),
+      },
+      ...(activeFilter ? { filterExpression: activeFilter.filterExpression } : {}),
+      limit: fetchLimit,
       // Descending — highest first.
       scanIndexForward: false,
       ...(exclusiveStartKey ? { exclusiveStartKey } : {}),
@@ -126,26 +183,38 @@ export const handler = async (
       const fallback = await queryItems<DRepDirectoryItem>(tableNames.drepDirectory, {
         indexName: 'votingPower-index',
         keyConditionExpression: '#part = :all',
-        expressionAttributeNames: { '#part': 'votingPowerPartition' },
-        expressionAttributeValues: { ':all': 'ALL' },
-        limit,
+        expressionAttributeNames: {
+          '#part': 'votingPowerPartition',
+          ...(activeFilter?.expressionAttributeNames ?? {}),
+        },
+        expressionAttributeValues: {
+          ':all': 'ALL',
+          ...(activeFilter?.expressionAttributeValues ?? {}),
+        },
+        ...(activeFilter ? { filterExpression: activeFilter.filterExpression } : {}),
+        limit: fetchLimit,
         scanIndexForward: false,
       });
+      const trimmed = fallback.items.slice(0, limit);
       return ok({
-        items: fallback.items,
+        items: trimmed,
         lastEvaluatedKey: fallback.lastEvaluatedKey
           ? Buffer.from(JSON.stringify(fallback.lastEvaluatedKey)).toString('base64')
           : undefined,
-        total: fallback.count,
+        total: trimmed.length,
       });
     }
 
+    // Trim to the requested limit (we may have over-fetched to absorb
+    // the active filter). Preserve `lastEvaluatedKey` from DynamoDB so
+    // the next page resumes correctly even if the page is short.
+    const trimmed = result.items.slice(0, limit);
     return ok({
-      items: result.items,
+      items: trimmed,
       lastEvaluatedKey: result.lastEvaluatedKey
         ? Buffer.from(JSON.stringify(result.lastEvaluatedKey)).toString('base64')
         : undefined,
-      total: result.count,
+      total: trimmed.length,
     });
   } catch (err) {
     console.error('directory/list handler error:', err);

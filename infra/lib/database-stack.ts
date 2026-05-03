@@ -108,6 +108,21 @@ export class DatabaseStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
+    // GSI: globally sort by most-recent vote. Single-partition pattern
+    // again. ISO-8601 sorts lexicographically as chronological order
+    // (UTC `Z` suffix is uniform), so the `lastVotedAt` value is the
+    // sort key directly — no padding required. Never-voted DReps are
+    // absent from this index (their `lastVotedSort` is unset, which
+    // DynamoDB skips), placing them naturally at the bottom of any
+    // recent-activity listing. The list handler queries this for
+    // `?sort=recent`.
+    this.drepDirectoryTable.addGlobalSecondaryIndex({
+      indexName: 'lastVoted-index',
+      partitionKey: { name: 'lastVotedPartition', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'lastVotedSort', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
     // ---- governance_actions ----
     this.governanceActionsTable = new dynamodb.Table(this, 'GovernanceActionsTable', {
       tableName: `${this.tablePrefix}governance_actions`,

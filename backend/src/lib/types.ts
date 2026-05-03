@@ -250,6 +250,15 @@ export interface DRepDirectoryEntry {
   /** Total delegator count. Populated on-demand by the detail handler;
    *  the directory sync skips this to avoid one Koios call per DRep. */
   delegatorCount?: number;
+  // ---- Voting activity (computed from /vote_list at sync time) ----
+  /** ISO-8601 timestamp of this DRep's most recent vote. Undefined when
+   *  the DRep has never voted. Used by the frontend to render
+   *  "Voted 3d ago" / "Never voted" badges and by the `recent` sort. */
+  lastVotedAt?: string;
+  /** Total number of governance votes ever cast by this DRep. Undefined
+   *  before the first sync that computed it; explicitly `0` for never-
+   *  voted DReps so the frontend can distinguish "no data" from "no votes". */
+  voteCount?: number;
   // ---- Anchor (CIP-119 metadata) ----
   anchorUrl: string | null;
   anchorHash: string | null;
@@ -472,6 +481,22 @@ export interface DRepDirectoryItem {
    *  covers any plausible delegator count (mainnet has ~1.2M total
    *  stake addresses; this fits 9999...). */
   delegatorCountSort?: string;
+  /** Mirrors `DRepDirectoryEntry.lastVotedAt` — ISO-8601, undefined when
+   *  the DRep has never voted. */
+  lastVotedAt?: string;
+  /** Constant `'ALL'` partition for the `lastVoted-index` GSI. Set on
+   *  every row that has a `lastVotedAt` so a Query against the index
+   *  returns voters sorted by recency. Never-voted DReps are absent
+   *  from the index (which is intentional — they sort to the bottom
+   *  of "Recent activity" naturally). */
+  lastVotedPartition?: 'ALL';
+  /** ISO-8601 lastVotedAt copied verbatim as the GSI sort key. ISO-8601
+   *  is lexicographically equivalent to chronological order (provided
+   *  every value uses the same UTC `Z` suffix), so no padding tricks
+   *  are needed — `scanIndexForward: false` gives newest-first. */
+  lastVotedSort?: string;
+  /** Total number of votes ever cast by this DRep. */
+  voteCount?: number;
   anchorUrl: string | null;
   anchorHash: string | null;
   anchorVerified: boolean | null;
