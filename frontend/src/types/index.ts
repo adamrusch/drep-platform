@@ -204,6 +204,13 @@ export interface DRepDirectoryEntry {
   votingPower: string;
   expiresEpoch: number | null;
   delegatorCount?: number;
+  /** ISO-8601 timestamp of this DRep's most recent vote. Undefined when
+   *  the DRep has never voted. */
+  lastVotedAt?: string;
+  /** Total number of governance votes ever cast by this DRep. Explicitly
+   *  `0` for never-voted; undefined only on rows from sync versions
+   *  before this field was added. */
+  voteCount?: number;
   anchorUrl: string | null;
   anchorHash: string | null;
   /** Tri-state: true / false / null (no anchor or not yet checked). */
