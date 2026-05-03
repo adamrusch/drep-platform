@@ -110,8 +110,20 @@ const ITEM_CONCURRENCY = 4;
  * (drep_always_abstain, drep_always_no_confidence) contribute auto-votes
  * to the DRep slices. Sync continues with empty `notVoted` if any active-
  * voter lookup fails this cycle (graceful degradation).
+ * v7 → v8: ratification math corrected per CIP-1694. Auto-abstain stake
+ * (drep_always_abstain) is now EXCLUDED from `totalActive` (the
+ * ratification denominator) — CIP-1694 explicitly says abstain stake is
+ * "not part of the active voting stake". The new `totalRegistered` slice
+ * carries the bigger informational denominator (includes auto-abstain).
+ * The 3-slice identity `yes + no + notVoted == totalActive` now holds
+ * exactly. Auto-no-confidence stake direction-flips: Yes on NoConfidence
+ * actions, No otherwise. SPO unvoted-on-NoConfidence collapses into
+ * abstain (CIP-1694 SPO rule). New informational fields:
+ * `autoAbstainPower`, `autoNoConfidencePower` (DRep only). Bumping the
+ * version forces all rows to re-tally with the corrected math on the next
+ * sync.
  */
-const ENRICHMENT_VERSION = 7;
+const ENRICHMENT_VERSION = 8;
 
 function isEnrichmentFresh(existing: GovernanceActionItem | undefined, now: number): boolean {
   if (!existing) return false;
@@ -554,16 +566,16 @@ async function buildVoterLookups(): Promise<VoterLookupBundle> {
     lookups.alwaysAbstainPower = predefRes.value.get(DREP_ALWAYS_ABSTAIN) ?? 0n;
     lookups.alwaysNoConfidencePower =
       predefRes.value.get(DREP_ALWAYS_NO_CONFIDENCE) ?? 0n;
-    // Predefined DReps aren't in `drep_list`, so their stake is NOT in
-    // `totalDrepPower` after the loop above. But the "active voting power"
-    // a user wants to see in the DRep totalActive denominator is the FULL
-    // amount of stake that COULD vote — which includes stake delegated to
-    // the predefined auto-voters. Without this addition, the auto-voted
-    // power gets counted in cast slices (abstain / no) without being in
-    // totalActive, and `notVoted.power` floors to zero on every action.
-    totals.totalDrepPower +=
-      lookups.alwaysAbstainPower + lookups.alwaysNoConfidencePower;
-    // We do NOT add predefined DReps to totalDrepCount — they aren't
+    // We do NOT pre-fold these into totals.totalDrepPower. The tally
+    // builder is responsible for constructing the per-action denominator:
+    //   totalActive = registeredDrepPower + autoNoConfidencePower
+    //   totalRegistered = totalActive + autoAbstainPower
+    // Per CIP-1694, auto-abstain stake is explicitly EXCLUDED from active
+    // voting stake (the ratification denominator). Pre-folding both auto-
+    // votes here was the bug that made `totalActive` ~8.9B ADA too large
+    // and the percentages correspondingly wrong.
+    //
+    // We also do NOT add predefined DReps to totalDrepCount — they aren't
     // individual "voters" in the headcount sense; they're auto-vote
     // delegations aggregating many delegators. Reporting "1 DRep voted"
     // because of `drep_always_abstain` would be misleading.
