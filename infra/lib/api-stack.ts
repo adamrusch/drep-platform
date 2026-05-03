@@ -148,6 +148,7 @@ export class ApiStack extends cdk.Stack {
     const govListFn = fn('GovListFn', 'handlers/governance/list.ts');
     const govGetFn = fn('GovGetFn', 'handlers/governance/get.ts');
     const govSyncFn = fn('GovSyncFn', 'handlers/governance/sync.ts');
+    const govStatsFn = fn('GovStatsFn', 'handlers/governance/stats.ts');
 
     // ---- Epoch handler ----
     const epochGetFn = fn('EpochGetFn', 'handlers/epoch/get.ts');
@@ -280,7 +281,12 @@ export class ApiStack extends cdk.Stack {
     );
 
     // ---- Governance routes ----
+    // NOTE: register `/governance/stats` BEFORE `/governance/{actionId}`.
+    // HTTP API v2 always prefers static segments over path parameters
+    // regardless of declaration order, but listing the literal route first
+    // also avoids confusing the local reader.
     addRoute(apigwv2.HttpMethod.GET, '/governance', govListFn, 'GovList');
+    addRoute(apigwv2.HttpMethod.GET, '/governance/stats', govStatsFn, 'GovStats');
     addRoute(apigwv2.HttpMethod.GET, '/governance/{actionId}', govGetFn, 'GovGet');
     addRoute(apigwv2.HttpMethod.POST, '/governance/sync', govSyncFn, 'GovSync', true);
 
