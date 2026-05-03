@@ -165,6 +165,61 @@ export interface CommitteeMember {
   role: 'lead_drep' | 'committee_member' | 'trusted_delegator';
 }
 
+// ---- DRep directory (chain-state, /dreps endpoint) ----
+//
+// Distinct from `DRepCommittee` — that's a platform-internal coordination
+// record. This is a chain-state snapshot of every registered DRep on
+// mainnet, populated by a 5-min Koios sync.
+
+export type DRepReferenceKind = 'Identity' | 'Link' | 'Other';
+
+export interface DRepReference {
+  kind: DRepReferenceKind;
+  label: string;
+  uri: string;
+}
+
+export interface DRepDirectoryEntry {
+  drepId: string;
+  hex: string | null;
+  isActive: boolean;
+  status: string;
+  deposit: string | null;
+  hasScript: boolean;
+  /** Voting power in lovelace, stringified BigInt. */
+  votingPower: string;
+  expiresEpoch: number | null;
+  delegatorCount?: number;
+  anchorUrl: string | null;
+  anchorHash: string | null;
+  /** Tri-state: true / false / null (no anchor or not yet checked). */
+  anchorVerified: boolean | null;
+  // CIP-119 body fields:
+  givenName?: string;
+  image?: string;
+  objectives?: string;
+  motivations?: string;
+  qualifications?: string;
+  paymentAddress?: string;
+  references?: DRepReference[];
+  lastSyncedAt: string;
+  enrichmentVersion: number;
+}
+
+export interface DRepRecentVote {
+  proposalTxHash: string;
+  proposalIndex: number;
+  proposalType: string;
+  /** Verbatim from Koios — "Yes" | "No" | "Abstain". */
+  vote: string;
+  votedAt: string;
+}
+
+export interface DRepDetail extends DRepDirectoryEntry {
+  recentVotes?: DRepRecentVote[];
+  delegatorCountLive?: number;
+}
+
 export interface UserProfile {
   walletAddress: string;
   displayName?: string;

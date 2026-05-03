@@ -24,6 +24,7 @@ import { ProfileSetup } from '@/pages/ProfileSetup';
 import { PublicProfilePage } from '@/pages/PublicProfilePage';
 import { ComingSoon } from '@/pages/ComingSoon';
 import { ClubhouseLanding } from '@/pages/ClubhouseLanding';
+import { DRepDirectoryPage } from '@/pages/DRepDirectoryPage';
 
 /**
  * Routes the user to the correct dashboard based on their role.
@@ -145,15 +146,7 @@ function App(): React.ReactElement {
                   />
                 }
               />
-              <Route
-                path="/dreps"
-                element={
-                  <ComingSoon
-                    title="DRep Directory"
-                    description="Search every DRep by stake, expertise, and recent activity. Coming soon."
-                  />
-                }
-              />
+              <Route path="/dreps" element={<DRepDirectoryPage />} />
               <Route
                 path="/rationales"
                 element={
