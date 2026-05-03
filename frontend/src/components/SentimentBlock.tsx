@@ -1,5 +1,5 @@
 import React from 'react';
-import { Check, X, Minus, MoreHorizontal, type LucideIcon } from 'lucide-react';
+import { Check, X, MoreHorizontal, Minus } from 'lucide-react';
 import { Donut, type DonutSegment } from '@/components/ui/Donut';
 import { cn } from '@/lib/utils';
 import type { VoteRoleTally, VoteSlice, VoteTally } from '@/types';
@@ -16,45 +16,14 @@ interface SentimentBlockProps {
 
 const SUCCESS_COLOR = 'var(--success)';
 const DANGER_COLOR = 'var(--danger)';
-const ABSTAIN_COLOR = 'var(--text-tertiary)';
-/** Neutral gray for the new "Not Voted" slice. Matches the design's muted
- *  ramp; deliberately distinct from the abstain color so a viewer can tell
+/** Neutral gray for "Not Voted". Distinct from abstain so a viewer can tell
  *  "they didn't vote" apart from "they voted abstain" at a glance. */
 const NOT_VOTED_COLOR = '#9CA3AF';
 
-interface SentimentCardData {
-  icon: LucideIcon;
-  label: string;
-  /** Voter headcount for this slice. */
-  count: number;
-  /** Voting power for this slice in lovelace, stringified. */
-  power: bigint;
-  /** Total ACTIVE voting power (denominator for the % of voting power). */
-  totalPower: bigint;
-  variant: 'support' | 'oppose' | 'abstain' | 'notvoted';
-}
-
-const VARIANT_BG: Record<SentimentCardData['variant'], string> = {
-  support: 'bg-[var(--success-soft)] border-[rgba(16,185,129,0.2)]',
-  oppose: 'bg-[var(--danger-soft)] border-[rgba(239,68,68,0.2)]',
-  abstain: 'bg-[var(--bg-muted)] border-[var(--border-default)]',
-  notvoted: 'bg-[var(--bg-muted)]/80 border-[var(--border-default)]',
-};
-const VARIANT_ICON: Record<SentimentCardData['variant'], string> = {
-  support: 'text-[var(--success)]',
-  oppose: 'text-[var(--danger)]',
-  abstain: 'text-[var(--text-tertiary)]',
-  notvoted: 'text-[var(--text-muted)]',
-};
-
-/** Compact ADA formatter for power values (lovelace -> human-readable).
- *  Uses BigInt internally so the giant DRep / SPO totals don't lose
- *  precision; we then divide once at the boundary to a Number for display. */
+/** Compact ADA formatter. Lovelace -> human-readable. BigInt internal so
+ *  giant DRep totals don't lose precision; divide at the boundary. */
 function formatLovelaceAda(power: bigint): string {
   if (power <= 0n) return '0 ADA';
-  // Convert lovelace -> ADA, keeping enough precision for display.
-  // 1 ADA = 1e6 lovelace. We compute integer-millions of ADA and then
-  // pick the appropriate suffix.
   const ada = Number(power / 1_000_000n);
   if (ada >= 1_000_000_000) return `${(ada / 1_000_000_000).toFixed(2)}B ADA`;
   if (ada >= 1_000_000) return `${(ada / 1_000_000).toFixed(2)}M ADA`;
@@ -63,9 +32,9 @@ function formatLovelaceAda(power: bigint): string {
 }
 
 /** Best-effort BigInt parse — VoteSlice power is always a stringified
- *  integer from the backend, but we still guard against malformed values
- *  rather than throwing on a single bad row. */
-function parseSlicePower(slice: VoteSlice): bigint {
+ *  integer from the backend, but we still guard against malformed values. */
+function parseSlicePower(slice: VoteSlice | undefined): bigint {
+  if (!slice) return 0n;
   try {
     return BigInt(slice.power);
   } catch {
@@ -73,9 +42,16 @@ function parseSlicePower(slice: VoteSlice): bigint {
   }
 }
 
-/** % of voting power. Returns 0 when total is zero (rather than dividing
- *  by zero). One decimal place keeps small slices visible without making
- *  the headline numbers look fussy. */
+function parseStrPower(s: string | undefined): bigint {
+  if (!s) return 0n;
+  try {
+    return BigInt(s);
+  } catch {
+    return 0n;
+  }
+}
+
+/** % of a BigInt total. Returns 0 when total is zero. One decimal place. */
 function pctOfPower(part: bigint, total: bigint): number {
   if (total <= 0n) return 0;
   // Multiply by 1000 first to keep one decimal of precision in BigInt math.
@@ -83,107 +59,254 @@ function pctOfPower(part: bigint, total: bigint): number {
   return Number(x) / 10;
 }
 
-/** % of headcount, rounded to integer (matches the legacy display). */
-function pctOfCount(part: number, total: number): number {
-  if (total <= 0) return 0;
-  return Math.round((part / total) * 100);
+/** Headcount label. Singular when count == 1 ("1 voter") for a tiny dignity
+ *  bump on early-voting actions. */
+function voterLabel(role: 'drep' | 'spo' | 'cc', count: number): string {
+  if (role === 'cc') return count === 1 ? '1 member' : `${count.toLocaleString('en-US')} members`;
+  if (role === 'spo') return count === 1 ? '1 SPO' : `${count.toLocaleString('en-US')} SPOs`;
+  return count === 1 ? '1 DRep' : `${count.toLocaleString('en-US')} DReps`;
 }
 
-function SentimentCardTile({ data }: { data: SentimentCardData }): React.ReactElement {
-  const { icon: Icon, label, count, power, totalPower, variant } = data;
-  const pwrPct = pctOfPower(power, totalPower);
-  return (
-    <div
-      className={cn(
-        'flex items-center gap-3 px-4 py-3 rounded-token-lg border',
-        VARIANT_BG[variant],
-      )}
-    >
-      <span
-        className={cn(
-          'inline-flex items-center justify-center w-6 h-6 flex-shrink-0',
-          VARIANT_ICON[variant],
-        )}
-        aria-hidden="true"
-      >
-        <Icon size={16} strokeWidth={2} />
-      </span>
-      <div className="flex-1 min-w-0">
-        <div className="text-[13px] font-semibold text-[var(--text-primary)] leading-tight">
-          {label}
-        </div>
-        <div className="text-[11px] text-[var(--text-tertiary)] tabular-nums leading-tight">
-          {count.toLocaleString('en-US')}{' '}
-          {count === 1 ? 'voter' : 'voters'} · {formatLovelaceAda(power)}
-        </div>
-      </div>
-      <span className="text-[14px] font-bold text-[var(--text-primary)] tabular-nums flex-shrink-0">
-        {pwrPct.toFixed(1)}%
-      </span>
-    </div>
-  );
+function totalLabel(role: 'drep' | 'spo' | 'cc'): string {
+  if (role === 'cc') return 'committee members';
+  if (role === 'spo') return 'active SPOs';
+  return 'active DReps';
 }
 
-/** One row in the per-role breakdown — DRep / SPO / CC. Shows total active
- *  power for that role plus the four slice numbers ("y/n/a/-") so the user
- *  can compare role by role at a glance. */
-function RoleRow({
+/** Per-role 3-slice donut + breakdown + abstain footnote. The center of
+ *  the donut shows total active voting power; below the donut, three rows
+ *  show Yes / No / Not Voted with counts, ADA, and percentages summing to
+ *  100% of `totalActive`. The Abstain row is rendered as a divider-
+ *  separated footnote with explanatory copy — it is NOT a 4th slice. */
+function RoleSection({
   label,
   role,
+  roleKey,
 }: {
   label: string;
   role: VoteRoleTally;
+  roleKey: 'drep' | 'spo' | 'cc';
 }): React.ReactElement {
-  const totalPower = parseSlicePower(role.totalActive);
-  const yesPct = pctOfPower(parseSlicePower(role.yes), totalPower);
-  const noPct = pctOfPower(parseSlicePower(role.no), totalPower);
-  const abstainPct = pctOfPower(parseSlicePower(role.abstain), totalPower);
-  const notVotedPct = pctOfPower(parseSlicePower(role.notVoted), totalPower);
+  const isCount = roleKey === 'cc';
+  const yesPower = parseSlicePower(role.yes);
+  const noPower = parseSlicePower(role.no);
+  const notVotedPower = parseSlicePower(role.notVoted);
+  const abstainPower = parseSlicePower(role.abstain);
+  const totalActivePower = parseSlicePower(role.totalActive);
+  const autoAbstainPower = parseStrPower(role.autoAbstainPower);
+  const autoNoConfPower = parseStrPower(role.autoNoConfidencePower);
+
+  // Percentages — 3 ratification slices over totalActive.
+  const yesPct = pctOfPower(yesPower, totalActivePower);
+  const noPct = pctOfPower(noPower, totalActivePower);
+  // Use the residual for `notVoted` so the three slices always sum to 100
+  // when the backend identity holds — protects against display-side
+  // floating-point drift where 33.3 + 33.3 + 33.3 = 99.9.
+  const notVotedPct =
+    totalActivePower > 0n ? Math.max(0, 100 - yesPct - noPct) : 0;
+
+  // Donut segments are sized by power. We scale BigInt down by 1e6
+  // (lovelace -> ADA) before handing to the SVG primitive, which expects
+  // Number. Even at 1e16 lovelace this is safe; dividing first sidesteps
+  // any future precision jitter.
+  const sliceForDonut = (p: bigint): number =>
+    isCount ? Number(p) : Number(p / 1_000_000n);
+
+  const segments: DonutSegment[] = [
+    { label: 'Yes', value: sliceForDonut(yesPower), color: SUCCESS_COLOR },
+    { label: 'No', value: sliceForDonut(noPower), color: DANGER_COLOR },
+    {
+      label: 'Not Voted',
+      value: sliceForDonut(notVotedPower),
+      color: NOT_VOTED_COLOR,
+    },
+  ];
+
+  const centerValue = isCount
+    ? `${role.totalActive.count}`
+    : formatLovelaceAda(totalActivePower);
+  const centerLabel = isCount ? 'CC members' : 'active stake';
+
+  // Abstain percentage is informational only. Per CIP-1694 abstain stake
+  // is excluded from active voting stake, so we express it against the
+  // larger denominator (totalActive + auto-abstain) so the "% of registered
+  // DRep stake" framing is honest. For roles where totalRegistered ==
+  // totalActive (SPO, CC), we just show abstain / totalRegistered.
+  const totalRegisteredPower = parseSlicePower(role.totalRegistered);
+  const abstainPctRegistered = pctOfPower(abstainPower, totalRegisteredPower);
+
   return (
-    <div className="flex items-center justify-between gap-2 py-1 border-b border-[var(--border-subtle)] last:border-b-0">
-      <span className="text-[var(--text-secondary)] flex-1 text-[12px]">{label}</span>
+    <section className="space-y-3">
+      <header className="flex items-baseline justify-between gap-3 flex-wrap">
+        <h4 className="text-[14px] font-semibold text-[var(--text-primary)] m-0">
+          {label}
+        </h4>
+        <span className="text-[11.5px] text-[var(--text-tertiary)] tabular-nums">
+          {voterLabel(roleKey, role.totalActive.count)} {totalLabel(roleKey)}
+        </span>
+      </header>
+
+      <div className="grid grid-cols-1 md:grid-cols-[auto_1fr] gap-5 items-center">
+        {/* Donut */}
+        <div className="flex justify-center md:justify-start">
+          <Donut
+            segments={segments}
+            size={140}
+            strokeWidth={20}
+            centerValue={centerValue}
+            centerLabel={centerLabel}
+          />
+        </div>
+
+        {/* 3-row breakdown */}
+        <div className="space-y-2">
+          <BreakdownRow
+            icon={<Check size={14} strokeWidth={2.25} />}
+            iconClass="text-[var(--success)]"
+            label="Yes"
+            count={role.yes.count}
+            secondaryLabel={isCount ? '' : formatLovelaceAda(yesPower)}
+            pct={yesPct}
+            roleKey={roleKey}
+          />
+          <BreakdownRow
+            icon={<X size={14} strokeWidth={2.25} />}
+            iconClass="text-[var(--danger)]"
+            label="No"
+            count={role.no.count}
+            secondaryLabel={isCount ? '' : formatLovelaceAda(noPower)}
+            pct={noPct}
+            roleKey={roleKey}
+          />
+          <BreakdownRow
+            icon={<MoreHorizontal size={14} strokeWidth={2.25} />}
+            iconClass="text-[var(--text-muted)]"
+            label="Not Voted"
+            count={role.notVoted.count}
+            secondaryLabel={isCount ? '' : formatLovelaceAda(notVotedPower)}
+            pct={notVotedPct}
+            roleKey={roleKey}
+          />
+
+          {/* Abstain footnote — sits OUTSIDE the ratification denominator. */}
+          {(abstainPower > 0n || role.abstain.count > 0) && (
+            <div className="pt-2 mt-2 border-t border-[var(--border-subtle)] space-y-1">
+              <div className="flex items-center gap-2 text-[12px] text-[var(--text-tertiary)]">
+                <Minus
+                  size={14}
+                  strokeWidth={2.25}
+                  className="text-[var(--text-muted)] flex-shrink-0"
+                  aria-hidden="true"
+                />
+                <span className="font-semibold">Abstain</span>
+                <span className="tabular-nums">
+                  {role.abstain.count > 0
+                    ? `${role.abstain.count.toLocaleString('en-US')} ${
+                        role.abstain.count === 1 ? 'voter' : 'voters'
+                      }`
+                    : ''}
+                </span>
+                {!isCount && (
+                  <span className="tabular-nums text-[var(--text-muted)]">
+                    · {formatLovelaceAda(abstainPower)}
+                  </span>
+                )}
+                {abstainPctRegistered > 0 && !isCount && (
+                  <span className="tabular-nums text-[var(--text-muted)]">
+                    · {abstainPctRegistered.toFixed(1)}% of registered
+                  </span>
+                )}
+              </div>
+              <div className="text-[11px] text-[var(--text-muted)] leading-snug pl-6">
+                Delegated to abstain — not in ratification denominator.
+              </div>
+              {roleKey === 'drep' && autoAbstainPower > 0n && (
+                <div className="text-[11px] text-[var(--text-muted)] leading-snug pl-6 tabular-nums">
+                  └ of which auto-abstain (drep_always_abstain):{' '}
+                  {formatLovelaceAda(autoAbstainPower)}
+                </div>
+              )}
+              {roleKey === 'drep' && autoNoConfPower > 0n && (
+                <div className="text-[11px] text-[var(--text-muted)] leading-snug pl-6 tabular-nums">
+                  Note: auto-no-confidence ({formatLovelaceAda(autoNoConfPower)})
+                  is included in {label === 'DRep' ? '' : 'DRep '}
+                  active stake and counts as{' '}
+                  {/* The action-type-dependent direction is rendered by the
+                      parent context — the auto-no-confidence stake is in
+                      Yes for NoConfidence actions, otherwise in No. */}
+                  Yes/No based on action type.
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+interface BreakdownRowProps {
+  icon: React.ReactNode;
+  iconClass: string;
+  label: string;
+  count: number;
+  secondaryLabel: string;
+  pct: number;
+  roleKey: 'drep' | 'spo' | 'cc';
+}
+
+function BreakdownRow({
+  icon,
+  iconClass,
+  label,
+  count,
+  secondaryLabel,
+  pct,
+  roleKey,
+}: BreakdownRowProps): React.ReactElement {
+  const unit = roleKey === 'cc' ? 'member' : 'voter';
+  const unitPlural = roleKey === 'cc' ? 'members' : 'voters';
+  return (
+    <div className="flex items-center gap-2 text-[13px]">
       <span
-        className="tabular-nums text-[var(--success)] text-[11px] w-12 text-right"
-        title={`Yes: ${role.yes.count} voters`}
+        className={cn('inline-flex items-center justify-center flex-shrink-0', iconClass)}
+        aria-hidden="true"
       >
-        {yesPct.toFixed(1)}%y
+        {icon}
       </span>
-      <span
-        className="tabular-nums text-[var(--danger)] text-[11px] w-12 text-right"
-        title={`No: ${role.no.count} voters`}
-      >
-        {noPct.toFixed(1)}%n
+      <span className="font-semibold text-[var(--text-primary)] w-20 flex-shrink-0">
+        {label}
       </span>
-      <span
-        className="tabular-nums text-[var(--text-tertiary)] text-[11px] w-12 text-right"
-        title={`Abstain: ${role.abstain.count} voters`}
-      >
-        {abstainPct.toFixed(1)}%a
+      <span className="text-[12px] text-[var(--text-tertiary)] tabular-nums w-24 flex-shrink-0">
+        {count.toLocaleString('en-US')} {count === 1 ? unit : unitPlural}
       </span>
-      <span
-        className="tabular-nums text-[var(--text-muted)] text-[11px] w-12 text-right"
-        title={`Not Voted: ${role.notVoted.count} eligible`}
-      >
-        {notVotedPct.toFixed(1)}%-
+      {secondaryLabel && (
+        <span className="text-[12px] text-[var(--text-tertiary)] tabular-nums flex-1">
+          {secondaryLabel}
+        </span>
+      )}
+      <span className="font-bold text-[var(--text-primary)] tabular-nums w-14 text-right flex-shrink-0">
+        {pct.toFixed(1)}%
       </span>
     </div>
   );
 }
 
 /**
- * On-Chain Votes block. 3-column grid:
- *   - 4 colored cards (Yes / No / Abstain / Not Voted), stacked
- *   - 140px donut chart sized by VOTING POWER, with center label showing
- *     total active voting power
- *   - Per-role breakdown rows (DRep / SPO / CC), each showing the four
- *     percentages-of-voting-power for that role
+ * On-Chain Votes block. One section per role (DRep / SPO / Constitutional
+ * Committee). Each section renders a 3-slice donut (Yes / No / Not Voted)
+ * sized by voting power, summing to 100% of that role's total ACTIVE
+ * voting stake — the CIP-1694 ratification denominator. Abstain is
+ * surfaced as a footnote BELOW the breakdown, deliberately separated
+ * because per CIP-1694 abstain stake is "actively marked as not
+ * participating in governance" and therefore excluded from the
+ * ratification math.
  *
- * Cardano governance ratification thresholds (per CIP-1694) are evaluated
- * against TOTAL active voting power, not just power-of-those-who-voted.
- * That's why the denominator everywhere is `totalActive.power` rather than
- * `yes + no + abstain` — the user needs to see "what fraction of the
- * available power has agreed/disagreed" to understand whether a proposal
- * is on track to ratify.
+ * Why per-role sections (not aggregated): governance ratification rules
+ * differ per role (DRep vs SPO vs CC have different thresholds), and
+ * mixing power-units (lovelace) with headcount (CC has 1 vote per member)
+ * into a single donut is misleading. Each role gets its own ratification
+ * picture.
  */
 export function SentimentBlock({
   title,
@@ -191,136 +314,36 @@ export function SentimentBlock({
   tally,
   className,
 }: SentimentBlockProps): React.ReactElement {
-  // Aggregate the per-role tallies into top-level slices. Power is summed
-  // as BigInt; counts as Number. We treat CC count alongside DRep / SPO
-  // counts even though CC has no per-voter power weighting — the
-  // headcount is still informative ("4 of 7 CC members voted no").
-  const yesCount = tally.drep.yes.count + tally.spo.yes.count + tally.cc.yes.count;
-  const noCount = tally.drep.no.count + tally.spo.no.count + tally.cc.no.count;
-  const abstainCount =
-    tally.drep.abstain.count + tally.spo.abstain.count + tally.cc.abstain.count;
-  const notVotedCount =
-    tally.drep.notVoted.count + tally.spo.notVoted.count + tally.cc.notVoted.count;
-
-  const yesPower =
-    parseSlicePower(tally.drep.yes) +
-    parseSlicePower(tally.spo.yes) +
-    parseSlicePower(tally.cc.yes);
-  const noPower =
-    parseSlicePower(tally.drep.no) +
-    parseSlicePower(tally.spo.no) +
-    parseSlicePower(tally.cc.no);
-  const abstainPower =
-    parseSlicePower(tally.drep.abstain) +
-    parseSlicePower(tally.spo.abstain) +
-    parseSlicePower(tally.cc.abstain);
-  const notVotedPower =
-    parseSlicePower(tally.drep.notVoted) +
-    parseSlicePower(tally.spo.notVoted) +
-    parseSlicePower(tally.cc.notVoted);
-  const totalActivePower =
-    parseSlicePower(tally.drep.totalActive) +
-    parseSlicePower(tally.spo.totalActive) +
-    parseSlicePower(tally.cc.totalActive);
-  const totalActiveCount =
-    tally.drep.totalActive.count + tally.spo.totalActive.count + tally.cc.totalActive.count;
-  const castCount = yesCount + noCount + abstainCount;
-
-  const cards: SentimentCardData[] = [
-    {
-      icon: Check,
-      label: 'Yes',
-      count: yesCount,
-      power: yesPower,
-      totalPower: totalActivePower,
-      variant: 'support',
-    },
-    {
-      icon: X,
-      label: 'No',
-      count: noCount,
-      power: noPower,
-      totalPower: totalActivePower,
-      variant: 'oppose',
-    },
-    {
-      icon: Minus,
-      label: 'Abstain',
-      count: abstainCount,
-      power: abstainPower,
-      totalPower: totalActivePower,
-      variant: 'abstain',
-    },
-    {
-      icon: MoreHorizontal,
-      label: 'Not Voted',
-      count: notVotedCount,
-      power: notVotedPower,
-      totalPower: totalActivePower,
-      variant: 'notvoted',
-    },
-  ];
-
-  // Donut segments are sized by VOTING POWER. The Donut primitive expects
-  // `number` values, so we scale the BigInt powers down by 1e6 (lovelace
-  // -> ADA) — that brings DRep totals from ~1.5e16 down to ~1.5e10, well
-  // inside Number precision and still preserving relative segment sizes.
-  // (Even at 1e16 lovelace we're fine for proportional rendering, but
-  // dividing first sidesteps any future jitter.)
-  const sliceForDonut = (p: bigint): number => Number(p / 1_000_000n);
-  const segments: DonutSegment[] = [
-    { label: 'Yes', value: sliceForDonut(yesPower), color: SUCCESS_COLOR },
-    { label: 'No', value: sliceForDonut(noPower), color: DANGER_COLOR },
-    { label: 'Abstain', value: sliceForDonut(abstainPower), color: ABSTAIN_COLOR },
-    { label: 'Not Voted', value: sliceForDonut(notVotedPower), color: NOT_VOTED_COLOR },
-  ];
-
   return (
-    <section className={cn('space-y-4', className)}>
-      <div className="flex items-baseline justify-between gap-3 flex-wrap">
+    <section className={cn('space-y-6', className)}>
+      <header className="flex items-baseline justify-between gap-3 flex-wrap">
         <h3 className="text-[15px] font-semibold text-[var(--text-primary)] m-0">
           {title}
           {caption && (
             <span className="ml-2 text-xs font-normal text-[var(--text-muted)]">{caption}</span>
           )}
         </h3>
-        <span className="text-[12px] text-[var(--text-tertiary)] tabular-nums">
-          {castCount.toLocaleString('en-US')} of{' '}
-          {totalActiveCount.toLocaleString('en-US')} voted
+        <span className="text-[11.5px] text-[var(--text-muted)]">
+          % of active voting stake (CIP-1694)
         </span>
-      </div>
+      </header>
 
-      <div className="grid grid-cols-1 md:grid-cols-[1fr_auto_1fr] gap-6 items-center">
-        <div className="flex flex-col gap-2">
-          {cards.map((c) => (
-            <SentimentCardTile key={c.label} data={c} />
-          ))}
-        </div>
-
-        <div className="flex justify-center">
-          <Donut
-            segments={segments}
-            size={140}
-            strokeWidth={20}
-            centerValue={formatLovelaceAda(totalActivePower)}
-            centerLabel="active voting power"
-          />
-        </div>
-
-        <div className="flex flex-col gap-2 text-[13px]">
-          <RoleRow label="DRep" role={tally.drep} />
-          <RoleRow label="SPO" role={tally.spo} />
-          <RoleRow label="Constitutional Committee" role={tally.cc} />
-        </div>
-      </div>
+      <RoleSection label="DRep" roleKey="drep" role={tally.drep} />
+      <div className="border-t border-[var(--border-subtle)]" />
+      <RoleSection label="SPO" roleKey="spo" role={tally.spo} />
+      <div className="border-t border-[var(--border-subtle)]" />
+      <RoleSection
+        label="Constitutional Committee"
+        roleKey="cc"
+        role={tally.cc}
+      />
     </section>
   );
 }
 
-// Re-export for callers that want the raw power-percentage helpers.
+// Re-export helpers for unit-test ergonomics or other callers.
 export {
   pctOfPower as _pctOfPower,
   parseSlicePower as _parseSlicePower,
   formatLovelaceAda as _formatLovelaceAda,
-  pctOfCount as _pctOfCount,
 };

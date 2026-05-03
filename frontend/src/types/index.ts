@@ -84,17 +84,39 @@ export interface VoteSlice {
 }
 
 /**
- * Per-role tally with explicit `notVoted` and `totalActive` slices.
- * `totalActive` is the global active voting power for this role at sync
- * time — it's the denominator Cardano governance thresholds evaluate
- * against, distinct from total-cast-votes.
+ * Per-role tally with explicit ratification slices.
+ *
+ * CIP-1694 ratification math: yes/no/notVoted together sum to 100% of
+ * totalActive (the "active voting stake" denominator). Auto-abstain
+ * delegations are NOT in totalActive — per CIP-1694 they're explicitly
+ * excluded from the active voting stake. `abstain` is informational and
+ * sits OUTSIDE the ratification denominator. `totalRegistered` is the
+ * bigger informational denominator that includes auto-abstain.
+ *
+ * Backend invariant (BigInt equality):
+ *   yes.power + no.power + notVoted.power == totalActive.power
  */
 export interface VoteRoleTally {
+  /** Yes-vote slice. For NoConfidence actions, includes auto-no-confidence
+   *  power (auto-no-confidence flips to Yes on NoConfidence actions). */
   yes: VoteSlice;
+  /** No-vote slice. For non-NoConfidence actions, includes auto-no-
+   *  confidence power (it counts as No on every other action). */
   no: VoteSlice;
-  abstain: VoteSlice;
+  /** Stake in totalActive that hasn't voted yes/no — totalActive - yes - no. */
   notVoted: VoteSlice;
+  /** Informational only — explicit abstain votes + auto-abstain power.
+   *  NOT in the ratification denominator. */
+  abstain: VoteSlice;
+  /** Ratification denominator (excludes auto-abstain). */
   totalActive: VoteSlice;
+  /** Informational total (INCLUDES auto-abstain). For SPO / CC, equals
+   *  totalActive (no auto-abstain analog). */
+  totalRegistered: VoteSlice;
+  /** Informational breakout (DRep only). Stringified BigInt lovelace. */
+  autoAbstainPower?: string;
+  /** Informational breakout (DRep only). Stringified BigInt lovelace. */
+  autoNoConfidencePower?: string;
 }
 
 /**

@@ -212,8 +212,9 @@ export function GovernanceActionCard({
             <SentimentBar
               yes={tallyPowerTotals(action.votes).yes}
               no={tallyPowerTotals(action.votes).no}
-              abstain={tallyPowerTotals(action.votes).abstain}
               notVoted={tallyPowerTotals(action.votes).notVoted}
+              totalActive={tallyPowerTotals(action.votes).totalActive}
+              abstain={tallyPowerTotals(action.votes).abstain}
               height={6}
             />
           </div>
