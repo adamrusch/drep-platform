@@ -5,6 +5,7 @@ import { useGovernanceActions, useGovernanceSync } from '@/hooks/useGovernanceAc
 import { useEpoch } from '@/hooks/useEpoch';
 import { useAuthStore } from '@/stores/authStore';
 import { GovernanceActionCard } from '@/components/GovernanceActionCard';
+import { GovernanceHistoryWidget } from '@/components/GovernanceHistoryWidget';
 import { HeroBand } from '@/components/HeroBand';
 import { StatTile } from '@/components/ui/StatTile';
 import { Button } from '@/components/ui/Button';
@@ -102,6 +103,12 @@ export function DRepDashboard(): React.ReactElement {
           iconVariant="amber"
         />
       </div>
+
+      {/* Governance History — reference card sitting above Hot Actions
+          so DReps land on the comprehensive picture before drilling into
+          live work. The widget is self-contained (its own data hooks)
+          and links through to /governance/history for the full reference. */}
+      <GovernanceHistoryWidget />
 
       {/* Hot Actions */}
       <div>

@@ -67,6 +67,11 @@ export interface GovernanceAction {
   details?: GovernanceDetail[];
   // ---- On-chain misc ----
   proposerAddress?: string;
+  /** TreasuryWithdrawals only — sum of all withdrawal lovelace amounts on
+   *  this action, stringified BigInt. Powers the "total ADA withdrawn"
+   *  aggregation on the history page. Undefined for non-treasury types and
+   *  on rows synced before enrichmentVersion 10. */
+  treasuryWithdrawalLovelace?: string;
   // ---- On-chain vote tally (split by voter role) ----
   votes?: VoteTally;
   /** Per CIP-1694 §Ratification §Restrictions: which governance bodies are
@@ -141,6 +146,21 @@ export interface VoteTally {
   drep: VoteRoleTally;
   spo: VoteRoleTally;
   cc: VoteRoleTally;
+}
+
+/** Aggregated governance stats — payload of `GET /governance/stats`.
+ *  Powers the history page summary panel and the dashboard "Governance
+ *  History" widget. See `backend/src/handlers/governance/stats.ts` for
+ *  the canonical shape. */
+export interface GovernanceStats {
+  total: number;
+  byStatus: Record<string, number>;
+  byType: Record<string, number>;
+  /** Sum of withdrawal lovelace on ENACTED TreasuryWithdrawals only,
+   *  stringified BigInt. */
+  treasuryWithdrawnLovelace: string;
+  earliestSubmittedAt?: string;
+  latestSubmittedAt?: string;
 }
 
 export interface EpochInfo {

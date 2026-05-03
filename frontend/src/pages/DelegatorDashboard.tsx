@@ -6,6 +6,7 @@ import { useEpoch } from '@/hooks/useEpoch';
 import { useAuthStore } from '@/stores/authStore';
 import { useMe } from '@/hooks/useAuth';
 import { GovernanceActionCard } from '@/components/GovernanceActionCard';
+import { GovernanceHistoryWidget } from '@/components/GovernanceHistoryWidget';
 import { HeroBand } from '@/components/HeroBand';
 import { StatTile } from '@/components/ui/StatTile';
 import { Button } from '@/components/ui/Button';
@@ -108,6 +109,11 @@ export function DelegatorDashboard(): React.ReactElement {
           </div>
         </div>
       )}
+
+      {/* Governance History — reference card sitting above Hot Actions
+          so delegators see the full historical picture (with the
+          treasury-spend headline) before scanning live work. */}
+      <GovernanceHistoryWidget />
 
       {/* Hot Actions */}
       <div>

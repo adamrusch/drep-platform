@@ -14,6 +14,7 @@ import { useThemeStore } from '@/stores/themeStore';
 import { Home } from '@/pages/Home';
 import { GuestLanding } from '@/pages/GuestLanding';
 import { GovernanceListPage } from '@/pages/GovernanceListPage';
+import { GovernanceHistoryPage } from '@/pages/GovernanceHistoryPage';
 import { GovernanceActionPage } from '@/pages/GovernanceActionPage';
 import { DRepPublicProfile } from '@/pages/DRepPublicProfile';
 import { DelegatorClubhouse } from '@/pages/DelegatorClubhouse';
@@ -61,8 +62,12 @@ function App(): React.ReactElement {
               {/* Auth */}
               <Route path="/auth/connect" element={<WalletConnectPage />} />
 
-              {/* Governance — public, no auth required */}
+              {/* Governance — public, no auth required.
+                  NOTE: `/governance/history` MUST be declared before
+                  `/governance/:actionId` so React Router's segment match
+                  picks the static route over the parameterized one. */}
               <Route path="/governance" element={<GovernanceListPage />} />
+              <Route path="/governance/history" element={<GovernanceHistoryPage />} />
               <Route path="/governance/:actionId" element={<GovernanceActionPage />} />
 
               {/* DRep public surfaces */}
