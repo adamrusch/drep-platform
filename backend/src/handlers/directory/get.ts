@@ -127,6 +127,9 @@ export const handler = async (
       drepId: cached.drepId,
       hex: cached.hex,
       isActive: cached.isActive,
+      // Backwards compat — pre-v3 rows didn't store this field. Treat
+      // absence as `false` (the v2 sync filtered out non-registered).
+      isRetired: cached.isRetired ?? false,
       status: cached.status,
       deposit: cached.deposit,
       hasScript: cached.hasScript,

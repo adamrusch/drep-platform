@@ -243,8 +243,15 @@ export interface DRepDirectoryEntry {
   hex: string | null;
   /** From `drep_info.active` — registered AND not expired. Inactive DReps
    *  still appear in the directory (with the "Inactive" pill) until they
-   *  formally retire. */
+   *  formally retire. Retired DReps are forced to `false` regardless of
+   *  what `drep_info` reports. */
   isActive: boolean;
+  /** True when `drep_list.registered === false` OR `drep_status === 'retired'`.
+   *  Retired DReps have filed a retirement certificate and their voting
+   *  power is forced to `"0"`. Historical anchor metadata + vote activity
+   *  are still populated so the row remains browsable. Frontend shows a
+   *  distinct "Retired" badge. */
+  isRetired: boolean;
   /** From `drep_info.drep_status` — "registered" | "retired" | unknown. */
   status: string;
   /** Registration deposit in lovelace, stringified. Null when unknown. */
@@ -468,6 +475,13 @@ export interface DRepDirectoryItem {
   SK: 'PROFILE';
   hex: string | null;
   isActive: boolean;
+  /** True when this DRep has filed a retirement certificate
+   *  (`drep_list.registered === false`). Voting power is pinned to "0".
+   *  Optional on the Item shape for backwards compat with rows written
+   *  before enrichmentVersion 3 — those rows had `registered === true`
+   *  for every entry by definition (the old sync filtered the rest out)
+   *  so the absence of the flag means `false`. */
+  isRetired?: boolean;
   status: string;
   deposit: string | null;
   hasScript: boolean;
