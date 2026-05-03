@@ -39,12 +39,17 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
         : {}),
     });
 
-    return ok({
-      items: result.items,
-      lastEvaluatedKey: result.lastEvaluatedKey
-        ? Buffer.from(JSON.stringify(result.lastEvaluatedKey)).toString('base64')
-        : undefined,
-    });
+    return ok(
+      {
+        items: result.items,
+        lastEvaluatedKey: result.lastEvaluatedKey
+          ? Buffer.from(JSON.stringify(result.lastEvaluatedKey)).toString('base64')
+          : undefined,
+      },
+      // 15s edge cache — more dynamic than the action itself (users post
+      // fresh comments and expect them to show up quickly).
+      { 'Cache-Control': 'public, max-age=15, s-maxage=15' },
+    );
   } catch (err) {
     console.error('comments/list handler error:', err);
     return internalError('Failed to list comments');

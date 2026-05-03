@@ -26,7 +26,10 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
       ...publicProfile
     } = user;
 
-    return ok(publicProfile);
+    // Public profile is shareable across all viewers — safe to edge-cache.
+    // Auth-bound state lives on /auth/me; this endpoint never returns
+    // session-specific content even when the caller is signed in.
+    return ok(publicProfile, { 'Cache-Control': 'public, max-age=30, s-maxage=30' });
   } catch (err) {
     console.error('profile/get handler error:', err);
     return internalError('Failed to fetch profile');

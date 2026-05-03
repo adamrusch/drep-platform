@@ -54,13 +54,19 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
       throw err;
     }
 
-    return ok({
-      items: result.items,
-      lastEvaluatedKey: result.lastEvaluatedKey
-        ? Buffer.from(JSON.stringify(result.lastEvaluatedKey)).toString('base64')
-        : undefined,
-      total: result.count,
-    });
+    return ok(
+      {
+        items: result.items,
+        lastEvaluatedKey: result.lastEvaluatedKey
+          ? Buffer.from(JSON.stringify(result.lastEvaluatedKey)).toString('base64')
+          : undefined,
+        total: result.count,
+      },
+      // 30s edge cache. /governance is the most-hit governance endpoint and
+      // its content only changes on the sync cadence (every 5min). Auth-bound
+      // state is not in the response, so the shared cache is safe.
+      { 'Cache-Control': 'public, max-age=30, s-maxage=30' },
+    );
   } catch (err) {
     console.error('governance/list handler error:', err);
     return internalError('Failed to list governance actions');
