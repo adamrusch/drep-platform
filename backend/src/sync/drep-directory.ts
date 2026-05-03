@@ -3,7 +3,7 @@
  *
  * Four-call cycle:
  *   1. `drep_list` — full registry (~1500–2000 rows on mainnet today,
- *      both active and inactive registered DReps)
+ *      both active and inactive AND retired DReps)
  *   2. `drep_info` (batched 50/req) — voting power, deposit, lifecycle
  *   3. `drep_metadata` (batched 50/req, only DReps with `meta_url`) —
  *      CIP-119 anchor body (givenName, image, objectives, …)
@@ -14,11 +14,21 @@
  * Skips:
  *   - Predefined DReps (`drep_always_abstain`, `drep_always_no_confidence`)
  *     are not in `drep_list` so this happens for free.
- *   - DReps where `registered === false` are dropped — they never had a
- *     valid registration, so they don't belong in a public directory.
- *     (Expired registrations stay with `isActive=false` and the
- *     "Inactive" badge — they're still queryable behind the
- *     `?includeInactive=true` toggle.)
+ *
+ * Lifecycle states (all written to the directory):
+ *   - `registered: true` AND `active: true` → fully active. `isActive=true`,
+ *     `isRetired=false`. Surfaces by default.
+ *   - `registered: true` AND `active: false` → inactive (no vote in
+ *     ~drepActivity epochs). `isActive=false`, `isRetired=false`. Surfaces
+ *     behind the `?includeInactive=true` toggle.
+ *   - `registered: false` → retired (filed a retirement certificate).
+ *     `isActive=false`, `isRetired=true`, `votingPower="0"` (regardless of
+ *     what `drep_info` reports — retired DReps cannot vote). Historical
+ *     `givenName`, anchor metadata, and `voteCount` / `lastVotedAt` are
+ *     preserved so the historical activity remains browsable. Surfaces
+ *     behind the `?includeInactive=true` toggle (retired and inactive
+ *     are merged into one toggle for UX simplicity — see
+ *     `handlers/directory/list.ts` for the rationale).
  *
  * Defers (per the punt protocol):
  *   - `drep_delegators` per-DRep — too expensive at sync time. Detail
@@ -46,6 +56,7 @@ import {
   listAllVotes,
   KoiosError,
   type KoiosDRepInfo,
+  type KoiosDRepListEntry,
   type KoiosDRepMetadata,
   type KoiosVote,
 } from '../lib/koios';
@@ -60,6 +71,7 @@ export interface DirectorySyncResult {
   total: number;
   active: number;
   inactive: number;
+  retired: number;
   written: number;
   skippedFresh: number;
   withMetadata: number;
@@ -80,8 +92,14 @@ const ENRICHMENT_TTL_MS = 60 * 60 * 1000;
  *    1 — initial CIP-119 directory rows
  *    2 — adds `lastVotedAt` / `voteCount` + `lastVotedPartition` /
  *        `lastVotedSort` GSI keys; sync now includes inactive DReps
- *        (`isActive=false`) instead of dropping them. */
-const ENRICHMENT_VERSION = 2;
+ *        (`isActive=false`) instead of dropping them.
+ *    3 — sync now includes retired DReps (`registered=false`) with
+ *        `isRetired=true`, `votingPower="0"`, `isActive=false`. Historical
+ *        anchor metadata and vote activity are preserved. Also forces
+ *        re-sync after the `vote_list` pagination fix that pulls many
+ *        more votes (raising `voteCount` for long-tail DReps that were
+ *        previously stuck at 0). */
+const ENRICHMENT_VERSION = 3;
 
 /** Predefined DReps — auto-vote pseudo-identities, not real DReps. They
  *  shouldn't appear in `drep_list` but if a Koios revision ever surfaces
@@ -245,33 +263,56 @@ function summarizeVotes(votes: readonly KoiosVote[]): Map<string, VoteSummary> {
  * vote-summary lookup. The `info` row carries the lifecycle/voting
  * fields; the `metadata` row carries the CIP-119 body; the `voteSummary`
  * carries activity. Any may be missing — we still emit a row for every
- * registered DRep.
+ * DRep in `drep_list`, including retired ones.
+ *
+ * Retired DReps (`registered === false` in the listing OR
+ * `drep_status === 'retired'` in info) are forced to `isActive=false`
+ * and `votingPower="0"`. The historical anchor metadata + voteCount /
+ * lastVotedAt are preserved so the user can browse who they were and
+ * what they voted on while active. The `isRetired=true` flag lets the
+ * frontend render a distinct "Retired" badge.
  */
 function buildDirectoryItem(
   drepId: string,
+  listingEntry: KoiosDRepListEntry,
   info: KoiosDRepInfo | undefined,
   meta: KoiosDRepMetadata | undefined,
   voteSummary: VoteSummary | undefined,
   now: string,
 ): DRepDirectoryItem {
   const body = extractBody(meta?.meta_json ?? null);
-  const votingPower = info?.amount ?? '0';
+  // Retirement status: `registered=false` in `drep_list` is the canonical
+  // signal (a retirement certificate has been processed). `drep_info`
+  // typically carries `drep_status='retired'` for the same row, but the
+  // listing flag is the primary source of truth — it's set even when
+  // `drep_info` hasn't been re-indexed yet.
+  const isRetired = !listingEntry.registered || info?.drep_status === 'retired';
+  const rawVotingPower = info?.amount ?? '0';
   // Validate the voting power string before writing — a malformed value
   // would break the GSI sort. Default to "0" on parse failure.
-  let votingPowerSafe = votingPower;
+  let votingPowerSafe = rawVotingPower;
   try {
-    BigInt(votingPower);
+    BigInt(rawVotingPower);
   } catch {
     votingPowerSafe = '0';
   }
+  // Retired DReps have no voting weight, regardless of what `drep_info`
+  // last reported. Pin to "0" so sorts and ratification math don't
+  // accidentally count them.
+  if (isRetired) votingPowerSafe = '0';
+  // `isActive` requires both lifecycle flags: the registration must be
+  // live AND the DRep must have voted recently enough not to be
+  // auto-marked inactive. Retired DReps are forced inactive.
+  const isActive = !isRetired && (info?.active ?? false);
   const item: DRepDirectoryItem = {
     drepId,
     SK: 'PROFILE',
-    hex: info?.hex ?? meta?.hex ?? null,
-    isActive: info?.active ?? false,
-    status: info?.drep_status ?? 'unknown',
+    hex: info?.hex ?? meta?.hex ?? listingEntry.hex ?? null,
+    isActive,
+    isRetired,
+    status: info?.drep_status ?? (isRetired ? 'retired' : 'unknown'),
     deposit: info?.deposit ?? null,
-    hasScript: info?.has_script ?? meta?.has_script ?? false,
+    hasScript: info?.has_script ?? meta?.has_script ?? listingEntry.has_script ?? false,
     votingPower: votingPowerSafe,
     votingPowerPartition: 'ALL',
     votingPowerSort: padLeft(votingPowerSafe, VOTING_POWER_PAD),
@@ -312,6 +353,7 @@ export async function runDirectorySync(): Promise<DirectorySyncResult> {
     total: 0,
     active: 0,
     inactive: 0,
+    retired: 0,
     written: 0,
     skippedFresh: 0,
     withMetadata: 0,
@@ -336,24 +378,28 @@ export async function runDirectorySync(): Promise<DirectorySyncResult> {
     return result;
   }
 
-  // Drop never-registered entries — they have no on-chain presence and
-  // wouldn't render meaningfully in the directory. Inactive (registered
-  // but expired) DReps DO stay; they get `isActive=false` and surface
-  // behind the `?includeInactive=true` toggle.
+  // Keep every DRep in the listing — registered (active + inactive) AND
+  // retired. Retired DReps render with a "Retired" badge, votingPower
+  // forced to "0", and historical metadata preserved so users can browse
+  // who they were and what they voted on. They surface behind the
+  // `?includeInactive=true` toggle alongside inactive DReps.
   //
   // Predefined DReps shouldn't appear in `drep_list`, but filter
   // defensively in case a future Koios revision surfaces them.
-  const registered = listing.filter(
-    (d) => d.registered && !PREDEFINED_DREP_IDS.has(d.drep_id),
+  const allEntries = listing.filter((d) => !PREDEFINED_DREP_IDS.has(d.drep_id));
+  const listingByDRep = new Map<string, KoiosDRepListEntry>(
+    allEntries.map((d) => [d.drep_id, d]),
   );
-  result.total = registered.length;
+  const registeredCount = allEntries.filter((d) => d.registered).length;
+  const retiredCount = allEntries.length - registeredCount;
+  result.total = allEntries.length;
   console.log(
-    `Directory sync: drep_list returned ${listing.length} (${registered.length} registered, includes inactive)`,
+    `Directory sync: drep_list returned ${listing.length} (${registeredCount} registered, ${retiredCount} retired)`,
   );
 
-  if (registered.length === 0) return result;
+  if (allEntries.length === 0) return result;
 
-  const drepIds = registered.map((d) => d.drep_id);
+  const drepIds = allEntries.map((d) => d.drep_id);
 
   // Step 2: batched drep_info — voting power, deposit, lifecycle. Don't
   // fail the whole sync on partial failures; whatever batches succeeded
@@ -407,13 +453,19 @@ export async function runDirectorySync(): Promise<DirectorySyncResult> {
   const now = new Date().toISOString();
   for (const id of drepIds) {
     try {
+      const listingEntry = listingByDRep.get(id);
+      // Defensive — the loop iterates `drepIds` which were derived from
+      // `allEntries`, so this is unreachable in practice. Skip rather
+      // than throw if Koios ever returns a malformed listing.
+      if (!listingEntry) continue;
       const info = infoByDRep.get(id);
       const meta = metaByDRep.get(id);
       const summary = voteSummaries.get(id);
-      const item = buildDirectoryItem(id, info, meta, summary, now);
+      const item = buildDirectoryItem(id, listingEntry, info, meta, summary, now);
       await putItem(tableNames.drepDirectory, item);
       result.written++;
-      if (item.isActive) result.active++;
+      if (item.isRetired) result.retired++;
+      else if (item.isActive) result.active++;
       else result.inactive++;
       if (meta) result.withMetadata++;
       if (item.givenName) result.withGivenName++;
@@ -427,7 +479,7 @@ export async function runDirectorySync(): Promise<DirectorySyncResult> {
 
   console.log(
     `Directory sync complete: total=${result.total} active=${result.active} ` +
-      `inactive=${result.inactive} written=${result.written} ` +
+      `inactive=${result.inactive} retired=${result.retired} written=${result.written} ` +
       `withMetadata=${result.withMetadata} withGivenName=${result.withGivenName} ` +
       `withImage=${result.withImage} withLastVoted=${result.withLastVoted} ` +
       `errors=${result.errors}`,

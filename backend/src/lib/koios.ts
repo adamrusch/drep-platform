@@ -732,55 +732,42 @@ export async function listAllDReps(): Promise<KoiosDRepListEntry[]> {
 /**
  * Fetch every governance vote ever cast on mainnet (DRep, SPO, CC).
  *
- * Used by the directory sync to compute per-DRep `lastVotedAt` in a
- * single pass rather than O(N) `drep_voters` calls. At ~24k rows on
- * mainnet today (~5MB) this fits comfortably in our 10MB response cap;
- * we cache for 5 minutes to absorb repeat invocations within the same
- * sync cycle (the sync happens to call this exactly once today, but
- * the cache is cheap insurance).
+ * Used by the directory sync to compute per-DRep `lastVotedAt` /
+ * `voteCount` in a single pass rather than O(N) `drep_voters` calls.
+ * Mainnet has tens of thousands of vote rows today and grows steadily.
+ * Cached for 5 minutes to absorb repeat invocations within a sync cycle
+ * (the sync calls this once today, but the cache is cheap insurance).
  *
- * Pagination uses the `Range` header (Koios's PostgREST default), 1000
- * rows per page, hard-capped at 50 pages = 50k votes. If we ever blow
- * past that we'd need to switch to per-role chunking, but we're nowhere
- * near it today.
+ * **Pagination quirk:** Koios's PostgREST layer silently ignores the
+ * `Range: 1000-1999` header on `/vote_list` (and `/drep_list`,
+ * `/pool_list`) — every Range-paginated request returns page 0. Probe
+ * confirms only `?offset=N&limit=M` query-param pagination works, which
+ * matches what `fetchAllPaged` already does for the DRep / pool listings.
+ * Earlier revisions of this function used `Range` and capped out at 1000
+ * votes — the long-tail DReps appeared as `voteCount: 0` even though
+ * they had public on-chain history.
+ *
+ * Hard-capped at 100 pages = 100k votes. Past that we'd need per-role
+ * chunking (and the 10MB response cap on a single page is well under
+ * the per-page slice anyway). Defensive against runaway pagination.
  *
  * Throws `KoiosError` on failure — the directory sync handles that by
  * skipping the lastVotedAt enrichment for the current cycle (rows still
  * get written; voters just won't get a fresh "Voted X ago" until the
  * next successful sync).
  */
-const VOTE_MAX_PAGES = 50;
+const VOTE_MAX_PAGES = 100;
 export async function listAllVotes(): Promise<KoiosVote[]> {
   const now = Date.now();
   if (_voteCache && now - _voteCache.fetchedAt < VOTE_CACHE_TTL_MS) {
     return _voteCache.value;
   }
-  const all: KoiosVote[] = [];
-  for (let page = 0; page < VOTE_MAX_PAGES; page++) {
-    const from = page * PAGE_SIZE;
-    const to = from + PAGE_SIZE - 1;
-    const res = await koiosFetch('/vote_list', {
-      method: 'POST',
-      body: '{}',
-      rangeFrom: from,
-      rangeTo: to,
-    });
-    if (!res.ok) {
-      _voteCache = null;
-      throw new KoiosError(
-        '/vote_list',
-        `HTTP ${res.status} ${res.statusText}`,
-        res.status,
-      );
-    }
-    const body = (await readJsonCapped(res, '/vote_list')) as unknown;
-    if (!Array.isArray(body)) {
-      _voteCache = null;
-      throw new KoiosError('/vote_list', 'expected JSON array');
-    }
-    const rows = body as KoiosVote[];
-    all.push(...rows);
-    if (rows.length < PAGE_SIZE) break;
+  let all: KoiosVote[];
+  try {
+    all = await fetchAllPaged<KoiosVote>('/vote_list', '{}', VOTE_MAX_PAGES);
+  } catch (err) {
+    _voteCache = null;
+    throw err;
   }
   _voteCache = { fetchedAt: now, value: all };
   return all;
