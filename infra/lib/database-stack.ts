@@ -9,6 +9,7 @@ export interface DatabaseStackProps extends cdk.StackProps {
 export class DatabaseStack extends cdk.Stack {
   public readonly usersTable: dynamodb.Table;
   public readonly drepCommitteesTable: dynamodb.Table;
+  public readonly drepDirectoryTable: dynamodb.Table;
   public readonly governanceActionsTable: dynamodb.Table;
   public readonly commentsTable: dynamodb.Table;
   public readonly clubhousePostsTable: dynamodb.Table;
@@ -63,6 +64,47 @@ export class DatabaseStack extends cdk.Stack {
       indexName: 'SK-createdAt-index',
       partitionKey: { name: 'SK', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    // ---- drep_directory ----
+    // Mainnet DRep registry — chain-state directory of every registered
+    // DRep, populated by the `drep-directory` sync (every 5 min) from
+    // Koios. Distinct from `drep_committees` (the platform's own
+    // coordination committees, which are user-created records).
+    //
+    // PK=`drepId`, SK=`'PROFILE'` (room for future per-DRep sub-records
+    // — vote-history snapshots, delegator caches — under different SKs
+    // without colliding on the partition).
+    this.drepDirectoryTable = new dynamodb.Table(this, 'DRepDirectoryTable', {
+      tableName: `${this.tablePrefix}drep_directory`,
+      partitionKey: { name: 'drepId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'SK', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecovery: true,
+      removalPolicy: props.stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
+    // GSI: globally sort all DReps by voting power. Every row carries
+    // `votingPowerPartition: 'ALL'` so a Query against this index with
+    // a fixed partition key returns every DRep, sorted by the lexico-
+    // graphically-comparable zero-padded `votingPowerSort` field.
+    // Hot-partition risk: at ~2000 rows on PAY_PER_REQUEST with adaptive
+    // capacity this is fine; revisit if the directory grows past ~10k.
+    this.drepDirectoryTable.addGlobalSecondaryIndex({
+      indexName: 'votingPower-index',
+      partitionKey: { name: 'votingPowerPartition', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'votingPowerSort', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    // GSI: globally sort by delegator count. Same single-partition
+    // pattern as votingPower-index. The detail handler updates this
+    // sort key on-demand when it computes the live delegator count.
+    this.drepDirectoryTable.addGlobalSecondaryIndex({
+      indexName: 'delegatorCount-index',
+      partitionKey: { name: 'delegatorCountPartition', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'delegatorCountSort', type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
@@ -147,6 +189,7 @@ export class DatabaseStack extends cdk.Stack {
     // ---- Outputs ----
     new cdk.CfnOutput(this, 'UsersTableName', { value: this.usersTable.tableName, exportName: `${props.stage}-UsersTableName` });
     new cdk.CfnOutput(this, 'DRepCommitteesTableName', { value: this.drepCommitteesTable.tableName, exportName: `${props.stage}-DRepCommitteesTableName` });
+    new cdk.CfnOutput(this, 'DRepDirectoryTableName', { value: this.drepDirectoryTable.tableName, exportName: `${props.stage}-DRepDirectoryTableName` });
     new cdk.CfnOutput(this, 'GovernanceActionsTableName', { value: this.governanceActionsTable.tableName, exportName: `${props.stage}-GovernanceActionsTableName` });
     new cdk.CfnOutput(this, 'CommentsTableName', { value: this.commentsTable.tableName, exportName: `${props.stage}-CommentsTableName` });
     new cdk.CfnOutput(this, 'ClubhousePostsTableName', { value: this.clubhousePostsTable.tableName, exportName: `${props.stage}-ClubhousePostsTableName` });

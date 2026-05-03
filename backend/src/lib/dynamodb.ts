@@ -13,6 +13,8 @@ import {
   UpdateCommandInput,
   TransactWriteCommand,
   TransactWriteCommandInput,
+  ScanCommand,
+  ScanCommandInput,
 } from '@aws-sdk/lib-dynamodb';
 
 // ---- Client setup ----
@@ -38,6 +40,7 @@ const TABLE_PREFIX = process.env['DYNAMODB_TABLE_PREFIX'] ?? 'drep-platform-dev-
 export const tableNames = {
   users: `${TABLE_PREFIX}users`,
   drepCommittees: `${TABLE_PREFIX}drep_committees`,
+  drepDirectory: `${TABLE_PREFIX}drep_directory`,
   governanceActions: `${TABLE_PREFIX}governance_actions`,
   comments: `${TABLE_PREFIX}comments`,
   clubhousePosts: `${TABLE_PREFIX}clubhouse_posts`,
@@ -132,6 +135,50 @@ export async function queryItems<T extends Record<string, unknown>>(
       : {}),
   };
   const result = await docClient.send(new QueryCommand(params));
+  return {
+    items: (result.Items ?? []) as T[],
+    lastEvaluatedKey: result.LastEvaluatedKey as Record<string, unknown> | undefined,
+    count: result.Count ?? 0,
+  };
+}
+
+export interface ScanOptions {
+  filterExpression?: string;
+  expressionAttributeNames?: Record<string, string>;
+  expressionAttributeValues?: Record<string, unknown>;
+  limit?: number;
+  exclusiveStartKey?: Record<string, unknown>;
+  /** Optional projection of attributes to return. Useful for scans that
+   *  only need the key + a couple of fields. */
+  projectionExpression?: string;
+}
+
+/**
+ * Scan a table with optional filter. Use sparingly — Scans read every
+ * partition and bill for every item examined, not just returned. The
+ * DRep directory is small (~2000 items today) so a filtered Scan for
+ * search is cheaper than maintaining a full-text index.
+ */
+export async function scanItems<T extends Record<string, unknown>>(
+  tableName: string,
+  options: ScanOptions = {},
+): Promise<QueryResult<T>> {
+  const params: ScanCommandInput = {
+    TableName: tableName,
+    ...(options.filterExpression ? { FilterExpression: options.filterExpression } : {}),
+    ...(options.expressionAttributeNames
+      ? { ExpressionAttributeNames: options.expressionAttributeNames }
+      : {}),
+    ...(options.expressionAttributeValues
+      ? { ExpressionAttributeValues: options.expressionAttributeValues }
+      : {}),
+    ...(options.limit ? { Limit: options.limit } : {}),
+    ...(options.exclusiveStartKey ? { ExclusiveStartKey: options.exclusiveStartKey } : {}),
+    ...(options.projectionExpression
+      ? { ProjectionExpression: options.projectionExpression }
+      : {}),
+  };
+  const result = await docClient.send(new ScanCommand(params));
   return {
     items: (result.Items ?? []) as T[],
     lastEvaluatedKey: result.LastEvaluatedKey as Record<string, unknown> | undefined,

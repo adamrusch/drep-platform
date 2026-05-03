@@ -16,6 +16,7 @@ export interface SchedulerStackProps extends cdk.StackProps {
 
 export class SchedulerStack extends cdk.Stack {
   public readonly governanceSyncFn: lambdaNodejs.NodejsFunction;
+  public readonly directorySyncFn: lambdaNodejs.NodejsFunction;
 
   constructor(scope: Construct, id: string, props: SchedulerStackProps) {
     super(scope, id, props);
@@ -44,6 +45,18 @@ export class SchedulerStack extends cdk.Stack {
     // (see backend/src/lib/circuitBreaker.ts).
     databaseStack.authNoncesTable.grantReadWriteData(syncRole);
     blockfrostSecret.grantRead(syncRole);
+
+    // ---- Directory sync role (separate, doesn't touch Blockfrost) ----
+    // Koios is the only upstream for the DRep directory sync. Splitting
+    // the role keeps the principle-of-least-privilege story clean — the
+    // directory Lambda has no Secrets Manager grant at all.
+    const directorySyncRole = new iam.Role(this, 'DirectorySyncRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+      ],
+    });
+    databaseStack.drepDirectoryTable.grantReadWriteData(directorySyncRole);
 
     // ---- Governance sync Lambda ----
     this.governanceSyncFn = new lambdaNodejs.NodejsFunction(this, 'GovernanceSyncFn', {
@@ -114,6 +127,56 @@ export class SchedulerStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'GovernanceSyncFnArn', {
       value: this.governanceSyncFn.functionArn,
       exportName: `${stage}-GovernanceSyncFnArn`,
+    });
+
+    // ---- DRep directory sync Lambda ----
+    // Cadence: every 5 minutes. DRep registrations move slower than
+    // governance votes, and the cycle's three Koios calls (drep_list +
+    // batched drep_info + batched drep_metadata) take ~30s on mainnet
+    // today. 5 min is a comfortable cushion; tightening it later is cheap.
+    this.directorySyncFn = new lambdaNodejs.NodejsFunction(this, 'DirectorySyncFn', {
+      functionName: `drep-platform-${stage}-drep-directory-sync`,
+      entry: path.join(backendDir, 'src/sync/drep-directory.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      memorySize: 1024,
+      // ~2000 DReps × ~40 batched Koios calls; observed run is well
+      // under 60s but leave headroom for upstream rate-limit backoff
+      // and pagination growth.
+      timeout: cdk.Duration.minutes(5),
+      role: directorySyncRole,
+      environment: {
+        DYNAMODB_TABLE_PREFIX: `drep-platform-${stage}-`,
+        CARDANO_NETWORK: stage === 'staging' ? 'preprod' : 'mainnet',
+      },
+      bundling: {
+        minify: true,
+        sourceMap: false,
+        target: 'es2022',
+        externalModules: ['@aws-sdk/*'],
+        forceDockerBundling: false,
+      },
+      depsLockFilePath: path.join(backendDir, 'package-lock.json'),
+    });
+
+    const directorySyncRule = new events.Rule(this, 'DirectorySyncRule', {
+      ruleName: `drep-platform-${stage}-drep-directory-sync`,
+      description: 'Triggers DRep directory sync (Koios drep_list/info/metadata) every 5 minutes',
+      schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
+      enabled: true,
+    });
+
+    directorySyncRule.addTarget(
+      new eventsTargets.LambdaFunction(this.directorySyncFn, {
+        retryAttempts: 1,
+        maxEventAge: cdk.Duration.minutes(10),
+      }),
+    );
+
+    new cdk.CfnOutput(this, 'DirectorySyncFnArn', {
+      value: this.directorySyncFn.functionArn,
+      exportName: `${stage}-DirectorySyncFnArn`,
     });
   }
 }
