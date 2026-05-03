@@ -1,11 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useInfiniteQuery } from '@tanstack/react-query';
-import { Search as SearchIcon, Users as UsersIcon } from 'lucide-react';
+import { Search as SearchIcon, Users as UsersIcon, Vote as VoteIcon } from 'lucide-react';
 import { get } from '@/lib/api';
 import { Button } from '@/components/ui/Button';
 import { StatusPill } from '@/components/ui/StatusPill';
-import { cn, formatLovelace } from '@/lib/utils';
+import { cn, formatLovelace, formatRelativeTime } from '@/lib/utils';
 import type { DRepDirectoryEntry, PaginatedResponse } from '@/types';
 
 type SortKey = 'power' | 'delegators' | 'recent';
@@ -101,6 +101,58 @@ function DRepAvatar({ drepId, name, imageUrl, size = 48 }: AvatarProps): React.R
   );
 }
 
+/**
+ * Render the "Voted X ago" / "Never voted" tag. Color cues match
+ * recency: green for recent (<7d), neutral for older, muted for stale
+ * (>30d), and tertiary-text for never-voted. Inactive DReps get the
+ * Inactive badge separately — this badge renders for them too, since
+ * the lastVotedAt is still informative ("Voted 4mo ago").
+ */
+function LastVotedTag({
+  lastVotedAt,
+  voteCount,
+}: {
+  lastVotedAt?: string;
+  voteCount?: number;
+}): React.ReactElement {
+  if (!lastVotedAt) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 text-[var(--text-tertiary)]"
+        title="This DRep has never cast a vote"
+      >
+        <VoteIcon size={11} strokeWidth={2} aria-hidden="true" />
+        Never voted
+      </span>
+    );
+  }
+  const ageMs = Date.now() - new Date(lastVotedAt).getTime();
+  const ageDays = ageMs / (24 * 60 * 60 * 1000);
+  // Color tiers — keep these in sync with the CSS variables so they
+  // adapt to dark mode. We don't use raw hex colors here.
+  let colorClass: string;
+  if (ageDays < 7) {
+    colorClass = 'text-[var(--success)]';
+  } else if (ageDays < 30) {
+    colorClass = 'text-[var(--text-secondary)]';
+  } else {
+    colorClass = 'text-[var(--text-tertiary)]';
+  }
+  const tooltip =
+    typeof voteCount === 'number' && voteCount > 0
+      ? `${voteCount.toLocaleString()} votes • last vote ${new Date(lastVotedAt).toLocaleString()}`
+      : `Last voted ${new Date(lastVotedAt).toLocaleString()}`;
+  return (
+    <span
+      className={cn('inline-flex items-center gap-1 tabular-nums', colorClass)}
+      title={tooltip}
+    >
+      <VoteIcon size={11} strokeWidth={2} aria-hidden="true" />
+      Voted {formatRelativeTime(lastVotedAt)}
+    </span>
+  );
+}
+
 interface DRepCardProps {
   drep: DRepDirectoryEntry;
 }
@@ -124,6 +176,9 @@ function DRepCard({ drep }: DRepCardProps): React.ReactElement {
         'rounded-token-xl shadow-token-sm p-5',
         'transition-all duration-150',
         'hover:border-[var(--border-strong)] hover:shadow-token-md hover:-translate-y-px',
+        // Slight muting for inactive DReps so the active set stays
+        // visually dominant when the toggle is on.
+        !drep.isActive && 'opacity-80',
       )}
     >
       <div className="flex items-start gap-4">
@@ -154,6 +209,7 @@ function DRepCard({ drep }: DRepCardProps): React.ReactElement {
                     ? `Inactive · expires E${drep.expiresEpoch}`
                     : 'Inactive'
                 }
+                title="No vote in the last drepActivity epochs (~100 days). Voting power is excluded from the active stake denominator until they vote again."
               />
             )}
             {drep.hasScript && (
@@ -167,7 +223,7 @@ function DRepCard({ drep }: DRepCardProps): React.ReactElement {
           <div className="text-[11px] font-mono text-[var(--text-muted)] mb-1.5 truncate">
             {shortDRepId(drep.drepId)}
           </div>
-          <div className="flex items-center gap-4 text-[12px] text-[var(--text-secondary)] tabular-nums">
+          <div className="flex items-center gap-4 text-[12px] text-[var(--text-secondary)] tabular-nums flex-wrap">
             <span>
               <span className="text-[var(--text-tertiary)]">Power: </span>
               <span className="font-semibold text-[var(--text-primary)]">{power}</span>
@@ -178,6 +234,10 @@ function DRepCard({ drep }: DRepCardProps): React.ReactElement {
                 {drep.delegatorCount.toLocaleString()}
               </span>
             )}
+            <LastVotedTag
+              lastVotedAt={drep.lastVotedAt}
+              voteCount={drep.voteCount}
+            />
           </div>
           {objectivesPreview && (
             <p className="mt-2 text-[12.5px] leading-relaxed text-[var(--text-secondary)] line-clamp-2">
@@ -197,12 +257,55 @@ interface ListPage {
   total?: number;
 }
 
+function parseSort(raw: string | null): SortKey {
+  if (raw === 'delegators' || raw === 'recent') return raw;
+  return 'power';
+}
+
 export function DRepDirectoryPage(): React.ReactElement {
-  const [searchInput, setSearchInput] = useState('');
-  const [sort, setSort] = useState<SortKey>('power');
+  // URL-backed state so the Inactive toggle, search, and sort survive
+  // reloads and are deep-linkable. We update params individually on
+  // change to avoid clobbering unrelated keys.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const includeInactive = searchParams.get('includeInactive') === '1';
+  const sort = parseSort(searchParams.get('sort'));
+
+  // Search is debounced via local state; the URL only stores the final
+  // committed value (?q=...) so we don't update the URL on every keystroke.
+  const [searchInput, setSearchInput] = useState<string>(searchParams.get('q') ?? '');
   const search = useDebounced(searchInput.trim(), 250);
 
-  const queryKey = ['drep-directory', { search, sort, limit: PAGE_LIMIT }] as const;
+  // Mirror the debounced search into the URL — replace, not push, so the
+  // browser back-stack doesn't fill with intermediate values.
+  useEffect(() => {
+    const next = new URLSearchParams(searchParams);
+    if (search) next.set('q', search);
+    else next.delete('q');
+    // Only update if changed to avoid an infinite loop.
+    if (next.toString() !== searchParams.toString()) {
+      setSearchParams(next, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search]);
+
+  const setSort = (next: SortKey): void => {
+    const params = new URLSearchParams(searchParams);
+    if (next === 'power') params.delete('sort');
+    else params.set('sort', next);
+    setSearchParams(params, { replace: false });
+  };
+
+  const setIncludeInactive = (next: boolean): void => {
+    const params = new URLSearchParams(searchParams);
+    if (next) params.set('includeInactive', '1');
+    else params.delete('includeInactive');
+    setSearchParams(params, { replace: false });
+  };
+
+  const queryKey = [
+    'drep-directory',
+    { search, sort, limit: PAGE_LIMIT, includeInactive },
+  ] as const;
 
   const { data, isLoading, error, fetchNextPage, hasNextPage, isFetchingNextPage } =
     useInfiniteQuery<ListPage, Error>({
@@ -213,6 +316,7 @@ export function DRepDirectoryPage(): React.ReactElement {
           limit: String(PAGE_LIMIT),
         };
         if (search) params['search'] = search;
+        if (includeInactive) params['includeInactive'] = 'true';
         if (typeof pageParam === 'string' && pageParam.length > 0) {
           params['lastKey'] = pageParam;
         }
@@ -277,6 +381,30 @@ export function DRepDirectoryPage(): React.ReactElement {
             </button>
           ))}
         </div>
+      </div>
+
+      {/* Active/Inactive toggle. Implemented as a plain checkbox-styled
+          control with a clear label so it's accessible and keyboard-
+          friendly without pulling in a switch component. */}
+      <div className="flex items-center justify-between text-[12.5px] text-[var(--text-secondary)]">
+        <span>
+          {dreps.length > 0 && (data?.pages[0]?.total != null) && (
+            <>Showing {dreps.length}{includeInactive ? ' (active + inactive)' : ' active'}</>
+          )}
+        </span>
+        <label
+          className="inline-flex items-center gap-2 cursor-pointer select-none"
+          title="Inactive DReps are registered but haven't voted in ~100 days. Their voting power is excluded from the active stake denominator until they vote again."
+        >
+          <input
+            type="checkbox"
+            checked={includeInactive}
+            onChange={(e) => setIncludeInactive(e.target.checked)}
+            className="h-3.5 w-3.5 accent-[var(--brand-primary)] cursor-pointer"
+            aria-label="Include inactive DReps"
+          />
+          <span>Show inactive</span>
+        </label>
       </div>
 
       {/* Loading skeletons */}
