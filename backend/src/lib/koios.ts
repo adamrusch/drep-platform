@@ -188,6 +188,35 @@ export interface KoiosDRepVote {
 }
 
 /**
+ * One row of the global `vote_list` endpoint. Carries every governance
+ * vote ever cast (DRep, SPO, CC), with voter identity and block context.
+ * Used by the directory sync to compute per-DRep `lastVotedAt` in O(1)
+ * Koios calls rather than O(N) per-DRep `drep_voters` calls.
+ *
+ * Mainnet has ~24k vote rows today and grows slowly; well under the
+ * 100k punt-protocol threshold and ~5MB on the wire.
+ */
+export interface KoiosVote {
+  vote_tx_hash: string;
+  /** "DRep" | "SPO" | "ConstitutionalCommittee" — verbatim. */
+  voter_role: string;
+  /** For DRep votes this is the bech32 `drep1...` ID. */
+  voter_id: string;
+  proposal_id: string | null;
+  proposal_tx_hash: string;
+  proposal_index: number;
+  proposal_type: string;
+  epoch_no: number;
+  block_height: number;
+  /** Unix seconds; multiply by 1000 for JS Date. */
+  block_time: number;
+  vote: string;
+  meta_url: string | null;
+  meta_hash: string | null;
+  meta_json: Record<string, unknown> | null;
+}
+
+/**
  * One row of `drep_delegators` — a stake account that has delegated its
  * vote weight to this DRep, with the lovelace amount currently delegated.
  * Used for the per-DRep delegator count.
@@ -272,6 +301,12 @@ let _proposalCache: CacheEntry<KoiosProposal[]> | null = null;
 let _drepCache: CacheEntry<KoiosActiveDRep[]> | null = null;
 let _poolCache: CacheEntry<KoiosActivePool[]> | null = null;
 let _committeeCache: CacheEntry<KoiosCommitteeMember[]> | null = null;
+let _voteCache: CacheEntry<KoiosVote[]> | null = null;
+
+/** 5 minutes. Votes don't change THAT fast — at one block per ~20s on
+ *  mainnet and a tiny fraction of those carrying a vote, the staleness
+ *  window is well within tolerance for "Voted X ago" badges. */
+const VOTE_CACHE_TTL_MS = 5 * 60 * 1000;
 
 /** Reset cache (test-only escape hatch). Not exported in the public API
  *  surface but available via the module record if a future test needs it. */
@@ -280,6 +315,7 @@ export function _resetCache(): void {
   _drepCache = null;
   _poolCache = null;
   _committeeCache = null;
+  _voteCache = null;
 }
 
 // ---- Internal helpers ----
@@ -691,6 +727,63 @@ export async function fetchDRepInfoBatch(
  */
 export async function listAllDReps(): Promise<KoiosDRepListEntry[]> {
   return fetchAllPaged<KoiosDRepListEntry>('/drep_list', '{}', MAX_PAGES);
+}
+
+/**
+ * Fetch every governance vote ever cast on mainnet (DRep, SPO, CC).
+ *
+ * Used by the directory sync to compute per-DRep `lastVotedAt` in a
+ * single pass rather than O(N) `drep_voters` calls. At ~24k rows on
+ * mainnet today (~5MB) this fits comfortably in our 10MB response cap;
+ * we cache for 5 minutes to absorb repeat invocations within the same
+ * sync cycle (the sync happens to call this exactly once today, but
+ * the cache is cheap insurance).
+ *
+ * Pagination uses the `Range` header (Koios's PostgREST default), 1000
+ * rows per page, hard-capped at 50 pages = 50k votes. If we ever blow
+ * past that we'd need to switch to per-role chunking, but we're nowhere
+ * near it today.
+ *
+ * Throws `KoiosError` on failure — the directory sync handles that by
+ * skipping the lastVotedAt enrichment for the current cycle (rows still
+ * get written; voters just won't get a fresh "Voted X ago" until the
+ * next successful sync).
+ */
+const VOTE_MAX_PAGES = 50;
+export async function listAllVotes(): Promise<KoiosVote[]> {
+  const now = Date.now();
+  if (_voteCache && now - _voteCache.fetchedAt < VOTE_CACHE_TTL_MS) {
+    return _voteCache.value;
+  }
+  const all: KoiosVote[] = [];
+  for (let page = 0; page < VOTE_MAX_PAGES; page++) {
+    const from = page * PAGE_SIZE;
+    const to = from + PAGE_SIZE - 1;
+    const res = await koiosFetch('/vote_list', {
+      method: 'POST',
+      body: '{}',
+      rangeFrom: from,
+      rangeTo: to,
+    });
+    if (!res.ok) {
+      _voteCache = null;
+      throw new KoiosError(
+        '/vote_list',
+        `HTTP ${res.status} ${res.statusText}`,
+        res.status,
+      );
+    }
+    const body = (await readJsonCapped(res, '/vote_list')) as unknown;
+    if (!Array.isArray(body)) {
+      _voteCache = null;
+      throw new KoiosError('/vote_list', 'expected JSON array');
+    }
+    const rows = body as KoiosVote[];
+    all.push(...rows);
+    if (rows.length < PAGE_SIZE) break;
+  }
+  _voteCache = { fetchedAt: now, value: all };
+  return all;
 }
 
 /**
