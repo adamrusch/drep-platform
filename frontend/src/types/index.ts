@@ -217,6 +217,12 @@ export interface DRepDirectoryEntry {
   drepId: string;
   hex: string | null;
   isActive: boolean;
+  /** True when this DRep has filed a retirement certificate. Voting
+   *  power is pinned to "0"; historical anchor metadata and vote
+   *  activity are preserved. UI renders a distinct "Retired" badge.
+   *  Optional for backwards compat with rows synced before this field
+   *  was added — treat absence as `false`. */
+  isRetired?: boolean;
   status: string;
   deposit: string | null;
   hasScript: boolean;
@@ -365,8 +371,22 @@ export interface AuthState {
 
 export interface PaginatedResponse<T> {
   items: T[];
+  /** Legacy DynamoDB cursor — kept for backwards compat with endpoints
+   *  that still emit one. The directory listing has migrated to
+   *  page-numbered pagination; new code should prefer `page` /
+   *  `pageSize` / `totalPages`. */
   lastEvaluatedKey?: string;
+  /** Absolute count of matching rows after filtering (not just the
+   *  current page). Required for page-numbered pagination — a missing
+   *  value indicates the endpoint hasn't migrated yet. */
   total?: number;
+  /** 0-indexed current page. Present on page-numbered endpoints. */
+  page?: number;
+  /** Effective page size (the server may clamp to a max). */
+  pageSize?: number;
+  /** ceil(total / pageSize). At least 1, even when total === 0, so the
+   *  UI can render a single empty page rather than zero pages. */
+  totalPages?: number;
 }
 
 export interface ApiResponse<T> {

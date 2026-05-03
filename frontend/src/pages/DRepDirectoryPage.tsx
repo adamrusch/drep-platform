@@ -1,9 +1,14 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { useInfiniteQuery } from '@tanstack/react-query';
-import { Search as SearchIcon, Users as UsersIcon, Vote as VoteIcon } from 'lucide-react';
+import { useQuery, keepPreviousData } from '@tanstack/react-query';
+import {
+  ChevronLeft as ChevronLeftIcon,
+  ChevronRight as ChevronRightIcon,
+  Search as SearchIcon,
+  Users as UsersIcon,
+  Vote as VoteIcon,
+} from 'lucide-react';
 import { get } from '@/lib/api';
-import { Button } from '@/components/ui/Button';
 import { StatusPill } from '@/components/ui/StatusPill';
 import { cn, formatLovelace, formatRelativeTime } from '@/lib/utils';
 import type { DRepDirectoryEntry, PaginatedResponse } from '@/types';
@@ -17,7 +22,11 @@ const SORT_OPTIONS: Array<{ id: SortKey; label: string }> = [
   { id: 'delegators', label: 'Delegators' },
 ];
 
-const PAGE_LIMIT = 24;
+/** Allowed page-size choices. The backend caps at 100; values are
+ *  hard-coded so the dropdown doesn't drift from server limits. */
+const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
+type PageSize = typeof PAGE_SIZE_OPTIONS[number];
+const DEFAULT_PAGE_SIZE: PageSize = 25;
 
 /**
  * Lightweight debounce for the search input. Avoids hammering the
@@ -169,6 +178,28 @@ function DRepCard({ drep }: DRepCardProps): React.ReactElement {
   const objectivesPreview = drep.objectives
     ? drep.objectives.replace(/\s+/g, ' ').trim().slice(0, 140)
     : null;
+  // Lifecycle status badge — three states. Retired is distinct from
+  // inactive (an inactive DRep can still come back; retired filed a
+  // retirement certificate and is permanently out).
+  const statusBadge = drep.isRetired ? (
+    <StatusPill
+      status="neutral"
+      label="Retired"
+      title="This DRep has filed a retirement certificate. They cannot vote and their voting power is zero."
+    />
+  ) : drep.isActive ? (
+    <StatusPill status="active" label="Active" />
+  ) : (
+    <StatusPill
+      status="expired"
+      label={
+        drep.expiresEpoch !== null
+          ? `Inactive · expires E${drep.expiresEpoch}`
+          : 'Inactive'
+      }
+      title="No vote in the last drepActivity epochs (~100 days). Voting power is excluded from the active stake denominator until they vote again."
+    />
+  );
   return (
     <Link
       to={`/drep/${encodeURIComponent(drep.drepId)}`}
@@ -177,9 +208,9 @@ function DRepCard({ drep }: DRepCardProps): React.ReactElement {
         'rounded-token-xl shadow-token-sm p-5',
         'transition-all duration-150',
         'hover:border-[var(--border-strong)] hover:shadow-token-md hover:-translate-y-px',
-        // Slight muting for inactive DReps so the active set stays
-        // visually dominant when the toggle is on.
-        !drep.isActive && 'opacity-80',
+        // Slight muting for inactive / retired DReps so the active set
+        // stays visually dominant when the toggle is on.
+        (!drep.isActive || drep.isRetired) && 'opacity-80',
       )}
     >
       <div className="flex items-start gap-4">
@@ -200,19 +231,7 @@ function DRepCard({ drep }: DRepCardProps): React.ReactElement {
                 (Unnamed DRep)
               </h3>
             )}
-            {drep.isActive ? (
-              <StatusPill status="active" label="Active" />
-            ) : (
-              <StatusPill
-                status="expired"
-                label={
-                  drep.expiresEpoch !== null
-                    ? `Inactive · expires E${drep.expiresEpoch}`
-                    : 'Inactive'
-                }
-                title="No vote in the last drepActivity epochs (~100 days). Voting power is excluded from the active stake denominator until they vote again."
-              />
-            )}
+            {statusBadge}
             {drep.hasScript && (
               <StatusPill
                 status="neutral"
@@ -252,24 +271,77 @@ function DRepCard({ drep }: DRepCardProps): React.ReactElement {
   );
 }
 
-interface ListPage {
-  items: DRepDirectoryEntry[];
-  lastEvaluatedKey?: string;
-  total?: number;
-}
-
 function parseSort(raw: string | null): SortKey {
   if (raw === 'delegators' || raw === 'recent' || raw === 'name') return raw;
   return 'power';
 }
 
+/** Coerce the URL `?pageSize=` to one of the allowed values. Anything
+ *  else falls back to the default — keeps the URL self-correcting if a
+ *  user pastes a stale link. */
+function parsePageSize(raw: string | null): PageSize {
+  const n = raw ? parseInt(raw, 10) : NaN;
+  return PAGE_SIZE_OPTIONS.find((s) => s === n) ?? DEFAULT_PAGE_SIZE;
+}
+
+/** 0-indexed page parsed from the URL's 1-indexed `?page=` param. */
+function parsePage(raw: string | null): number {
+  if (!raw) return 0;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 1) return 0;
+  return n - 1;
+}
+
+/**
+ * Compute the windowed list of page numbers to render. Standard pattern:
+ * always show page 1 and the last page; show current ± 2; insert "…"
+ * gaps where there are skips. For small totalPages we just enumerate
+ * everything.
+ *
+ * Returns an array of `number` (page numbers, 0-indexed) and `'…'`
+ * sentinels for ellipsis breaks.
+ */
+function paginationWindow(currentPage: number, totalPages: number): Array<number | '…'> {
+  if (totalPages <= 1) return [0];
+  if (totalPages <= 7) {
+    return Array.from({ length: totalPages }, (_, i) => i);
+  }
+  const window = new Set<number>([0, totalPages - 1, currentPage]);
+  for (let off = -2; off <= 2; off++) {
+    const p = currentPage + off;
+    if (p >= 0 && p < totalPages) window.add(p);
+  }
+  const sorted = Array.from(window).sort((a, b) => a - b);
+  const out: Array<number | '…'> = [];
+  for (let i = 0; i < sorted.length; i++) {
+    const cur = sorted[i]!;
+    if (i > 0) {
+      const prev = sorted[i - 1]!;
+      if (cur - prev > 1) out.push('…');
+    }
+    out.push(cur);
+  }
+  return out;
+}
+
+interface ListPage {
+  items: DRepDirectoryEntry[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
 export function DRepDirectoryPage(): React.ReactElement {
-  // URL-backed state so the Inactive toggle, search, and sort survive
-  // reloads and are deep-linkable. We update params individually on
-  // change to avoid clobbering unrelated keys.
+  // URL-backed state so toolbar, search, sort, page and page-size all
+  // survive reloads and are deep-linkable. The URL stores 1-indexed
+  // pages (more familiar to users) but we work with 0-indexed internally
+  // to match the backend.
   const [searchParams, setSearchParams] = useSearchParams();
   const includeInactive = searchParams.get('includeInactive') === '1';
   const sort = parseSort(searchParams.get('sort'));
+  const pageSize = parsePageSize(searchParams.get('pageSize'));
+  const page = parsePage(searchParams.get('page'));
 
   // Search is debounced via local state; the URL only stores the final
   // committed value (?q=...) so we don't update the URL on every keystroke.
@@ -277,12 +349,18 @@ export function DRepDirectoryPage(): React.ReactElement {
   const search = useDebounced(searchInput.trim(), 250);
 
   // Mirror the debounced search into the URL — replace, not push, so the
-  // browser back-stack doesn't fill with intermediate values.
+  // browser back-stack doesn't fill with intermediate values. Searching
+  // also resets to page 1.
   useEffect(() => {
     const next = new URLSearchParams(searchParams);
+    const prevSearch = next.get('q') ?? '';
     if (search) next.set('q', search);
     else next.delete('q');
-    // Only update if changed to avoid an infinite loop.
+    if (prevSearch !== search) {
+      // Search changed — reset to page 1 so the user lands on the top of
+      // the new result set rather than a stale page index.
+      next.delete('page');
+    }
     if (next.toString() !== searchParams.toString()) {
       setSearchParams(next, { replace: true });
     }
@@ -293,6 +371,8 @@ export function DRepDirectoryPage(): React.ReactElement {
     const params = new URLSearchParams(searchParams);
     if (next === 'power') params.delete('sort');
     else params.set('sort', next);
+    // Sort change → reset to page 1 (same logic as search).
+    params.delete('page');
     setSearchParams(params, { replace: false });
   };
 
@@ -300,39 +380,98 @@ export function DRepDirectoryPage(): React.ReactElement {
     const params = new URLSearchParams(searchParams);
     if (next) params.set('includeInactive', '1');
     else params.delete('includeInactive');
+    params.delete('page');
+    setSearchParams(params, { replace: false });
+  };
+
+  const setPageSize = (next: PageSize): void => {
+    const params = new URLSearchParams(searchParams);
+    if (next === DEFAULT_PAGE_SIZE) params.delete('pageSize');
+    else params.set('pageSize', String(next));
+    // Resizing the page changes which items appear at any index, so
+    // pinning the current page number would dump the user somewhere
+    // arbitrary. Reset to page 1.
+    params.delete('page');
+    setSearchParams(params, { replace: false });
+  };
+
+  /** Set the URL `?page=` (1-indexed). Page 1 is the default and writes
+   *  no parameter so the URL stays clean. */
+  const setPage = (zeroIndexed: number): void => {
+    const params = new URLSearchParams(searchParams);
+    if (zeroIndexed <= 0) params.delete('page');
+    else params.set('page', String(zeroIndexed + 1));
     setSearchParams(params, { replace: false });
   };
 
   const queryKey = [
     'drep-directory',
-    { search, sort, limit: PAGE_LIMIT, includeInactive },
+    { search, sort, pageSize, includeInactive, page },
   ] as const;
 
-  const { data, isLoading, error, fetchNextPage, hasNextPage, isFetchingNextPage } =
-    useInfiniteQuery<ListPage, Error>({
-      queryKey,
-      queryFn: async ({ pageParam }): Promise<ListPage> => {
-        const params: Record<string, string> = {
-          sort,
-          limit: String(PAGE_LIMIT),
-        };
-        if (search) params['search'] = search;
-        if (includeInactive) params['includeInactive'] = 'true';
-        if (typeof pageParam === 'string' && pageParam.length > 0) {
-          params['lastKey'] = pageParam;
-        }
-        const res = await get<PaginatedResponse<DRepDirectoryEntry>>('/dreps', params);
-        return {
-          items: res.items,
-          lastEvaluatedKey: res.lastEvaluatedKey,
-          total: res.total,
-        };
-      },
-      initialPageParam: undefined,
-      getNextPageParam: (last) => last.lastEvaluatedKey,
-    });
+  const { data, isLoading, error, isFetching } = useQuery<ListPage, Error>({
+    queryKey,
+    queryFn: async (): Promise<ListPage> => {
+      const params: Record<string, string> = {
+        sort,
+        pageSize: String(pageSize),
+        page: String(page),
+      };
+      if (search) params['search'] = search;
+      if (includeInactive) params['includeInactive'] = 'true';
+      const res = await get<PaginatedResponse<DRepDirectoryEntry>>('/dreps', params);
+      // The migrated backend always returns the page-numbered fields.
+      // Falling back conservatively keeps us tolerant of a stale Lambda
+      // during a deploy window.
+      return {
+        items: res.items,
+        total: res.total ?? res.items.length,
+        page: res.page ?? page,
+        pageSize: res.pageSize ?? pageSize,
+        totalPages: res.totalPages ?? Math.max(1, Math.ceil((res.total ?? res.items.length) / pageSize)),
+      };
+    },
+    placeholderData: keepPreviousData,
+  });
 
-  const dreps = data?.pages.flatMap((p) => p.items) ?? [];
+  const dreps = data?.items ?? [];
+  const total = data?.total ?? 0;
+  const totalPages = data?.totalPages ?? 1;
+  // Server clamps page to valid range; mirror that here so the UI
+  // doesn't render stale highlights.
+  const effectivePage = data?.page ?? page;
+
+  const startIndex = total === 0 ? 0 : effectivePage * pageSize + 1;
+  const endIndex = Math.min(total, (effectivePage + 1) * pageSize);
+
+  // Keyboard navigation: when the page-numbers nav is focused, ←/→
+  // arrows step pages. Doesn't conflict with global shortcuts because
+  // we only handle the keys when our nav element is the keyboard target.
+  const navRef = useRef<HTMLElement | null>(null);
+  const onNavKeyDown = (e: React.KeyboardEvent<HTMLElement>): void => {
+    if (e.key === 'ArrowLeft' && effectivePage > 0) {
+      e.preventDefault();
+      setPage(effectivePage - 1);
+    } else if (e.key === 'ArrowRight' && effectivePage < totalPages - 1) {
+      e.preventDefault();
+      setPage(effectivePage + 1);
+    } else if (e.key === 'Home' && effectivePage > 0) {
+      e.preventDefault();
+      setPage(0);
+    } else if (e.key === 'End' && effectivePage < totalPages - 1) {
+      e.preventDefault();
+      setPage(totalPages - 1);
+    }
+  };
+
+  const window = paginationWindow(effectivePage, totalPages);
+
+  // Plural-aware count label so "1 active DRep" doesn't read awkwardly.
+  const noun = includeInactive ? 'DRep' : 'active DRep';
+  const counterLabel =
+    total === 0
+      ? `No ${noun}s`
+      : `Showing ${startIndex.toLocaleString()}–${endIndex.toLocaleString()} of ${total.toLocaleString()} ${noun}${total === 1 ? '' : 's'}`;
 
   return (
     <div className="max-w-3xl mx-auto space-y-6">
@@ -346,7 +485,7 @@ export function DRepDirectoryPage(): React.ReactElement {
         </p>
       </header>
 
-      {/* Toolbar — search + sort */}
+      {/* Toolbar — search + sort + page-size */}
       <div className="flex flex-col sm:flex-row sm:items-center gap-3">
         <div className="relative flex-1">
           <SearchIcon
@@ -382,29 +521,48 @@ export function DRepDirectoryPage(): React.ReactElement {
             </button>
           ))}
         </div>
+        <label
+          className="inline-flex items-center gap-1.5 text-[12px] text-[var(--text-secondary)]"
+          title="Items per page"
+        >
+          <span className="hidden sm:inline">Per page:</span>
+          <select
+            value={pageSize}
+            onChange={(e) => setPageSize(parsePageSize(e.target.value))}
+            className={cn(
+              'h-[30px] px-2 rounded-token-md text-[12.5px] tabular-nums',
+              'bg-[var(--bg-canvas)] border border-[var(--border-default)]',
+              'text-[var(--text-primary)]',
+              'focus:outline-none focus:border-[var(--brand-primary)] focus:shadow-token-focus',
+            )}
+            aria-label="Items per page"
+          >
+            {PAGE_SIZE_OPTIONS.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
 
-      {/* Active/Inactive toggle. Implemented as a plain checkbox-styled
-          control with a clear label so it's accessible and keyboard-
-          friendly without pulling in a switch component. */}
+      {/* Counter + Active/Inactive toggle. */}
       <div className="flex items-center justify-between text-[12.5px] text-[var(--text-secondary)]">
-        <span>
-          {dreps.length > 0 && (data?.pages[0]?.total != null) && (
-            <>Showing {dreps.length}{includeInactive ? ' (active + inactive)' : ' active'}</>
-          )}
+        <span aria-live="polite" className="tabular-nums">
+          {!isLoading && counterLabel}
         </span>
         <label
           className="inline-flex items-center gap-2 cursor-pointer select-none"
-          title="Inactive DReps are registered but haven't voted in ~100 days. Their voting power is excluded from the active stake denominator until they vote again."
+          title="Inactive DReps haven't voted in ~100 days; retired DReps have filed a retirement certificate. Voting power for both is excluded from the active stake denominator."
         >
           <input
             type="checkbox"
             checked={includeInactive}
             onChange={(e) => setIncludeInactive(e.target.checked)}
             className="h-3.5 w-3.5 accent-[var(--brand-primary)] cursor-pointer"
-            aria-label="Include inactive DReps"
+            aria-label="Include inactive and retired DReps"
           />
-          <span>Show inactive</span>
+          <span>Show inactive &amp; retired</span>
         </label>
       </div>
 
@@ -450,7 +608,15 @@ export function DRepDirectoryPage(): React.ReactElement {
 
       {/* Results */}
       {dreps.length > 0 && (
-        <ul className="space-y-3">
+        <ul
+          className={cn(
+            'space-y-3',
+            // Slight visual cue while a paginated request is in flight,
+            // since `keepPreviousData` shows the previous page until the
+            // new one arrives.
+            isFetching && 'opacity-80 transition-opacity',
+          )}
+        >
           {dreps.map((drep) => (
             <li key={drep.drepId}>
               <DRepCard drep={drep} />
@@ -459,17 +625,87 @@ export function DRepDirectoryPage(): React.ReactElement {
         </ul>
       )}
 
-      {/* Pagination */}
-      {hasNextPage && (
-        <div className="text-center pt-4">
-          <Button
-            variant="secondary"
-            onClick={() => void fetchNextPage()}
-            disabled={isFetchingNextPage}
+      {/* Page-numbered pagination footer */}
+      {totalPages > 1 && (
+        <nav
+          ref={navRef}
+          aria-label="DRep directory pagination"
+          tabIndex={0}
+          onKeyDown={onNavKeyDown}
+          className={cn(
+            'flex items-center justify-center gap-1 pt-4',
+            'focus:outline-none focus-within:outline-none',
+            'rounded-token-md',
+          )}
+        >
+          <button
+            type="button"
+            onClick={() => setPage(effectivePage - 1)}
+            disabled={effectivePage === 0}
+            aria-label="Previous page"
+            className={cn(
+              'inline-flex items-center justify-center h-8 px-2 rounded-token-md',
+              'text-[12.5px] text-[var(--text-secondary)]',
+              'border border-[var(--border-default)] bg-[var(--bg-canvas)]',
+              'hover:border-[var(--border-strong)] hover:text-[var(--text-primary)]',
+              'disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-[var(--border-default)] disabled:hover:text-[var(--text-secondary)]',
+              'transition-colors',
+            )}
           >
-            {isFetchingNextPage ? 'Loading…' : 'Load more'}
-          </Button>
-        </div>
+            <ChevronLeftIcon size={14} strokeWidth={2} aria-hidden="true" />
+            <span className="ml-1 hidden sm:inline">Back</span>
+          </button>
+          {window.map((entry, idx) => {
+            if (entry === '…') {
+              return (
+                <span
+                  key={`gap-${idx}`}
+                  aria-hidden="true"
+                  className="px-1 text-[var(--text-tertiary)] text-[12.5px]"
+                >
+                  …
+                </span>
+              );
+            }
+            const isCurrent = entry === effectivePage;
+            return (
+              <button
+                key={entry}
+                type="button"
+                onClick={() => setPage(entry)}
+                aria-current={isCurrent ? 'page' : undefined}
+                aria-label={`Page ${entry + 1}`}
+                className={cn(
+                  'inline-flex items-center justify-center min-w-[32px] h-8 px-2 rounded-token-md',
+                  'text-[12.5px] tabular-nums',
+                  'border transition-colors',
+                  isCurrent
+                    ? 'border-[var(--brand-primary)] bg-[var(--brand-primary)] text-[var(--bg-canvas)] font-semibold'
+                    : 'border-[var(--border-default)] bg-[var(--bg-canvas)] text-[var(--text-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--text-primary)]',
+                )}
+              >
+                {entry + 1}
+              </button>
+            );
+          })}
+          <button
+            type="button"
+            onClick={() => setPage(effectivePage + 1)}
+            disabled={effectivePage >= totalPages - 1}
+            aria-label="Next page"
+            className={cn(
+              'inline-flex items-center justify-center h-8 px-2 rounded-token-md',
+              'text-[12.5px] text-[var(--text-secondary)]',
+              'border border-[var(--border-default)] bg-[var(--bg-canvas)]',
+              'hover:border-[var(--border-strong)] hover:text-[var(--text-primary)]',
+              'disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-[var(--border-default)] disabled:hover:text-[var(--text-secondary)]',
+              'transition-colors',
+            )}
+          >
+            <span className="mr-1 hidden sm:inline">Next</span>
+            <ChevronRightIcon size={14} strokeWidth={2} aria-hidden="true" />
+          </button>
+        </nav>
       )}
     </div>
   );
