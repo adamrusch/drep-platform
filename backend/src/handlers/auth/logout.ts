@@ -1,3 +1,17 @@
+/**
+ * DELETE /auth/session
+ *
+ * Logs out the current session. Two side effects:
+ *   1. Clear the JWT cookie via `Set-Cookie: ...; Max-Age=0`
+ *   2. Null out `sessionTokenHash` / `sessionExpiry` on the user row so
+ *      the deprecated server-side session validation path (kept for
+ *      defense in depth) can't be replayed with a leaked cookie.
+ *
+ * Note: clearing the cookie is the user-visible signal. Step 2 is a
+ * belt-and-suspenders move — JWTs are stateless so even without the
+ * server-side clear, the cookie's removal alone is sufficient. We do
+ * both to keep the user record consistent.
+ */
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { buildClearCookieHeader } from '../../lib/auth';
 import { updateItem, tableNames } from '../../lib/dynamodb';

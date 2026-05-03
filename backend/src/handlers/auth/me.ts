@@ -1,3 +1,18 @@
+/**
+ * GET /auth/me
+ *
+ * Returns the authenticated user's profile + roles + drepId, derived from
+ * the JWT cookie. The frontend calls this on mount to determine sign-in
+ * state and roles for conditional rendering.
+ *
+ * Sensitive fields (`sessionTokenHash`, `sessionExpiry`) are stripped before
+ * the response is serialized.
+ *
+ * Cache headers explicitly forbid sharing: this endpoint MUST NOT be cached
+ * by any intermediate proxy or CloudFront. The `/auth/*` CloudFront behavior
+ * is already on a no-cache passthrough; the explicit `private, no-store`
+ * header makes accidental sharing a bug instead of a silent leak.
+ */
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { getItem, tableNames } from '../../lib/dynamodb';
 import type { UserItem } from '../../lib/types';
