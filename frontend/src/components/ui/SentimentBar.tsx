@@ -11,10 +11,12 @@ interface SentimentBarProps {
    *  as stringified BigInt. The bar segments are sized as fractions of
    *  this. When zero, renders an empty muted track. */
   totalActive: string;
-  /** Abstain power in lovelace, stringified BigInt. Informational only —
-   *  NOT a segment in the bar (per CIP-1694, abstain stake is excluded
-   *  from active voting stake). Surfaced in the tooltip / aria-label so
-   *  the user can still see it without polluting the ratification visual. */
+  /** Abstain power in lovelace, stringified BigInt. Accepted for API
+   *  symmetry with prior callers but no longer surfaced visually — the
+   *  v9 governance UI hides explicit-abstain stake from the compact bar
+   *  for consistency with the detail-page treatment, where auto-abstain
+   *  was hidden entirely and explicit abstain lives in a footnote below
+   *  the donut. Keeping the prop avoids touching every call site. */
   abstain?: string;
   /** Render percentage labels above the bar. Default false (compact list use). */
   showLabels?: boolean;
@@ -42,15 +44,6 @@ function pctOf(part: bigint, total: bigint): number {
   return Number(x) / 10;
 }
 
-function fmtAda(power: bigint): string {
-  if (power <= 0n) return '0 ADA';
-  const ada = Number(power / 1_000_000n);
-  if (ada >= 1_000_000_000) return `${(ada / 1_000_000_000).toFixed(1)}B ADA`;
-  if (ada >= 1_000_000) return `${(ada / 1_000_000).toFixed(1)}M ADA`;
-  if (ada >= 1_000) return `${(ada / 1_000).toFixed(1)}K ADA`;
-  return `${ada} ADA`;
-}
-
 /**
  * 3-segment horizontal bar — Yes / No / Not Voted. Segments are sized as
  * fractions of `totalActive` (the CIP-1694 ratification denominator), so
@@ -68,30 +61,26 @@ export function SentimentBar({
   no,
   notVoted,
   totalActive,
-  abstain,
+  // `abstain` accepted but ignored visually — see prop docstring.
+  abstain: _abstain,
   showLabels = false,
   height = 8,
   className,
 }: SentimentBarProps): React.ReactElement {
   const yesP = parsePower(yes);
   const noP = parsePower(no);
-  const nvP = parsePower(notVoted);
   const totalP = parsePower(totalActive);
-  const abstainP = parsePower(abstain);
+  // `notVoted` is the residual of totalActive after yes+no; we recompute
+  // it as a percentage rather than parsing the prop, so the three labels
+  // always sum to exactly 100% even if the upstream rounding drifts.
+  void notVoted;
 
   const yesPct = pctOf(yesP, totalP);
   const noPct = pctOf(noP, totalP);
-  // Use remainder for the last slice so the three labels always sum to
-  // exactly 100 — protects against floating-point drift.
   const nvPct = totalP > 0n ? Math.max(0, 100 - yesPct - noPct) : 0;
 
-  const ariaLabel = abstainP > 0n
-    ? `Yes ${yesPct.toFixed(1)}%, No ${noPct.toFixed(1)}%, Not Voted ${nvPct.toFixed(1)}% of active stake. Plus ${fmtAda(abstainP)} delegated to abstain (not in ratification denominator).`
-    : `Yes ${yesPct.toFixed(1)}%, No ${noPct.toFixed(1)}%, Not Voted ${nvPct.toFixed(1)}% of active stake.`;
-
-  const tooltipText = abstainP > 0n
-    ? `Yes ${yesPct.toFixed(1)}% / No ${noPct.toFixed(1)}% / Not Voted ${nvPct.toFixed(1)}% of active voting stake. Abstain: ${fmtAda(abstainP)} (delegated to abstain — outside ratification denominator).`
-    : `Yes ${yesPct.toFixed(1)}% / No ${noPct.toFixed(1)}% / Not Voted ${nvPct.toFixed(1)}% of active voting stake.`;
+  const ariaLabel = `Yes ${yesPct.toFixed(1)}%, No ${noPct.toFixed(1)}%, Not Voted ${nvPct.toFixed(1)}% of Active Governance Stake.`;
+  const tooltipText = `Yes ${yesPct.toFixed(1)}% / No ${noPct.toFixed(1)}% / Not Voted ${nvPct.toFixed(1)}% of Active Governance Stake.`;
 
   return (
     <div className={cn('w-full', className)} title={tooltipText}>

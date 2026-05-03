@@ -2,7 +2,7 @@ import React from 'react';
 import { Check, X, MoreHorizontal, Minus } from 'lucide-react';
 import { Donut, type DonutSegment } from '@/components/ui/Donut';
 import { cn } from '@/lib/utils';
-import type { VoteRoleTally, VoteSlice, VoteTally } from '@/types';
+import type { VoteRoleTally, VoteSlice, VoteTally, VotingRoles } from '@/types';
 
 interface SentimentBlockProps {
   /** Section title — "On-Chain Votes", "Delegator Sentiment", etc. */
@@ -11,6 +11,12 @@ interface SentimentBlockProps {
    *  scoped sub-titles like "DRep voting power"). */
   caption?: string;
   tally: VoteTally;
+  /** CIP-1694 role-applicability map. When a role is `false`, the entire
+   *  section (donut + breakdown + abstain footnote) is suppressed —
+   *  rendering "0 voters / 0 ADA / 0%" for a non-applicable role would
+   *  imply non-participation rather than non-applicability. When omitted
+   *  (legacy actions written before v9) all three sections render. */
+  votingRoles?: VotingRoles;
   className?: string;
 }
 
@@ -42,15 +48,6 @@ function parseSlicePower(slice: VoteSlice | undefined): bigint {
   }
 }
 
-function parseStrPower(s: string | undefined): bigint {
-  if (!s) return 0n;
-  try {
-    return BigInt(s);
-  } catch {
-    return 0n;
-  }
-}
-
 /** % of a BigInt total. Returns 0 when total is zero. One decimal place. */
 function pctOfPower(part: bigint, total: bigint): number {
   if (total <= 0n) return 0;
@@ -74,10 +71,15 @@ function totalLabel(role: 'drep' | 'spo' | 'cc'): string {
 }
 
 /** Per-role 3-slice donut + breakdown + abstain footnote. The center of
- *  the donut shows total active voting power; below the donut, three rows
- *  show Yes / No / Not Voted with counts, ADA, and percentages summing to
- *  100% of `totalActive`. The Abstain row is rendered as a divider-
- *  separated footnote with explanatory copy — it is NOT a 4th slice. */
+ *  the donut shows the Active Governance Stake (the CIP-1694 ratification
+ *  denominator); below the donut, three rows show Yes / No / Not Voted
+ *  with counts, ADA, and percentages summing to 100% of `totalActive`.
+ *  The Abstain row is rendered as a divider-separated footnote with
+ *  explanatory copy — it is NOT a 4th slice. Auto-abstain stake is
+ *  intentionally NOT surfaced anywhere on this UI: those wallets are
+ *  treated as "opted out" (effectively unregistered) per CIP-1694, and
+ *  showing them as a separate bucket was misleading users into thinking
+ *  the explicit-abstain count was bigger than it really is. */
 function RoleSection({
   label,
   role,
@@ -93,8 +95,6 @@ function RoleSection({
   const notVotedPower = parseSlicePower(role.notVoted);
   const abstainPower = parseSlicePower(role.abstain);
   const totalActivePower = parseSlicePower(role.totalActive);
-  const autoAbstainPower = parseStrPower(role.autoAbstainPower);
-  const autoNoConfPower = parseStrPower(role.autoNoConfidencePower);
 
   // Percentages — 3 ratification slices over totalActive.
   const yesPct = pctOfPower(yesPower, totalActivePower);
@@ -125,15 +125,19 @@ function RoleSection({
   const centerValue = isCount
     ? `${role.totalActive.count}`
     : formatLovelaceAda(totalActivePower);
-  const centerLabel = isCount ? 'CC members' : 'active stake';
+  // "Active Governance Stake" is the user-facing name for the CIP-1694
+  // ratification denominator. CC has no stake-weighted denominator, so we
+  // keep that label as a member count.
+  const centerLabel = isCount ? 'CC members' : 'active gov. stake';
 
-  // Abstain percentage is informational only. Per CIP-1694 abstain stake
-  // is excluded from active voting stake, so we express it against the
-  // larger denominator (totalActive + auto-abstain) so the "% of registered
-  // DRep stake" framing is honest. For roles where totalRegistered ==
-  // totalActive (SPO, CC), we just show abstain / totalRegistered.
-  const totalRegisteredPower = parseSlicePower(role.totalRegistered);
-  const abstainPctRegistered = pctOfPower(abstainPower, totalRegisteredPower);
+  // Abstain percentage — expressed against `totalActive` (the ratification
+  // denominator) plus the explicit abstain count itself. We deliberately
+  // do NOT pull `totalRegistered` here, since v9 the UI no longer surfaces
+  // the bigger informational denominator anywhere.
+  const abstainPctVsActive =
+    totalActivePower > 0n
+      ? pctOfPower(abstainPower, totalActivePower + abstainPower)
+      : 0;
 
   return (
     <section className="space-y-3">
@@ -188,7 +192,12 @@ function RoleSection({
             roleKey={roleKey}
           />
 
-          {/* Abstain footnote — sits OUTSIDE the ratification denominator. */}
+          {/* Abstain footnote — explicit on-chain abstains only.
+              v9: auto-abstain is no longer summed into `abstain.power` by
+              the backend, so this row reflects only DReps / SPOs who
+              actively voted Abstain. We deliberately omit auto-no-
+              confidence and totalRegistered from any displayed text — the
+              donut already accounts for those numbers internally. */}
           {(abstainPower > 0n || role.abstain.count > 0) && (
             <div className="pt-2 mt-2 border-t border-[var(--border-subtle)] space-y-1">
               <div className="flex items-center gap-2 text-[12px] text-[var(--text-tertiary)]">
@@ -202,7 +211,17 @@ function RoleSection({
                 <span className="tabular-nums">
                   {role.abstain.count > 0
                     ? `${role.abstain.count.toLocaleString('en-US')} ${
-                        role.abstain.count === 1 ? 'voter' : 'voters'
+                        role.abstain.count === 1
+                          ? roleKey === 'drep'
+                            ? 'DRep actively abstained'
+                            : roleKey === 'spo'
+                              ? 'SPO actively abstained'
+                              : 'member actively abstained'
+                          : roleKey === 'drep'
+                            ? 'DReps actively abstained'
+                            : roleKey === 'spo'
+                              ? 'SPOs actively abstained'
+                              : 'members actively abstained'
                       }`
                     : ''}
                 </span>
@@ -211,32 +230,15 @@ function RoleSection({
                     · {formatLovelaceAda(abstainPower)}
                   </span>
                 )}
-                {abstainPctRegistered > 0 && !isCount && (
+                {abstainPctVsActive > 0 && !isCount && (
                   <span className="tabular-nums text-[var(--text-muted)]">
-                    · {abstainPctRegistered.toFixed(1)}% of registered
+                    · {abstainPctVsActive.toFixed(1)}%
                   </span>
                 )}
               </div>
               <div className="text-[11px] text-[var(--text-muted)] leading-snug pl-6">
-                Delegated to abstain — not in ratification denominator.
+                Not part of the ratification denominator.
               </div>
-              {roleKey === 'drep' && autoAbstainPower > 0n && (
-                <div className="text-[11px] text-[var(--text-muted)] leading-snug pl-6 tabular-nums">
-                  └ of which auto-abstain (drep_always_abstain):{' '}
-                  {formatLovelaceAda(autoAbstainPower)}
-                </div>
-              )}
-              {roleKey === 'drep' && autoNoConfPower > 0n && (
-                <div className="text-[11px] text-[var(--text-muted)] leading-snug pl-6 tabular-nums">
-                  Note: auto-no-confidence ({formatLovelaceAda(autoNoConfPower)})
-                  is included in {label === 'DRep' ? '' : 'DRep '}
-                  active stake and counts as{' '}
-                  {/* The action-type-dependent direction is rendered by the
-                      parent context — the auto-no-confidence stake is in
-                      Yes for NoConfidence actions, otherwise in No. */}
-                  Yes/No based on action type.
-                </div>
-              )}
             </div>
           )}
         </div>
@@ -293,12 +295,12 @@ function BreakdownRow({
 }
 
 /**
- * On-Chain Votes block. One section per role (DRep / SPO / Constitutional
- * Committee). Each section renders a 3-slice donut (Yes / No / Not Voted)
- * sized by voting power, summing to 100% of that role's total ACTIVE
- * voting stake — the CIP-1694 ratification denominator. Abstain is
- * surfaced as a footnote BELOW the breakdown, deliberately separated
- * because per CIP-1694 abstain stake is "actively marked as not
+ * On-Chain Votes block. One section per applicable role (DRep / SPO /
+ * Constitutional Committee). Each section renders a 3-slice donut
+ * (Yes / No / Not Voted) sized by voting power, summing to 100% of that
+ * role's Active Governance Stake — the CIP-1694 ratification denominator.
+ * Abstain is surfaced as a footnote BELOW the breakdown, deliberately
+ * separated because per CIP-1694 abstain stake is "actively marked as not
  * participating in governance" and therefore excluded from the
  * ratification math.
  *
@@ -307,13 +309,54 @@ function BreakdownRow({
  * mixing power-units (lovelace) with headcount (CC has 1 vote per member)
  * into a single donut is misleading. Each role gets its own ratification
  * picture.
+ *
+ * Role-applicability gate: per CIP-1694 §Ratification §Restrictions, not
+ * every governance body votes on every action type. SPOs are NOT called
+ * on Treasury Withdrawals or NewConstitution; CC is NOT called on
+ * NoConfidence or UpdateCommittee. When `votingRoles[roleKey]` is false
+ * we suppress the entire section — rendering "0 voters / 0 ADA / 0%"
+ * placeholders for non-applicable bodies misleads readers into thinking
+ * those voters chose not to participate. When `votingRoles` is undefined
+ * (legacy actions written before sync v9), all three sections render
+ * (the previous default).
  */
 export function SentimentBlock({
   title,
   caption,
   tally,
+  votingRoles,
   className,
 }: SentimentBlockProps): React.ReactElement {
+  // Default to all-applicable when the backend hasn't provided the map
+  // yet — older stored items omit the field, and showing all three
+  // sections matches pre-v9 behavior.
+  const showDrep = votingRoles?.drep ?? true;
+  const showSpo = votingRoles?.spo ?? true;
+  const showCc = votingRoles?.cc ?? true;
+
+  // Compute a flat list of sections so we don't end up with stray
+  // dividers when one role is hidden (e.g. Treasury Withdrawals → no SPO
+  // section means we shouldn't render a divider between DRep and CC).
+  const sections: React.ReactElement[] = [];
+  if (showDrep) {
+    sections.push(
+      <RoleSection key="drep" label="DRep" roleKey="drep" role={tally.drep} />,
+    );
+  }
+  if (showSpo) {
+    sections.push(<RoleSection key="spo" label="SPO" roleKey="spo" role={tally.spo} />);
+  }
+  if (showCc) {
+    sections.push(
+      <RoleSection
+        key="cc"
+        label="Constitutional Committee"
+        roleKey="cc"
+        role={tally.cc}
+      />,
+    );
+  }
+
   return (
     <section className={cn('space-y-6', className)}>
       <header className="flex items-baseline justify-between gap-3 flex-wrap">
@@ -324,19 +367,30 @@ export function SentimentBlock({
           )}
         </h3>
         <span className="text-[11.5px] text-[var(--text-muted)]">
-          % of active voting stake (CIP-1694)
+          % of Active Governance Stake (CIP-1694)
         </span>
       </header>
 
-      <RoleSection label="DRep" roleKey="drep" role={tally.drep} />
-      <div className="border-t border-[var(--border-subtle)]" />
-      <RoleSection label="SPO" roleKey="spo" role={tally.spo} />
-      <div className="border-t border-[var(--border-subtle)]" />
-      <RoleSection
-        label="Constitutional Committee"
-        roleKey="cc"
-        role={tally.cc}
-      />
+      {sections.length === 0 ? (
+        // Defensive — every action type calls at least one body per the
+        // CIP-1694 matrix. A visible "no applicable voters" message beats
+        // a silently-blank panel if a future action type ever lands here.
+        <div className="text-sm text-[var(--text-tertiary)]">
+          No governance bodies are called to vote on this action.
+        </div>
+      ) : (
+        sections.flatMap((section, i) =>
+          i === 0
+            ? [section]
+            : [
+                <div
+                  key={`divider-${i}`}
+                  className="border-t border-[var(--border-subtle)]"
+                />,
+                section,
+              ],
+        )
+      )}
     </section>
   );
 }

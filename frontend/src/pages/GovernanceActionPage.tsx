@@ -353,6 +353,7 @@ export function GovernanceActionPage(): React.ReactElement {
                 title="On-Chain Votes"
                 caption="DRep / SPO / Constitutional Committee"
                 tally={action.votes}
+                votingRoles={action.votingRoles}
               />
             ) : (
               <div className="py-8 text-center text-sm text-[var(--text-tertiary)]">

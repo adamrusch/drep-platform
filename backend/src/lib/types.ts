@@ -78,6 +78,13 @@ export interface GovernanceAction {
   proposerAddress?: string;
   // ---- On-chain vote tally (split by voter role) ----
   votes?: VoteTally;
+  /** Per CIP-1694 §Ratification §Restrictions, which governance bodies are
+   *  called to vote on this action type. Frontend uses this to hide entire
+   *  role sections (donut + breakdown + abstain footnote) for non-applicable
+   *  roles. Optional for backwards compat — older items written before v9
+   *  won't carry it; the frontend should fall back to a "show all" default
+   *  in that case. */
+  votingRoles?: VotingRoles;
 }
 
 /**
@@ -156,6 +163,19 @@ export interface VoteTally {
   drep: VoteRoleTally;
   spo: VoteRoleTally;
   cc: VoteRoleTally;
+}
+
+/**
+ * Which governance bodies are called to vote on a given action type per
+ * CIP-1694 §Ratification §Restrictions. Stored alongside the action so the
+ * frontend can suppress role sections for non-applicable roles (e.g. SPOs
+ * are NOT called to vote on Treasury Withdrawals; CC is NOT called to vote
+ * on NoConfidence). Computed by `applicableRoles(actionType)` in voteTally.ts.
+ */
+export interface VotingRoles {
+  cc: boolean;
+  drep: boolean;
+  spo: boolean;
 }
 
 export interface GovernanceReference {
@@ -538,6 +558,10 @@ export interface GovernanceActionItem {
   details?: GovernanceDetail[];
   proposerAddress?: string;
   votes?: VoteTally;
+  /** See `GovernanceAction.votingRoles` — duplicated on the DDB item shape
+   *  so the persisted row carries the canonical CIP-1694 applicability map.
+   *  Written by the sync at v9+. */
+  votingRoles?: VotingRoles;
   [key: string]: unknown;
 }
 
