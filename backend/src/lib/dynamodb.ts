@@ -15,6 +15,8 @@ import {
   TransactWriteCommandInput,
   ScanCommand,
   ScanCommandInput,
+  BatchGetCommand,
+  BatchGetCommandInput,
 } from '@aws-sdk/lib-dynamodb';
 
 // ---- Client setup ----
@@ -51,6 +53,62 @@ export const tableNames = {
 export type TableName = keyof typeof tableNames;
 
 // ---- Generic typed helpers ----
+
+/**
+ * BatchGet wrapper that handles the 100-key per-request limit and
+ * `UnprocessedKeys` retries. Splits the input keys into chunks of 100,
+ * issues one `BatchGetCommand` per chunk, and retries any unprocessed
+ * keys (DynamoDB throttling) with linear backoff up to `maxRetries`.
+ *
+ * Returns items in the same order they were found — duplicates are not
+ * possible since DynamoDB de-dupes by primary key. Items are unmarshalled
+ * to the document client format. Missing keys are simply absent from the
+ * result; the caller is responsible for cross-referencing input vs. output.
+ *
+ * Used by the directory sync to read existing rows in bulk so it can
+ * compare-then-write rather than blindly Put every cycle.
+ */
+export async function batchGetItems<T extends Record<string, unknown>>(
+  tableName: string,
+  keys: ReadonlyArray<Record<string, unknown>>,
+  options: { maxRetries?: number } = {},
+): Promise<T[]> {
+  if (keys.length === 0) return [];
+  const maxRetries = options.maxRetries ?? 3;
+  const out: T[] = [];
+  // BatchGetItem caps at 100 keys per call. Chunk the input.
+  const CHUNK = 100;
+  for (let i = 0; i < keys.length; i += CHUNK) {
+    let pending: Record<string, unknown>[] = keys.slice(i, i + CHUNK).map((k) => ({ ...k }));
+    let attempt = 0;
+    while (pending.length > 0) {
+      const params: BatchGetCommandInput = {
+        RequestItems: {
+          [tableName]: { Keys: pending },
+        },
+      };
+      const result = await docClient.send(new BatchGetCommand(params));
+      const items = (result.Responses?.[tableName] ?? []) as T[];
+      for (const it of items) out.push(it);
+      const unprocessed = (result.UnprocessedKeys?.[tableName]?.Keys ?? []) as Record<
+        string,
+        unknown
+      >[];
+      if (unprocessed.length === 0) break;
+      attempt++;
+      if (attempt > maxRetries) {
+        console.warn(
+          `batchGetItems: ${unprocessed.length} unprocessed keys after ${maxRetries} retries; dropping`,
+        );
+        break;
+      }
+      // Linear backoff — DynamoDB throttling typically clears in <1s.
+      await new Promise((res) => setTimeout(res, 100 * attempt));
+      pending = unprocessed;
+    }
+  }
+  return out;
+}
 
 export async function getItem<T extends Record<string, unknown>>(
   tableName: string,
