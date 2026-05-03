@@ -149,15 +149,22 @@ async function computeStats(): Promise<GovernanceStats> {
 export const handler = async (
   _event: APIGatewayProxyEventV2,
 ): Promise<APIGatewayProxyResultV2> => {
+  // CloudFront in front of the API caches this response for 60s on the
+  // shared edge. The Lambda-level cache (60s) is still useful — it absorbs
+  // bursts during a CloudFront miss/cold-edge.
+  const cacheHeaders = {
+    'Cache-Control': 'public, max-age=60, s-maxage=60',
+  };
+
   try {
     const now = Date.now();
     if (cache && cache.expiresAt > now) {
-      return ok(cache.payload);
+      return ok(cache.payload, cacheHeaders);
     }
 
     const payload = await computeStats();
     cache = { payload, expiresAt: now + CACHE_TTL_MS };
-    return ok(payload);
+    return ok(payload, cacheHeaders);
   } catch (err) {
     console.error('governance/stats handler error:', err);
     return internalError('Failed to compute governance stats');

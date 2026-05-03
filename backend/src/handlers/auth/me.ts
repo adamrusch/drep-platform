@@ -22,12 +22,24 @@ export const handler = async (
     // Strip sensitive fields before returning
     const { sessionTokenHash: _sessionTokenHash, sessionExpiry: _sessionExpiry, ...safeUser } = user;
 
-    return ok({
-      ...safeUser,
-      walletAddress: authCtx.walletAddress,
-      roles: authCtx.roles,
-      drepId: authCtx.drepId,
-    });
+    return ok(
+      {
+        ...safeUser,
+        walletAddress: authCtx.walletAddress,
+        roles: authCtx.roles,
+        drepId: authCtx.drepId,
+      },
+      // Defense in depth: this endpoint is auth-bound and MUST NOT be
+      // shared between users. The CloudFront distribution in front of
+      // the API has /auth/* on a no-cache behavior, but emitting an
+      // explicit `private, no-store` header makes it a bug if any
+      // shared cache (intermediate proxy, browser bf-cache) ever picks
+      // it up.
+      {
+        'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+        Pragma: 'no-cache',
+      },
+    );
   } catch (err) {
     if (err instanceof Error && err.name === 'AuthorizationError') {
       return unauthorized(err.message);
