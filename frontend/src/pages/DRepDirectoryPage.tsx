@@ -8,12 +8,13 @@ import { StatusPill } from '@/components/ui/StatusPill';
 import { cn, formatLovelace, formatRelativeTime } from '@/lib/utils';
 import type { DRepDirectoryEntry, PaginatedResponse } from '@/types';
 
-type SortKey = 'power' | 'delegators' | 'recent';
+type SortKey = 'power' | 'delegators' | 'recent' | 'name';
 
 const SORT_OPTIONS: Array<{ id: SortKey; label: string }> = [
+  { id: 'name', label: 'Name' },
   { id: 'power', label: 'Voting power' },
+  { id: 'recent', label: 'Last voted' },
   { id: 'delegators', label: 'Delegators' },
-  { id: 'recent', label: 'Recent activity' },
 ];
 
 const PAGE_LIMIT = 24;
@@ -258,7 +259,7 @@ interface ListPage {
 }
 
 function parseSort(raw: string | null): SortKey {
-  if (raw === 'delegators' || raw === 'recent') return raw;
+  if (raw === 'delegators' || raw === 'recent' || raw === 'name') return raw;
   return 'power';
 }
 
