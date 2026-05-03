@@ -487,21 +487,35 @@ export class ApiStack extends cdk.Stack {
       // mutation pass-through path needs.
       const passthroughOriginPolicy = cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER;
 
-      // Origin: API Gateway HTTP API regional domain. We use the API GW
-      // custom-domain regional name (set up above) so the Host header that
-      // CloudFront sends matches what API Gateway expects.
-      const origin = new cloudfrontOrigins.HttpOrigin(
-        apiCustomDomain.regionalDomainName,
-        {
-          protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
-          // Sensible timeouts. Lambda timeout is 30s on most handlers; allow
-          // the full origin response window to avoid CloudFront 502s on
-          // slow but legitimate requests (e.g. /dreps directory scan with
-          // a cold Lambda).
-          readTimeout: cdk.Duration.seconds(30),
-          connectionTimeout: cdk.Duration.seconds(10),
-        },
-      );
+      // Origin: API Gateway HTTP API default invoke URL hostname.
+      //
+      // We deliberately use the auto-generated `<api-id>.execute-api...`
+      // hostname rather than the custom-domain regional name
+      // (`d-xxx.execute-api...`). Why: API Gateway's custom-domain
+      // mappings route by Host header. CloudFront forwards `Host: <origin
+      // hostname>`, so if we used the custom-domain regional endpoint as
+      // origin, API Gateway would see `Host: d-xxx.execute-api...` —
+      // which has no API mapped to it, returning 404.
+      //
+      // The default invoke URL hostname (`<api-id>.execute-api...`) is
+      // tied directly to the API by ID and answers regardless of the
+      // Host header. CloudFront → that hostname routes correctly to
+      // every Lambda integration.
+      //
+      // The API Gateway custom-domain object + ApiMapping above is kept
+      // for direct (non-CloudFront) access compatibility — a future
+      // operator could still hit `https://d-xxx.execute-api...` with a
+      // `Host: api.drep.tools` header for debugging.
+      const apiInvokeHost = `${api.apiId}.execute-api.${this.region}.amazonaws.com`;
+      const origin = new cloudfrontOrigins.HttpOrigin(apiInvokeHost, {
+        protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
+        // Sensible timeouts. Lambda timeout is 30s on most handlers; allow
+        // the full origin response window to avoid CloudFront 502s on
+        // slow but legitimate requests (e.g. /dreps directory scan with
+        // a cold Lambda).
+        readTimeout: cdk.Duration.seconds(30),
+        connectionTimeout: cdk.Duration.seconds(10),
+      });
 
       // ---- CloudFront distribution ----
       //
