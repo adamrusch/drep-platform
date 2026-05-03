@@ -618,6 +618,7 @@ export function mapBlockfrostProposalToGovernanceAction(
     summary: onchain.summary || undefined,
     details: onchain.details.length > 0 ? onchain.details : undefined,
     proposerAddress: raw.return_address,
+    treasuryWithdrawalLovelace: onchain.treasuryWithdrawalLovelace,
     votes: ctx.votes ?? undefined,
   };
 }
@@ -704,6 +705,7 @@ export function mapKoiosProposalToGovernanceAction(
     summary: onchain.summary || undefined,
     details: onchain.details.length > 0 ? onchain.details : undefined,
     proposerAddress: p.return_address ?? undefined,
+    treasuryWithdrawalLovelace: onchain.treasuryWithdrawalLovelace,
     votes: ctx.votes ?? undefined,
   };
 }

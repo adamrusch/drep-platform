@@ -24,6 +24,12 @@ export interface GovernanceDetail {
 export interface GovernanceSummary {
   summary: string;
   details: GovernanceDetail[];
+  /** TreasuryWithdrawals only — sum of all withdrawal lovelace amounts on
+   *  this action, as a stringified BigInt. Persisted on the row at sync
+   *  time so the `/governance/stats` aggregation can sum across enacted
+   *  rows without re-parsing the on-chain description. Undefined for
+   *  every other action type. */
+  treasuryWithdrawalLovelace?: string;
 }
 
 // ---- Helpers ----
@@ -116,6 +122,10 @@ function summarizeTreasuryWithdrawals(d: RawDescription): GovernanceSummary {
     return {
       summary: 'Treasury withdrawal (recipients unparsed)',
       details: [{ label: 'Note', value: 'On-chain description had no parseable recipients.' }],
+      // No parseable recipients → emit "0" so the stats aggregation can
+      // distinguish "I parsed this and got nothing" from "I didn't parse it
+      // (older row, no enrichmentVersion)". Either way it adds 0n to the sum.
+      treasuryWithdrawalLovelace: '0',
     };
   }
 
@@ -132,7 +142,7 @@ function summarizeTreasuryWithdrawals(d: RawDescription): GovernanceSummary {
   } else {
     summary = `Withdraw ${formatAda(totalLovelace)} from treasury to ${items.length} recipients`;
   }
-  return { summary, details };
+  return { summary, details, treasuryWithdrawalLovelace: totalLovelace.toString() };
 }
 
 function summarizeHardForkInitiation(d: RawDescription): GovernanceSummary {

@@ -76,6 +76,13 @@ export interface GovernanceAction {
   details?: GovernanceDetail[];
   // ---- On-chain misc ----
   proposerAddress?: string;
+  /** For TreasuryWithdrawals only: sum of all `withdrawal[i][1]` lovelace
+   *  amounts on this action, as a stringified BigInt. The ratification
+   *  sentinel: "how much ADA does this action move out of the treasury?"
+   *  Persisted at sync time so the `/governance/stats` aggregation can sum
+   *  it across all enacted treasury actions without re-parsing the on-chain
+   *  description. Undefined for non-TreasuryWithdrawals action types. */
+  treasuryWithdrawalLovelace?: string;
   // ---- On-chain vote tally (split by voter role) ----
   votes?: VoteTally;
   /** Per CIP-1694 §Ratification §Restrictions, which governance bodies are
@@ -582,6 +589,10 @@ export interface GovernanceActionItem {
   summary?: string;
   details?: GovernanceDetail[];
   proposerAddress?: string;
+  /** Sum of all withdrawal lovelace on this action, stringified BigInt.
+   *  Persisted only for TreasuryWithdrawals (else undefined). See
+   *  `GovernanceAction.treasuryWithdrawalLovelace`. */
+  treasuryWithdrawalLovelace?: string;
   votes?: VoteTally;
   /** See `GovernanceAction.votingRoles` — duplicated on the DDB item shape
    *  so the persisted row carries the canonical CIP-1694 applicability map.

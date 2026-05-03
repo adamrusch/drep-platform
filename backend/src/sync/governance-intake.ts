@@ -133,8 +133,14 @@ const ITEM_CONCURRENCY = 4;
  * separate `autoAbstainPower` breakout still carries that figure for
  * analytics; the frontend just stops rendering it. Bumping the version
  * forces all rows to re-tally and re-stamp `votingRoles`.
+ * v9 → v10: persist `treasuryWithdrawalLovelace` on TreasuryWithdrawals
+ * actions (sum of all withdrawal amounts on the action, stringified
+ * BigInt). Surfaced for the new `/governance/stats` aggregation so the
+ * "total ADA withdrawn from treasury" tile can sum across enacted rows
+ * without re-parsing the on-chain description. Bumping the version
+ * forces all rows to re-stamp this field on the next sync.
  */
-const ENRICHMENT_VERSION = 9;
+const ENRICHMENT_VERSION = 10;
 
 function isEnrichmentFresh(existing: GovernanceActionItem | undefined, now: number): boolean {
   if (!existing) return false;
@@ -436,6 +442,7 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
           summary: mapped.summary,
           details: mapped.details,
           proposerAddress: mapped.proposerAddress,
+          treasuryWithdrawalLovelace: mapped.treasuryWithdrawalLovelace,
           votes: mapped.votes,
           // CIP-1694 role-applicability — pure function of actionType but
           // stamped on the row so reads don't recompute.
