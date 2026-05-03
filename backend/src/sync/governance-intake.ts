@@ -27,6 +27,7 @@ import {
 import {
   tallyVotesWithPower,
   emptyTally as emptyVoteTally,
+  applicableRoles,
   DREP_ALWAYS_ABSTAIN,
   DREP_ALWAYS_NO_CONFIDENCE,
   type TallyLookups,
@@ -122,8 +123,18 @@ const ITEM_CONCURRENCY = 4;
  * `autoAbstainPower`, `autoNoConfidencePower` (DRep only). Bumping the
  * version forces all rows to re-tally with the corrected math on the next
  * sync.
+ * v8 → v9: two display-driven changes. (a) `votingRoles` (CIP-1694
+ * applicability map per action type) is now stored on every action, so
+ * the frontend can hide entire role sections for non-applicable roles
+ * (e.g. SPOs on Treasury Withdrawals — CIP-1694 §Ratification rows 3 & 6
+ * mark them as `-`). (b) DRep `abstain.power` no longer includes
+ * auto-abstain stake — the explicit-Abstain footnote in the UI should
+ * show ONLY DReps who actively abstained, not the auto-abstain pool. The
+ * separate `autoAbstainPower` breakout still carries that figure for
+ * analytics; the frontend just stops rendering it. Bumping the version
+ * forces all rows to re-tally and re-stamp `votingRoles`.
  */
-const ENRICHMENT_VERSION = 8;
+const ENRICHMENT_VERSION = 9;
 
 function isEnrichmentFresh(existing: GovernanceActionItem | undefined, now: number): boolean {
   if (!existing) return false;
@@ -277,6 +288,10 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
                 ? fullProposal.expiration
                 : (existing.epochDeadline as number) ?? 0,
             votes,
+            // CIP-1694 role-applicability map. Re-stamped on every cycle —
+            // it's a pure function of `actionType`, but storing it on the
+            // row means the API doesn't need to recompute on every read.
+            votingRoles: applicableRoles(actionType),
             lastSyncedAt: now,
             enrichmentVersion: ENRICHMENT_VERSION,
           };
@@ -422,6 +437,9 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
           details: mapped.details,
           proposerAddress: mapped.proposerAddress,
           votes: mapped.votes,
+          // CIP-1694 role-applicability — pure function of actionType but
+          // stamped on the row so reads don't recompute.
+          votingRoles: applicableRoles(actionType),
           enrichmentVersion: ENRICHMENT_VERSION,
         };
 

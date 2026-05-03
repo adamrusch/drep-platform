@@ -38,6 +38,7 @@ import type {
   VoteRoleTally,
   VoteSlice,
   VoteTally,
+  VotingRoles,
 } from './types';
 
 // ---- Predefined DRep IDs ----
@@ -252,6 +253,55 @@ export function emptyTally(): VoteTally {
 // ---- Public API ----
 
 /**
+ * Per-action-type role applicability per CIP-1694 §Ratification §Restrictions
+ * (canonical matrix, see /tmp/cip1694.md around line 525). Different action
+ * types call different governance bodies — e.g. SPOs do NOT vote on Treasury
+ * Withdrawals, CC does NOT vote on NoConfidence/UpdateCommittee. The frontend
+ * uses this to suppress entire role sections (donut + breakdown + abstain
+ * footnote) for roles that aren't called to vote on a given action — much
+ * less misleading than rendering "0 voters / 0 ADA / 0%" placeholders that
+ * imply non-participation rather than non-applicability.
+ *
+ * Notes on the trickier rows:
+ *   - ParameterChange: SPOs only vote when one of the security-relevant
+ *     parameters (Q5-gated, see CIP-1694) is in the bundle. The on-chain
+ *     payload doesn't always make that obvious, so we surface the SPO
+ *     section unconditionally for ParameterChange — better to show "Not
+ *     Voted" for SPOs on a non-security ParameterChange than to silently
+ *     hide a section that may turn out to be applicable.
+ *   - HardForkInitiation: requires all three bodies (CIP-1694 §489-490).
+ *   - InfoAction: never enacts, but the spec table sets thresholds for all
+ *     three at 100% — they're all called to vote (informationally).
+ *   - NewCommittee: not in the public ActionType union; UpdateCommittee
+ *     covers both add/remove flows on-chain. Treated identically.
+ */
+export function applicableRoles(
+  actionType: GovernanceActionType,
+): VotingRoles {
+  switch (actionType) {
+    case 'NoConfidence':
+    case 'UpdateCommittee':
+      // CC excluded — they're the body being challenged / replaced.
+      return { cc: false, drep: true, spo: true };
+    case 'NewConstitution':
+    case 'TreasuryWithdrawals':
+      // SPOs do NOT vote — see CIP-1694 §Ratification table rows 3 and 6.
+      return { cc: true, drep: true, spo: false };
+    case 'HardForkInitiation':
+    case 'ParameterChange':
+    case 'InfoAction':
+      return { cc: true, drep: true, spo: true };
+    default: {
+      // Exhaustiveness guard — TS will complain if a new action type is
+      // added to the union without updating this matrix.
+      const _exhaustive: never = actionType;
+      void _exhaustive;
+      return { cc: true, drep: true, spo: true };
+    }
+  }
+}
+
+/**
  * Build a full VoteTally with CIP-1694-correct ratification math from raw
  * on-chain votes and the active-voter lookups.
  *
@@ -266,14 +316,21 @@ export function emptyTally(): VoteTally {
  *   Non-NoConfidence actions:
  *     yes.power      = Σ DReps' yes power
  *     no.power       = Σ DReps' no power + autoNoConfidencePower
- *     abstain.power  = Σ DReps' abstain power + autoAbstainPower   (info)
+ *     abstain.power  = Σ DReps' abstain power   (explicit on-chain only)
+ *     autoAbstainPower = drep_always_abstain power (separate breakout)
  *     notVoted.power = totalActive.power - yes.power - no.power
  *
  *   NoConfidence actions:
  *     yes.power      = Σ DReps' yes power + autoNoConfidencePower
  *     no.power       = Σ DReps' no power
- *     abstain.power  = Σ DReps' abstain power + autoAbstainPower   (info)
+ *     abstain.power  = Σ DReps' abstain power   (explicit on-chain only)
+ *     autoAbstainPower = drep_always_abstain power (separate breakout)
  *     notVoted.power = totalActive.power - yes.power - no.power
+ *
+ *   v9 note: auto-abstain stake is NO LONGER summed into `abstain.power`.
+ *   It carries on `autoAbstainPower` only (and isn't displayed today).
+ *   Conceptually auto-abstain delegators are "wallets that opted out of
+ *   governance entirely" and are treated like unregistered stake.
  *
  * For SPOs:
  *
@@ -352,11 +409,15 @@ export function tallyVotesWithPower(
   const autoAbstainPower = lookups.alwaysAbstainPower ?? 0n;
   const autoNoConfidencePower = lookups.alwaysNoConfidencePower ?? 0n;
 
-  // Auto-abstain is ALWAYS Abstain. It contributes to the informational
-  // `abstain` slice but per CIP-1694 is excluded from active voting stake.
-  if (autoAbstainPower > 0n) {
-    drep.abstain += autoAbstainPower;
-  }
+  // v9 change: auto-abstain is NO LONGER folded into `drep.abstain`. The
+  // explicit-Abstain footnote in the UI should report only DReps who
+  // actively abstained — auto-abstain is conceptually delegator opt-out
+  // (treated like an unregistered wallet) and is surfaced via the separate
+  // `autoAbstainPower` field for analytics, but the frontend stops rendering
+  // it. Per the user's framing: "treat auto-abstain wallets as if they are
+  // unregistered". Active-voting-stake math is unaffected — auto-abstain is
+  // already excluded from `totalActive` (see Pass 3 below).
+  //
   // Auto-no-confidence direction-flips: Yes on NoConfidence, No otherwise.
   // It IS in active voting stake (the delegator expressed a position).
   if (autoNoConfidencePower > 0n) {

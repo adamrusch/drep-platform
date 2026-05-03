@@ -1,7 +1,7 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { ExternalLink } from 'lucide-react';
-import type { GovernanceAction, VoteTally } from '@/types';
+import type { GovernanceAction, VoteTally, VotingRoles } from '@/types';
 import { formatRelativeTime, epochsToDate, cn } from '@/lib/utils';
 import { StatusPill } from '@/components/ui/StatusPill';
 import { SentimentBar } from '@/components/ui/SentimentBar';
@@ -9,8 +9,13 @@ import { useUiStore } from '@/stores/uiStore';
 
 /** Sum the per-role power slices into top-level totals. Power is summed
  *  as BigInt (DRep totals exceed 2^53 lovelace) and returned as
- *  stringified integers for the SentimentBar's prop shape. */
-function tallyPowerTotals(votes: VoteTally): {
+ *  stringified integers for the SentimentBar's prop shape. Honors the
+ *  CIP-1694 role-applicability map so the compact list bar mirrors the
+ *  detail page (e.g. Treasury Withdrawals: SPO power isn't summed in). */
+function tallyPowerTotals(
+  votes: VoteTally,
+  votingRoles?: VotingRoles,
+): {
   yes: string;
   no: string;
   abstain: string;
@@ -24,10 +29,13 @@ function tallyPowerTotals(votes: VoteTally): {
       return 0n;
     }
   };
+  const includeDrep = votingRoles?.drep ?? true;
+  const includeSpo = votingRoles?.spo ?? true;
+  const includeCc = votingRoles?.cc ?? true;
   const sum = (key: 'yes' | 'no' | 'abstain' | 'notVoted' | 'totalActive'): bigint =>
-    parse(votes.drep[key].power) +
-    parse(votes.spo[key].power) +
-    parse(votes.cc[key].power);
+    (includeDrep ? parse(votes.drep[key].power) : 0n) +
+    (includeSpo ? parse(votes.spo[key].power) : 0n) +
+    (includeCc ? parse(votes.cc[key].power) : 0n);
   return {
     yes: sum('yes').toString(),
     no: sum('no').toString(),
@@ -207,14 +215,14 @@ export function GovernanceActionCard({
       {/* Footer: timestamp + sentiment bar + epoch + explorer links */}
       <div className="mt-3 pt-3 border-t border-[var(--border-subtle)] flex items-center justify-between gap-4 text-[11.5px] text-[var(--text-tertiary)] tabular-nums">
         <span className="flex-shrink-0">Submitted {formatRelativeTime(action.submittedAt)}</span>
-        {action.votes && tallyPowerTotals(action.votes).totalActive !== '0' ? (
+        {action.votes && tallyPowerTotals(action.votes, action.votingRoles).totalActive !== '0' ? (
           <div className="flex-1 max-w-[180px]">
             <SentimentBar
-              yes={tallyPowerTotals(action.votes).yes}
-              no={tallyPowerTotals(action.votes).no}
-              notVoted={tallyPowerTotals(action.votes).notVoted}
-              totalActive={tallyPowerTotals(action.votes).totalActive}
-              abstain={tallyPowerTotals(action.votes).abstain}
+              yes={tallyPowerTotals(action.votes, action.votingRoles).yes}
+              no={tallyPowerTotals(action.votes, action.votingRoles).no}
+              notVoted={tallyPowerTotals(action.votes, action.votingRoles).notVoted}
+              totalActive={tallyPowerTotals(action.votes, action.votingRoles).totalActive}
+              abstain={tallyPowerTotals(action.votes, action.votingRoles).abstain}
               height={6}
             />
           </div>

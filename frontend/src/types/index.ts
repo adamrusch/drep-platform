@@ -69,6 +69,20 @@ export interface GovernanceAction {
   proposerAddress?: string;
   // ---- On-chain vote tally (split by voter role) ----
   votes?: VoteTally;
+  /** Per CIP-1694 §Ratification §Restrictions: which governance bodies are
+   *  called to vote on this action type. Used by the UI to suppress entire
+   *  role sections (donut + breakdown + abstain footnote) when a body is
+   *  not applicable — e.g. SPOs on Treasury Withdrawals, CC on
+   *  NoConfidence. Optional for backwards compat: actions written by an
+   *  older sync (< v9) won't carry it; treat absence as "show all roles". */
+  votingRoles?: VotingRoles;
+}
+
+/** Which governance bodies are called to vote on a given action type. */
+export interface VotingRoles {
+  cc: boolean;
+  drep: boolean;
+  spo: boolean;
 }
 
 /**
