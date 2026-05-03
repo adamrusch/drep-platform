@@ -1,38 +1,72 @@
 /**
- * GET /dreps — paginated DRep directory listing.
+ * GET /dreps — page-numbered DRep directory listing.
  *
  * Query params:
  *   - `?sort=power` (default) | `delegators` | `recent` | `name`
- *     - `power`: voting power desc (uses `votingPower-index` GSI)
- *     - `delegators`: delegator count desc (uses `delegatorCount-index` GSI;
- *       falls back to `power` for rows without delegator counts)
- *     - `recent`: most-recent vote desc (uses `lastVoted-index` GSI).
- *       Never-voted DReps are absent from the index — they sort to the
- *       bottom naturally (i.e. they don't appear in the recent-activity
- *       view at all, which is the intended behavior).
- *     - `name`: alphabetical asc by `givenName`, with unnamed DReps
- *       sorted to the end. In-memory sort over a full Scan; pagination
- *       uses a `{namePage:N}` cursor instead of a DynamoDB key.
+ *     - `power`: voting power desc
+ *     - `delegators`: delegator count desc (rows without a delegator
+ *       count fall to the bottom)
+ *     - `recent`: most-recent vote desc; never-voted DReps fall to the
+ *       bottom
+ *     - `name`: alphabetical asc by `givenName`; unnamed DReps fall to
+ *       the bottom
  *   - `?includeInactive=true` — by default the listing filters to
- *     `isActive=true`. With this param, inactive (expired-but-still-
- *     registered) DReps are returned mixed in. Search and recent-activity
- *     paths apply the same filter unless overridden.
+ *     `isActive=true` AND `isRetired !== true`. With this param,
+ *     inactive (expired-but-registered) DReps AND retired DReps are
+ *     returned mixed in. We chose to merge "inactive" and "retired"
+ *     into one toggle rather than expose two separate flags: from the
+ *     directory-browsing perspective both states mean "DRep is no longer
+ *     actively voting and not part of the active denominator," and the
+ *     UI distinguishes them via badges on each card. The `?includeRetired=`
+ *     parameter is accepted as an alias and ignored independently.
  *   - `?search=<text>` — case-insensitive substring match against
- *     `givenName`. Implemented as a Scan with FilterExpression — fine at
- *     ~2000 rows, replace with OpenSearch when scale demands it.
- *   - `?limit=<n>` — default 20, capped at 50.
- *   - `?lastKey=<base64>` — opaque pagination cursor.
+ *     `givenName`. Combined with the active filter when present.
+ *   - `?page=<n>` — 0-indexed page (default 0). Backwards compat: also
+ *     accepts `?lastKey=<base64>` from older clients but converts it to
+ *     a page number where possible (and silently ignores unparseable
+ *     cursors so the request doesn't error).
+ *   - `?pageSize=<n>` — items per page, default 25, capped at 100.
+ *     Legacy `?limit=` is accepted as an alias.
  *
- * Response shape: `{ items: DRepDirectoryItem[], lastEvaluatedKey?, total }`.
+ * Response shape (new):
+ *   ```json
+ *   {
+ *     "items": [...],
+ *     "total": <absolute count of matching rows after filter>,
+ *     "page": <0-indexed>,
+ *     "pageSize": <effective>,
+ *     "totalPages": <ceil(total/pageSize)>,
+ *     "lastEvaluatedKey": undefined  // legacy field, always absent now
+ *   }
+ *   ```
+ *
+ * Backend migration note (Aug 2026): all sort paths used to mix two
+ * implementation strategies — `power` / `delegators` / `recent` queried
+ * GSIs (`votingPower-index`, etc.) with DynamoDB Query pagination, while
+ * `name` did a full Scan + in-memory sort with a `{namePage:N}` cursor.
+ * The new pagination UX requires a true `total` count for every sort,
+ * which a GSI-backed Query cannot give cheaply (DynamoDB returns
+ * `Count` for the page, not the universe). Rather than maintain two
+ * code paths we collapsed everything to the Scan-then-sort-in-memory
+ * approach `name` already used. With ~1000 directory rows this is
+ * fast (one Scan returns ~10 KB-100 KB, well under DynamoDB's 1MB page
+ * cap, and the in-memory sort is microseconds). Revisit when the
+ * directory grows past ~10k — at that point we'd want a real search
+ * service (OpenSearch, Algolia) anyway.
  */
 
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
-import { queryItems, scanItems, tableNames } from '../../lib/dynamodb';
+import { scanItems, tableNames } from '../../lib/dynamodb';
 import type { DRepDirectoryItem } from '../../lib/types';
 import { ok, internalError } from '../_response';
 
-const DEFAULT_LIMIT = 20;
-const MAX_LIMIT = 50;
+const DEFAULT_PAGE_SIZE = 25;
+const MAX_PAGE_SIZE = 100;
+/** Cap the in-memory accumulator at 50 Scan rounds × 200 rows = 10k.
+ *  Plenty of headroom for the ~1500-2000 mainnet DReps; protects against
+ *  a runaway loop if Koios ever returns an absurd number of entries. */
+const MAX_SCAN_ROUNDS = 50;
+const SCAN_PER_ROUND = 200;
 
 type SortKey = 'power' | 'delegators' | 'recent' | 'name';
 
@@ -41,24 +75,150 @@ function parseSort(raw: string | undefined): SortKey {
   return 'power';
 }
 
-/** Sort key for `sort=name`. Lowercased givenName when present; otherwise
- *  push to the end with a tilde prefix that sorts after all letters in
- *  ASCII. The drepId tail keeps the sort deterministic across re-fetches.
- */
-function nameSortKey(item: DRepDirectoryItem): string {
-  const name = (item.givenName as string | undefined)?.trim();
-  if (name && name.length > 0) return name.toLowerCase();
-  const id = (item.drepId as string | undefined) ?? '';
-  return `~${id}`;
-}
-
-/** Parse the `?includeInactive=` flag. Accept the truthy spellings used
- *  by the frontend (`true`, `1`); everything else falls through to false
- *  (active-only is the default). */
-function parseIncludeInactive(raw: string | undefined): boolean {
+/** Parse the `?includeInactive=` flag. Truthy values: `true`, `1`, `yes`. */
+function parseTruthy(raw: string | undefined): boolean {
   if (raw == null) return false;
   const v = raw.trim().toLowerCase();
   return v === 'true' || v === '1' || v === 'yes';
+}
+
+/** Parse `?page=` — non-negative integer, default 0. Returns 0 for any
+ *  malformed input (including negatives) rather than failing the request. */
+function parsePage(raw: string | undefined): number {
+  if (!raw) return 0;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return n;
+}
+
+/** Parse `?pageSize=` (or legacy `?limit=`). Default 25, capped at 100. */
+function parsePageSize(rawPageSize: string | undefined, rawLimit: string | undefined): number {
+  const raw = rawPageSize ?? rawLimit;
+  if (!raw) return DEFAULT_PAGE_SIZE;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 1) return DEFAULT_PAGE_SIZE;
+  return Math.min(n, MAX_PAGE_SIZE);
+}
+
+/** Sort comparator factory. All sorts are stable on `drepId` to keep
+ *  pagination reproducible across requests. */
+function makeComparator(sort: SortKey): (a: DRepDirectoryItem, b: DRepDirectoryItem) => number {
+  switch (sort) {
+    case 'name': {
+      // Alphabetical asc; unnamed DReps tilde-padded to sort last.
+      return (a, b) => {
+        const ka = nameSortKey(a);
+        const kb = nameSortKey(b);
+        if (ka < kb) return -1;
+        if (ka > kb) return 1;
+        return a.drepId < b.drepId ? -1 : a.drepId > b.drepId ? 1 : 0;
+      };
+    }
+    case 'recent': {
+      // Most-recent vote desc; never-voted (`undefined`) sorts last.
+      return (a, b) => {
+        const ta = a.lastVotedAt as string | undefined;
+        const tb = b.lastVotedAt as string | undefined;
+        if (ta && tb) {
+          if (ta > tb) return -1;
+          if (ta < tb) return 1;
+        } else if (ta) return -1;
+        else if (tb) return 1;
+        return a.drepId < b.drepId ? -1 : a.drepId > b.drepId ? 1 : 0;
+      };
+    }
+    case 'delegators': {
+      // Delegator count desc. Missing counts (most rows — the directory
+      // sync defers per-DRep delegator fetches) fall to the end.
+      return (a, b) => {
+        const da = typeof a.delegatorCount === 'number' ? a.delegatorCount : -1;
+        const db = typeof b.delegatorCount === 'number' ? b.delegatorCount : -1;
+        if (da !== db) return db - da;
+        return a.drepId < b.drepId ? -1 : a.drepId > b.drepId ? 1 : 0;
+      };
+    }
+    case 'power':
+    default: {
+      // Voting power desc — compare BigInt to avoid Number precision loss
+      // past 2^53 lovelace. Malformed amounts (rare) compare as zero.
+      return (a, b) => {
+        const va = safeBigInt(a.votingPower);
+        const vb = safeBigInt(b.votingPower);
+        if (va !== vb) return va > vb ? -1 : 1;
+        return a.drepId < b.drepId ? -1 : a.drepId > b.drepId ? 1 : 0;
+      };
+    }
+  }
+}
+
+function safeBigInt(s: string | undefined | null): bigint {
+  if (typeof s !== 'string' || s.length === 0) return 0n;
+  try {
+    return BigInt(s);
+  } catch {
+    return 0n;
+  }
+}
+
+/** Lowercased givenName when present; otherwise tilde-prefixed drepId
+ *  so unnamed entries land after all letters in ASCII order. */
+function nameSortKey(item: DRepDirectoryItem): string {
+  const name = (item.givenName as string | undefined)?.trim();
+  if (name && name.length > 0) return name.toLowerCase();
+  return `~${item.drepId}`;
+}
+
+/** Scan the entire directory (paginated through DynamoDB's 1MB-per-page
+ *  hard cap until exhausted), applying the optional active + retired and
+ *  search filters via FilterExpression. Returns the full matching set —
+ *  callers sort and slice in memory. */
+async function scanAllMatching(opts: {
+  includeInactive: boolean;
+  search: string | undefined;
+}): Promise<DRepDirectoryItem[]> {
+  // Build the FilterExpression dynamically. Conditions are AND-joined.
+  const conditions: string[] = [];
+  const names: Record<string, string> = {};
+  const values: Record<string, unknown> = {};
+
+  if (!opts.includeInactive) {
+    // Default view: hide both inactive AND retired DReps. We do NOT use
+    // `attribute_not_exists(isRetired)` because rows synced before
+    // enrichmentVersion 3 didn't carry the field — they were all
+    // implicitly registered. Pre-v3 rows have `isRetired` absent, which
+    // we treat as `false` (the v2 sync filtered out non-registered).
+    conditions.push('#isActive = :true');
+    conditions.push('(attribute_not_exists(#isRetired) OR #isRetired = :false)');
+    names['#isActive'] = 'isActive';
+    names['#isRetired'] = 'isRetired';
+    values[':true'] = true;
+    values[':false'] = false;
+  }
+  if (opts.search) {
+    conditions.push('contains(#givenNameLower, :q)');
+    names['#givenNameLower'] = 'givenNameLower';
+    values[':q'] = opts.search.toLowerCase();
+  }
+
+  const accumulated: DRepDirectoryItem[] = [];
+  let cursor: Record<string, unknown> | undefined;
+  for (let round = 0; round < MAX_SCAN_ROUNDS; round++) {
+    const page = await scanItems<DRepDirectoryItem>(tableNames.drepDirectory, {
+      ...(conditions.length > 0
+        ? {
+            filterExpression: conditions.join(' AND '),
+            expressionAttributeNames: names,
+            expressionAttributeValues: values,
+          }
+        : {}),
+      limit: SCAN_PER_ROUND,
+      ...(cursor ? { exclusiveStartKey: cursor } : {}),
+    });
+    accumulated.push(...page.items);
+    if (!page.lastEvaluatedKey) break;
+    cursor = page.lastEvaluatedKey;
+  }
+  return accumulated;
 }
 
 export const handler = async (
@@ -67,221 +227,34 @@ export const handler = async (
   try {
     const qs = event.queryStringParameters ?? {};
     const sort = parseSort(qs['sort']);
-    const includeInactive = parseIncludeInactive(qs['includeInactive']);
-    const search = qs['search']?.trim();
-    const limit = qs['limit']
-      ? Math.min(Math.max(parseInt(qs['limit'], 10) || DEFAULT_LIMIT, 1), MAX_LIMIT)
-      : DEFAULT_LIMIT;
-    const exclusiveStartKey = qs['lastKey']
-      ? (JSON.parse(Buffer.from(qs['lastKey'], 'base64').toString('utf-8')) as Record<
-          string,
-          unknown
-        >)
-      : undefined;
+    const includeInactive = parseTruthy(qs['includeInactive']) || parseTruthy(qs['includeRetired']);
+    const search = qs['search']?.trim() || undefined;
+    const pageSize = parsePageSize(qs['pageSize'], qs['limit']);
+    const page = parsePage(qs['page']);
+    // Legacy `?lastKey=<base64>` from the pre-page-numbers UI is silently
+    // ignored — the response shape no longer carries `lastEvaluatedKey`,
+    // and we'd have no way to translate a DynamoDB cursor to a page
+    // number anyway. Old clients will land on page 0 and re-paginate.
 
-    // Build the optional `isActive=true` filter once. Applied on top of
-    // every code path (Scan and Query both accept FilterExpression).
-    // DynamoDB filters AFTER Limit on Scan and AFTER read on Query, so
-    // we over-fetch by 2x to give the filter some headroom on the active
-    // sort paths — most rows are active so this rarely costs us anything.
-    const activeFilter = includeInactive
-      ? null
-      : {
-          filterExpression: '#isActive = :true',
-          expressionAttributeNames: { '#isActive': 'isActive' },
-          expressionAttributeValues: { ':true': true },
-        };
-    // 2x over-fetch when we're filtering, capped at 100 (DynamoDB's
-    // own per-request hard cap is 1MB; 100 rows is well under).
-    const fetchLimit = activeFilter ? Math.min(limit * 2, 100) : limit;
+    const allMatching = await scanAllMatching({ includeInactive, search });
+    const comparator = makeComparator(sort);
+    allMatching.sort(comparator);
+    const total = allMatching.length;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    // Clamp page to valid range — easier than 400-erroring a stale URL.
+    // If the caller asks for page 99 and we only have 5, return page 4
+    // (last page) rather than an empty result with confusing pagination.
+    const clampedPage = Math.min(page, totalPages - 1);
+    const start = clampedPage * pageSize;
+    const end = start + pageSize;
+    const items = allMatching.slice(start, end);
 
-    // Search path: Scan with a contains() filter on the lower-cased
-    // `givenName`. DynamoDB applies FilterExpression *after* Limit, so
-    // a single Scan with `Limit: 20` only examines 20 items and filters
-    // them — a page of 20 examined items will rarely contain matches
-    // when the directory is large. Iterate until we either fill the
-    // page or exhaust the table. Hard-cap at 5 round trips to bound
-    // worst-case latency on tiny match-counts.
-    //
-    // At ~1000 rows this is fast enough; revisit with OpenSearch when
-    // the directory grows past ~10k.
-    if (search && search.length > 0) {
-      const lower = search.toLowerCase();
-      const collected: DRepDirectoryItem[] = [];
-      let cursor: Record<string, unknown> | undefined = exclusiveStartKey;
-      let lastKey: Record<string, unknown> | undefined;
-      const MAX_ROUNDS = 5;
-      // Per-round we ask for 200 items to keep filter overhead small
-      // relative to the round-trip; we still trim to `limit` before
-      // returning.
-      const PER_ROUND_LIMIT = 200;
-      // Compose the search filter with the optional active filter. If
-      // both apply we AND them; otherwise just the search filter.
-      const filterExpression: string = activeFilter
-        ? 'contains(#givenNameLower, :q) AND #isActive = :true'
-        : 'contains(#givenNameLower, :q)';
-      const expressionAttributeNames: Record<string, string> = activeFilter
-        ? { '#givenNameLower': 'givenNameLower', '#isActive': 'isActive' }
-        : { '#givenNameLower': 'givenNameLower' };
-      const expressionAttributeValues: Record<string, unknown> = activeFilter
-        ? { ':q': lower, ':true': true }
-        : { ':q': lower };
-      for (let round = 0; round < MAX_ROUNDS && collected.length < limit; round++) {
-        const page = await scanItems<DRepDirectoryItem>(tableNames.drepDirectory, {
-          filterExpression,
-          expressionAttributeNames,
-          expressionAttributeValues,
-          limit: PER_ROUND_LIMIT,
-          ...(cursor ? { exclusiveStartKey: cursor } : {}),
-        });
-        collected.push(...page.items);
-        lastKey = page.lastEvaluatedKey;
-        if (!page.lastEvaluatedKey) break;
-        cursor = page.lastEvaluatedKey;
-      }
-      const trimmed = collected.slice(0, limit);
-      return ok({
-        items: trimmed,
-        // Only return `lastKey` if we trimmed (more matches available)
-        // OR DynamoDB still has more rows to scan. Otherwise the user
-        // hits "Load more" and gets an empty next page.
-        lastEvaluatedKey:
-          collected.length > limit || lastKey
-            ? lastKey
-              ? Buffer.from(JSON.stringify(lastKey)).toString('base64')
-              : undefined
-            : undefined,
-        total: trimmed.length,
-      });
-    }
-
-    // Name sort: there's no GSI for alphabetical ordering since names
-    // are sparse (~1/3 of DReps have a `givenName`). Scan the full table
-    // (paginated until exhausted), sort in-memory, slice by page index.
-    // At ~1000 rows this is fast; revisit with a `nameSort-index` GSI
-    // if the directory grows past ~10k.
-    if (sort === 'name') {
-      // Decode `?lastKey` as a `{ namePage: number }` cursor for this
-      // sort path. Other sort paths use real DynamoDB cursors so we can't
-      // cross-decode safely — but the frontend always re-issues `lastKey`
-      // verbatim from the previous response so this round-trips cleanly.
-      let page = 0;
-      if (exclusiveStartKey && typeof (exclusiveStartKey as Record<string, unknown>)['namePage'] === 'number') {
-        page = (exclusiveStartKey as { namePage: number }).namePage;
-      }
-
-      const collected: DRepDirectoryItem[] = [];
-      let cursor: Record<string, unknown> | undefined;
-      const PER_ROUND = 200;
-      const MAX_ROUNDS = 20; // safety cap; ~4000 rows
-      for (let round = 0; round < MAX_ROUNDS; round++) {
-        const pageResp = await scanItems<DRepDirectoryItem>(tableNames.drepDirectory, {
-          ...(activeFilter
-            ? {
-                filterExpression: activeFilter.filterExpression,
-                expressionAttributeNames: activeFilter.expressionAttributeNames,
-                expressionAttributeValues: activeFilter.expressionAttributeValues,
-              }
-            : {}),
-          limit: PER_ROUND,
-          ...(cursor ? { exclusiveStartKey: cursor } : {}),
-        });
-        collected.push(...pageResp.items);
-        if (!pageResp.lastEvaluatedKey) break;
-        cursor = pageResp.lastEvaluatedKey;
-      }
-      collected.sort((a, b) => {
-        const ka = nameSortKey(a);
-        const kb = nameSortKey(b);
-        return ka < kb ? -1 : ka > kb ? 1 : 0;
-      });
-      const start = page * limit;
-      const end = start + limit;
-      const slice = collected.slice(start, end);
-      const hasMore = end < collected.length;
-      return ok({
-        items: slice,
-        lastEvaluatedKey: hasMore
-          ? Buffer.from(JSON.stringify({ namePage: page + 1 })).toString('base64')
-          : undefined,
-        total: slice.length,
-      });
-    }
-
-    // Sort path: Query against a constant-partition GSI, sorted desc.
-    // `delegators` falls back to `power` when no rows have a delegator
-    // count yet (the directory sync defers this; the detail handler
-    // populates it on-demand). `recent` queries `lastVoted-index` —
-    // never-voted DReps are absent from the index by design.
-    let indexName: string;
-    let partitionAttr: string;
-    if (sort === 'delegators') {
-      indexName = 'delegatorCount-index';
-      partitionAttr = 'delegatorCountPartition';
-    } else if (sort === 'recent') {
-      indexName = 'lastVoted-index';
-      partitionAttr = 'lastVotedPartition';
-    } else {
-      indexName = 'votingPower-index';
-      partitionAttr = 'votingPowerPartition';
-    }
-
-    const result = await queryItems<DRepDirectoryItem>(tableNames.drepDirectory, {
-      indexName,
-      keyConditionExpression: '#part = :all',
-      expressionAttributeNames: {
-        '#part': partitionAttr,
-        ...(activeFilter?.expressionAttributeNames ?? {}),
-      },
-      expressionAttributeValues: {
-        ':all': 'ALL',
-        ...(activeFilter?.expressionAttributeValues ?? {}),
-      },
-      ...(activeFilter ? { filterExpression: activeFilter.filterExpression } : {}),
-      limit: fetchLimit,
-      // Descending — highest first.
-      scanIndexForward: false,
-      ...(exclusiveStartKey ? { exclusiveStartKey } : {}),
-    });
-
-    // If the delegators index is empty (no rows have a delegator count
-    // yet), fall back to the voting-power index so the page isn't blank.
-    if (sort === 'delegators' && result.items.length === 0 && !exclusiveStartKey) {
-      const fallback = await queryItems<DRepDirectoryItem>(tableNames.drepDirectory, {
-        indexName: 'votingPower-index',
-        keyConditionExpression: '#part = :all',
-        expressionAttributeNames: {
-          '#part': 'votingPowerPartition',
-          ...(activeFilter?.expressionAttributeNames ?? {}),
-        },
-        expressionAttributeValues: {
-          ':all': 'ALL',
-          ...(activeFilter?.expressionAttributeValues ?? {}),
-        },
-        ...(activeFilter ? { filterExpression: activeFilter.filterExpression } : {}),
-        limit: fetchLimit,
-        scanIndexForward: false,
-      });
-      const trimmed = fallback.items.slice(0, limit);
-      return ok({
-        items: trimmed,
-        lastEvaluatedKey: fallback.lastEvaluatedKey
-          ? Buffer.from(JSON.stringify(fallback.lastEvaluatedKey)).toString('base64')
-          : undefined,
-        total: trimmed.length,
-      });
-    }
-
-    // Trim to the requested limit (we may have over-fetched to absorb
-    // the active filter). Preserve `lastEvaluatedKey` from DynamoDB so
-    // the next page resumes correctly even if the page is short.
-    const trimmed = result.items.slice(0, limit);
     return ok({
-      items: trimmed,
-      lastEvaluatedKey: result.lastEvaluatedKey
-        ? Buffer.from(JSON.stringify(result.lastEvaluatedKey)).toString('base64')
-        : undefined,
-      total: trimmed.length,
+      items,
+      total,
+      page: clampedPage,
+      pageSize,
+      totalPages,
     });
   } catch (err) {
     console.error('directory/list handler error:', err);
