@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useGovernanceActions } from '@/hooks/useGovernanceActions';
 import { GovernanceActionCard } from '@/components/GovernanceActionCard';
 import { Button } from '@/components/ui/Button';
@@ -22,11 +23,19 @@ export function GovernanceListPage(): React.ReactElement {
   return (
     <div className="max-w-3xl mx-auto space-y-6">
       <header className="space-y-1">
-        <h1 className="text-[26px] font-bold tracking-tight text-[var(--text-primary)]">
-          Governance Actions
-        </h1>
+        <div className="flex items-baseline justify-between gap-3 flex-wrap">
+          <h1 className="text-[26px] font-bold tracking-tight text-[var(--text-primary)]">
+            Governance Actions
+          </h1>
+          <Link
+            to="/governance/history"
+            className="text-sm text-[var(--brand-primary)] hover:underline"
+          >
+            View on-chain history →
+          </Link>
+        </div>
         <p className="text-sm text-[var(--text-secondary)]">
-          Live from the Cardano mainnet. Updated every 10 minutes.
+          Live from the Cardano mainnet. Updated every minute.
         </p>
       </header>
 
