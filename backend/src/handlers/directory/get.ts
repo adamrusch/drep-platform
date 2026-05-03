@@ -37,6 +37,23 @@ interface EnrichmentCacheEntry {
 
 const enrichmentCache = new Map<string, EnrichmentCacheEntry>();
 
+/** Full-response cache, keyed by drepId. CloudFront caches this for 30s
+ *  on the edge; the Lambda cache backstops misses with a 5-minute TTL so
+ *  popular DReps don't pay the DynamoDB getItem + Koios round-trip on every
+ *  cold edge. The enrichment cache above is reused on a Lambda hit, but
+ *  this one short-circuits the entire handler body.
+ *
+ *  We cache the assembled `DRepDetail` rather than the raw row so the
+ *  shape (including `recentVotes` / `delegatorCountLive`) is already
+ *  composed when we serve. */
+interface DetailCacheEntry {
+  detail: DRepDetail;
+  expiresAt: number;
+}
+const _detailCache = new Map<string, DetailCacheEntry>();
+const DETAIL_CACHE_TTL_MS = 5 * 60 * 1000;
+const DETAIL_CACHE_MAX_ENTRIES = 200;
+
 /** Convert Koios's verbatim `vote` string + Unix-seconds block_time into
  *  the public `DRepRecentVote` shape. We don't normalize the vote casing
  *  — callers may want to render "Yes" vs "yes" verbatim depending on
@@ -97,12 +114,24 @@ async function fetchEnrichment(drepId: string): Promise<EnrichmentCacheEntry> {
 export const handler = async (
   event: APIGatewayProxyEventV2,
 ): Promise<APIGatewayProxyResultV2> => {
+  // Same Cache-Control on every code path so CloudFront edge can re-cache.
+  const cacheHeaders = { 'Cache-Control': 'public, max-age=30, s-maxage=30' };
+
   try {
     const drepIdRaw = event.pathParameters?.['drepId'];
     if (!drepIdRaw) {
       return badRequest('drepId path parameter is required');
     }
     const drepId = decodeURIComponent(drepIdRaw);
+
+    // Module-level full-response cache. 5min TTL — this is intentionally
+    // longer than the CloudFront edge TTL (30s). The edge handles the bulk
+    // of fan-out; the Lambda cache is purely defense for cold-edge bursts.
+    const now = Date.now();
+    const cachedDetail = _detailCache.get(drepId);
+    if (cachedDetail && cachedDetail.expiresAt > now) {
+      return ok(cachedDetail.detail, cacheHeaders);
+    }
 
     const cached = await getItem<DRepDirectoryItem>(tableNames.drepDirectory, {
       drepId,
@@ -156,7 +185,15 @@ export const handler = async (
         : {}),
     };
 
-    return ok(detail);
+    // Insert into the module-level cache. Eviction = drop the oldest key
+    // (Map iteration order is insertion order).
+    _detailCache.set(drepId, { detail, expiresAt: now + DETAIL_CACHE_TTL_MS });
+    if (_detailCache.size > DETAIL_CACHE_MAX_ENTRIES) {
+      const oldestKey = _detailCache.keys().next().value;
+      if (oldestKey !== undefined) _detailCache.delete(oldestKey);
+    }
+
+    return ok(detail, cacheHeaders);
   } catch (err) {
     console.error('directory/get handler error:', err);
     return internalError('Failed to fetch DRep');
