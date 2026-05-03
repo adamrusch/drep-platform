@@ -289,6 +289,16 @@ const VOTE_MAX_PAGES = 5;
 const VOTE_PAGE_SIZE = 100;
 
 /**
+ * **DEAD CODE — kept as a fallback only.**
+ *
+ * As of Phase B (`ENRICHMENT_VERSION` 11), per-proposal vote tallies come
+ * from Koios's free `/vote_list` endpoint via `groupVotesByProposal` in
+ * `koios.ts`. The sync no longer calls this function, but it is preserved
+ * here in case Koios suffers a sustained outage and we need to fall back
+ * to per-proposal Blockfrost calls. Re-wiring would require restoring the
+ * call sites in `governance-intake.ts` and switching `tallyVotes` back to
+ * the Blockfrost-shape input.
+ *
  * Paginated fetch of all raw votes for a proposal. Bounded by
  * `VOTE_MAX_PAGES` so a single high-vote proposal cannot exhaust the
  * Blockfrost rate budget. Returns null if the votes endpoint 404s (some

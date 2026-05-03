@@ -4,7 +4,6 @@ import {
   getGovernanceAction,
   getLatestEpoch,
   getProposalAnchor,
-  getProposalVotes,
   getTx,
   resolveAnchor,
   mapActionType,
@@ -13,21 +12,25 @@ import {
   mapStatus,
   type AnchorContent,
   type BlockfrostProposal,
-  type BlockfrostProposalVote,
 } from '../lib/blockfrost';
 import {
   listProposals as listKoiosProposals,
   listActiveDReps,
   listActivePools,
+  listAllVotes,
+  groupVotesByProposal,
   getCommitteeMembers,
+  getCurrentEpoch,
   getPredefinedDRepPower,
   KoiosError,
   type KoiosProposal,
+  type KoiosVote,
 } from '../lib/koios';
 import {
   tallyVotesWithPower,
   emptyTally as emptyVoteTally,
   applicableRoles,
+  koiosVotesToBlockfrostShape,
   DREP_ALWAYS_ABSTAIN,
   DREP_ALWAYS_NO_CONFIDENCE,
   type TallyLookups,
@@ -139,8 +142,18 @@ const ITEM_CONCURRENCY = 4;
  * "total ADA withdrawn from treasury" tile can sum across enacted rows
  * without re-parsing the on-chain description. Bumping the version
  * forces all rows to re-stamp this field on the next sync.
+ * v10 → v11: per-proposal vote tallies now come from Koios's free
+ * `/vote_list` endpoint instead of Blockfrost's `governance.proposalVotes`.
+ * One bulk Koios call (already cached for the directory sync's
+ * lastVotedAt aggregation) replaces ~109 Blockfrost calls per cycle on
+ * mainnet today, dropping the sync's Blockfrost volume by ~99% on the
+ * vote-tally path. The underlying db-sync data is identical between the
+ * two providers — only field-name/casing differs, normalized by
+ * `koiosVotesToBlockfrostShape`. Bumping the version forces re-tally on
+ * the next sync so any rows still carrying a Blockfrost-derived tally
+ * get re-stamped from the Koios source.
  */
-const ENRICHMENT_VERSION = 10;
+const ENRICHMENT_VERSION = 11;
 
 function isEnrichmentFresh(existing: GovernanceActionItem | undefined, now: number): boolean {
   if (!existing) return false;
@@ -155,6 +168,7 @@ function isEnrichmentFresh(existing: GovernanceActionItem | undefined, now: numb
 
 export async function runGovernanceIntake(): Promise<IntakeResult> {
   const result: IntakeResult = { synced: 0, skipped: 0, errors: 0 };
+  _tallyMismatchLoggedThisCycle = false;
 
   // Circuit breaker: if Blockfrost rate-limited us recently, skip the run
   // entirely. Hammering Blockfrost during a quota outage adds rejected calls
@@ -169,21 +183,29 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
     return result;
   }
 
-  let epochInfo;
+  // Current epoch — Koios `/tip` is the primary source (Phase B). Falls back
+  // to Blockfrost `epochsLatest` only when Koios is unreachable. Quota errors
+  // on the fallback still trip the circuit breaker; a Koios `/tip` failure
+  // simply degrades to Blockfrost (and if Blockfrost is also out, we surface
+  // the error to the caller as before).
+  let currentEpoch: number;
   try {
-    epochInfo = await getLatestEpoch();
-  } catch (err) {
-    if (isBlockfrostQuotaError(err)) {
-      // Open the circuit and skip the rest of the run. Default 6 hours
-      // gives the rolling window time to clear without being so long that
-      // a transient throttle blocks us all day.
-      await openBlockfrostCircuit();
-      console.warn('Governance intake: opened Blockfrost circuit due to quota error');
-      return result;
+    currentEpoch = await getCurrentEpoch();
+  } catch (koiosErr) {
+    console.warn('Governance intake: Koios /tip unavailable, falling back to Blockfrost:', koiosErr);
+    let epochInfo;
+    try {
+      epochInfo = await getLatestEpoch();
+    } catch (err) {
+      if (isBlockfrostQuotaError(err)) {
+        await openBlockfrostCircuit();
+        console.warn('Governance intake: opened Blockfrost circuit due to quota error');
+        return result;
+      }
+      throw err;
     }
-    throw err;
+    currentEpoch = epochInfo.epoch;
   }
-  const currentEpoch = epochInfo.epoch;
 
   // ---- Koios primary fetch (Phase A) ----
   // One bulk call replaces 4 Blockfrost calls per action. We index the
@@ -199,9 +221,16 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
   // each failed lookup leaves its bundle slot undefined and the tally
   // builder treats that role's notVoted as zero rather than lying about
   // a denominator we don't know.
-  const [proposalsRes, lookupsRes] = await Promise.allSettled([
+  //
+  // Phase B: also fetch the global vote_list once per cycle so we can
+  // build per-proposal tallies in O(1) per action rather than calling
+  // Blockfrost ~109 times. The directory sync already pulls this same
+  // data on its own cadence and the module-level cache (5 min) absorbs
+  // the overlap when both syncs land in the same warm Lambda.
+  const [proposalsRes, lookupsRes, votesRes] = await Promise.allSettled([
     listKoiosProposals(),
     buildVoterLookups(),
+    listAllVotes(),
   ]);
 
   let koiosByActionId: Map<string, KoiosProposal> | null = null;
@@ -227,18 +256,95 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
     console.warn('Governance intake: voter-lookups build failed:', lookupsRes.reason);
   }
 
+  // Per-proposal vote slices, indexed by `${tx_hash}#${cert_index}`. When
+  // the Koios call fails this map is null and the per-action loop falls
+  // through to an empty tally — we deliberately do NOT fall back to
+  // Blockfrost here because the whole point of Phase B is to remove that
+  // hot path. A single failed cycle just freezes the previous tally; the
+  // next successful cycle re-computes from scratch.
+  let votesByActionId: Map<string, KoiosVote[]> | null = null;
+  if (votesRes.status === 'fulfilled') {
+    votesByActionId = groupVotesByProposal(votesRes.value);
+    console.log(
+      `Governance intake: Koios vote_list returned ${votesRes.value.length} votes across ${votesByActionId.size} proposals`,
+    );
+  } else {
+    const err = votesRes.reason;
+    if (err instanceof KoiosError) {
+      console.warn(`Governance intake: Koios vote_list unavailable (${err.message})`);
+    } else {
+      console.warn('Governance intake: vote_list fetch failed:', err);
+    }
+  }
+
+  // ---- Iteration driver ----
+  // When Koios returned the bulk proposal listing we use that as the
+  // canonical action set — no Blockfrost listing call needed. Falls back
+  // to `listGovernanceActions` (paginated Blockfrost) only when Koios
+  // is unreachable. Phase B note: with both Koios and the in-memory vote
+  // map populated, the entire hot path hits zero Blockfrost endpoints.
+  if (koiosByActionId && koiosByActionId.size > 0) {
+    const rawActions: BlockfrostProposal[] = [];
+    for (const k of koiosByActionId.values()) {
+      // `governance_type` flows through `mapActionType` which accepts both
+      // PascalCase (Koios) and snake_case (Blockfrost) labels — pass the
+      // Koios value through untouched.
+      rawActions.push({
+        tx_hash: k.proposal_tx_hash,
+        cert_index: k.proposal_index,
+        governance_type: k.proposal_type,
+        ratified_epoch: k.ratified_epoch,
+        enacted_epoch: k.enacted_epoch,
+        dropped_epoch: k.dropped_epoch,
+        expired_epoch: k.expired_epoch,
+        expiration: k.expiration,
+      });
+    }
+    await processActions(rawActions);
+    return finishIntake();
+  }
+
   let page = 1;
   const pageSize = 100;
   let hasMore = true;
 
   while (hasMore) {
-    const rawActions = await listGovernanceActions(page, pageSize);
+    let rawActions: BlockfrostProposal[];
+    try {
+      rawActions = await listGovernanceActions(page, pageSize);
+    } catch (err) {
+      if (isBlockfrostQuotaError(err)) {
+        await openBlockfrostCircuit();
+        console.warn('Governance intake: opened Blockfrost circuit due to listing quota error');
+        return result;
+      }
+      throw err;
+    }
 
     if (rawActions.length === 0) {
       hasMore = false;
       break;
     }
 
+    await processActions(rawActions);
+
+    if (rawActions.length < pageSize) {
+      hasMore = false;
+    } else {
+      page++;
+    }
+  }
+  return finishIntake();
+
+  function finishIntake(): IntakeResult {
+    console.log(
+      `Governance intake complete: written=${result.synced}, enrichmentSkipped=${result.skipped}, errors=${result.errors}; ` +
+        `lookups: drep=${lookupBundle.lookups.drepPower?.size ?? 0}/${lookupBundle.totals.totalDrepCount} pools=${lookupBundle.lookups.poolStake?.size ?? 0}/${lookupBundle.totals.totalPoolCount} cc=${lookupBundle.totals.totalCcCount}`,
+    );
+    return result;
+  }
+
+  async function processActions(rawActions: BlockfrostProposal[]): Promise<void> {
     await processWithConcurrency(rawActions, ITEM_CONCURRENCY, async (rawAction) => {
       const actionId = `${rawAction.tx_hash}#${rawAction.cert_index}`;
       try {
@@ -264,26 +370,45 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
         // Hot path: enrichment is recent. We still need the full proposal
         // for status/epochDeadline (those mutate per epoch) AND the vote
         // tally (votes change as voting progresses). Anchor + tx block_time
-        // are immutable so we keep them. Run the two refreshes in parallel.
+        // are immutable so we keep them. Re-tally on every cycle so
+        // notVoted/totalActive reflect the latest active-voter snapshot.
         if (skipEnrichment && existing) {
-          const [proposalResult, votesResult] = await Promise.allSettled([
-            getGovernanceAction(rawAction.tx_hash, rawAction.cert_index),
-            getProposalVotes(rawAction.tx_hash, rawAction.cert_index),
-          ]);
-          const fullProposal: BlockfrostProposal =
-            proposalResult.status === 'fulfilled' ? proposalResult.value : rawAction;
-          if (proposalResult.status === 'rejected') {
-            console.warn(`proposal refresh failed for ${actionId}:`, proposalResult.reason);
-          }
-          // Re-tally on every cycle so notVoted/totalActive reflect the
-          // latest active-voter snapshot (totals can shift epoch-to-epoch).
-          // If the votes endpoint failed, keep the previously-stored tally
-          // rather than zeroing it out — stale-but-real beats fresh-but-empty.
-          let votes: VoteTally | undefined = existing['votes'] as VoteTally | undefined;
-          if (votesResult.status === 'fulfilled') {
-            votes = buildTallyFromRawVotes(votesResult.value, lookupBundle, actionType);
+          // Vote tally is now derived from the in-memory Koios vote map
+          // (Phase B). When the Koios bulk listing carried this action we
+          // can also pull lifecycle fields from there and skip Blockfrost
+          // entirely — `mapStatus` only consumes ratified/enacted/dropped/
+          // expired/expiration epochs and they're all on `KoiosProposal`.
+          // This is what eliminates the last per-action Blockfrost call on
+          // the hot path. Falls back to `getGovernanceAction` only when
+          // Koios is unreachable for this proposal.
+          let fullProposal: BlockfrostProposal = rawAction;
+          if (koiosRecord) {
+            fullProposal = {
+              tx_hash: koiosRecord.proposal_tx_hash,
+              cert_index: koiosRecord.proposal_index,
+              governance_type: rawAction.governance_type,
+              ratified_epoch: koiosRecord.ratified_epoch,
+              enacted_epoch: koiosRecord.enacted_epoch,
+              dropped_epoch: koiosRecord.dropped_epoch,
+              expired_epoch: koiosRecord.expired_epoch,
+              expiration: koiosRecord.expiration,
+            };
           } else {
-            console.warn(`votes refresh failed for ${actionId}:`, votesResult.reason);
+            try {
+              fullProposal = await getGovernanceAction(rawAction.tx_hash, rawAction.cert_index);
+            } catch (err) {
+              console.warn(`proposal refresh failed for ${actionId}:`, err);
+            }
+          }
+          // If the global vote map is unavailable this cycle, keep the
+          // previously-stored tally rather than zeroing it out —
+          // stale-but-real beats fresh-but-empty.
+          let votes: VoteTally | undefined = existing['votes'] as VoteTally | undefined;
+          if (votesByActionId) {
+            const koiosVotes = votesByActionId.get(actionId) ?? [];
+            const newTally = buildTallyFromKoiosVotes(koiosVotes, lookupBundle, actionType);
+            assertTallyMatchesPrevious(actionId, existing['votes'] as VoteTally | undefined, newTally);
+            votes = newTally;
           }
           const updated: GovernanceActionItem = {
             ...(existing as GovernanceActionItem),
@@ -308,42 +433,39 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
 
         // Cold path: full enrichment fetch. With Koios as primary we can
         // skip the Blockfrost detail/anchor/tx round-trips when the bulk
-        // listing carried enough data. We still fetch votes from Blockfrost
-        // (Koios's vote endpoints are paid-tier; Phase A keeps votes on the
-        // existing path).
+        // listing carried enough data. Phase B: vote tallies now also come
+        // from Koios — the global vote_list was fetched once at the top of
+        // the cycle, so we just look up this proposal's slice in the map.
         let votes: VoteTally | undefined;
         let mapped: Omit<GovernanceAction, 'ingestedAt' | 'lastSyncedAt'>;
+
+        // Build the vote tally from the in-memory Koios slice. When the
+        // global fetch failed this cycle, we record an empty tally and
+        // the next successful sync re-computes from scratch.
+        if (votesByActionId) {
+          const koiosVotes = votesByActionId.get(actionId) ?? [];
+          votes = buildTallyFromKoiosVotes(koiosVotes, lookupBundle, actionType);
+        }
 
         if (koiosRecord) {
           // ---- Koios fast path ----
           // Bulk listing already gave us metadata, on-chain description,
           // submittedAt, anchor URL/hash/validity, and lifecycle epochs.
-          // Only votes are missing — fetch them from Blockfrost in parallel
-          // with the mapping work (which is just CPU).
-          const votesResult = await Promise.allSettled([
-            getProposalVotes(rawAction.tx_hash, rawAction.cert_index),
-          ]);
-          const voteRes = votesResult[0]!;
-          if (voteRes.status === 'fulfilled') {
-            votes = buildTallyFromRawVotes(voteRes.value, lookupBundle, actionType);
-          } else {
-            console.warn(`votes fetch failed for ${actionId}:`, voteRes.reason);
-          }
           mapped = mapKoiosProposalToGovernanceAction(koiosRecord, currentEpoch, { votes });
         } else {
           // ---- Legacy Blockfrost fallback ----
           // Koios was unreachable OR didn't carry this specific action.
-          // Run the original 4-call enrichment chain so we degrade gracefully
-          // to the pre-Koios behavior.
+          // Run the legacy enrichment chain so we degrade gracefully to
+          // the pre-Koios behavior. Vote tally still comes from the Koios
+          // slice computed above (or undefined if vote_list was also down).
           let anchor: AnchorContent | null = null;
           let submittedAt: string | undefined;
           let fullProposal: BlockfrostProposal = rawAction;
 
-          const [proposalResult, txResult, metaResult, votesResult] = await Promise.allSettled([
+          const [proposalResult, txResult, metaResult] = await Promise.allSettled([
             getGovernanceAction(rawAction.tx_hash, rawAction.cert_index),
             getTx(rawAction.tx_hash),
             getProposalAnchor(rawAction.tx_hash, rawAction.cert_index),
-            getProposalVotes(rawAction.tx_hash, rawAction.cert_index),
           ]);
           if (proposalResult.status === 'fulfilled') {
             fullProposal = proposalResult.value;
@@ -363,11 +485,6 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
             }
           } else {
             console.warn(`anchor fetch failed for ${actionId}:`, metaResult.reason);
-          }
-          if (votesResult.status === 'fulfilled') {
-            votes = buildTallyFromRawVotes(votesResult.value, lookupBundle, actionType);
-          } else {
-            console.warn(`votes fetch failed for ${actionId}:`, votesResult.reason);
           }
 
           mapped = mapBlockfrostProposalToGovernanceAction(fullProposal, currentEpoch, {
@@ -457,19 +574,7 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
         result.errors++;
       }
     });
-
-    if (rawActions.length < pageSize) {
-      hasMore = false;
-    } else {
-      page++;
-    }
   }
-
-  console.log(
-    `Governance intake complete: written=${result.synced}, enrichmentSkipped=${result.skipped}, errors=${result.errors}; ` +
-      `lookups: drep=${lookupBundle.lookups.drepPower?.size ?? 0}/${lookupBundle.totals.totalDrepCount} pools=${lookupBundle.lookups.poolStake?.size ?? 0}/${lookupBundle.totals.totalPoolCount} cc=${lookupBundle.totals.totalCcCount}`,
-  );
-  return result;
 }
 
 // ---- Voter lookup bundle ----
@@ -615,30 +720,102 @@ async function buildVoterLookups(): Promise<VoterLookupBundle> {
 }
 
 /**
- * Wrap the pure `tallyVotesWithPower` so the per-action paths can call it
- * without re-passing the totals every time. Returns `undefined` (not an
- * empty tally) when the votes endpoint reported 404 — the action genuinely
- * has no vote endpoint exposed, and the caller leaves the field unset.
+ * Phase B: build a VoteTally from the Koios-shaped vote slice for one
+ * proposal. Normalizes the Koios row format to the Blockfrost shape the
+ * pure `tallyVotesWithPower` function consumes, then runs the math. The
+ * underlying db-sync data is identical between providers — only field
+ * names / casing differ.
+ *
+ * Returns the zero-totals empty tally when there's nothing to compute
+ * (no votes AND no lookups), so the API consumer can tell the data is
+ * degraded but not stale.
  */
-function buildTallyFromRawVotes(
-  votes: BlockfrostProposalVote[] | null,
+function buildTallyFromKoiosVotes(
+  votes: readonly KoiosVote[],
   bundle: VoterLookupBundle,
   actionType: GovernanceActionType,
-): VoteTally | undefined {
-  if (votes === null) return undefined;
-  // If we have no lookups at all (every Koios call failed this cycle),
-  // emit the zero-totals tally — accurate counts, zero denominators —
-  // so the API consumer can tell the data is degraded but not stale.
-  // This is rare; the per-role lookups land independently.
+): VoteTally {
   if (
     bundle.totals.totalDrepCount === 0 &&
     bundle.totals.totalPoolCount === 0 &&
-    bundle.totals.totalCcCount === 0
+    bundle.totals.totalCcCount === 0 &&
+    votes.length === 0
   ) {
-    // If there are also no votes, there's nothing useful to record.
-    if (votes.length === 0) return emptyVoteTally();
+    return emptyVoteTally();
   }
-  return tallyVotesWithPower(votes, bundle.totals, bundle.lookups, actionType);
+  const adapted = koiosVotesToBlockfrostShape(votes);
+  return tallyVotesWithPower(adapted, bundle.totals, bundle.lookups, actionType);
+}
+
+// Track whether we've already logged a tally-mismatch warning this cycle.
+// Once tripped, subsequent assertions stay quiet — one loud warning per
+// cycle is enough; we don't want to spam CloudWatch with 109 lines.
+let _tallyMismatchLoggedThisCycle = false;
+
+/**
+ * Phase B verification helper: compare the new Koios-derived tally against
+ * the previously-stored Blockfrost-derived tally for one action and log
+ * loudly on disagreement. Both providers source from cardano-db-sync, so
+ * after `ENRICHMENT_VERSION` 11 lands the values should match within the
+ * narrow window where:
+ *   - Koios's vote_list cache (5 min TTL) lags a fresh on-chain vote, OR
+ *   - the tally was last computed against a different active-voter
+ *     denominator (DReps re-register, pools retire, etc.)
+ *
+ * Both windows are normal and self-correct on the next cycle. The
+ * assertion exists to catch shape-adapter bugs (wrong role label, wrong
+ * vote casing) where the math would silently zero out — those would
+ * register as a step change in `yes` / `no` / `abstain` power, not a
+ * percent-level drift.
+ *
+ * NEVER throws: a failing assertion logs and continues. The user-visible
+ * data is the new tally; the assertion is a diagnostic only.
+ */
+function assertTallyMatchesPrevious(
+  actionId: string,
+  prev: VoteTally | undefined,
+  next: VoteTally,
+): void {
+  if (!prev) return;
+  if (_tallyMismatchLoggedThisCycle) return;
+  // Only check DReps — the role with the largest stake and the most
+  // sensitive math. SPO/CC drift is dominated by membership churn, not
+  // shape-adapter bugs.
+  const prevYes = prev.drep?.yes?.power;
+  const nextYes = next.drep?.yes?.power;
+  const prevNo = prev.drep?.no?.power;
+  const nextNo = next.drep?.no?.power;
+  if (prevYes == null || nextYes == null || prevNo == null || nextNo == null) return;
+  let prevYesB: bigint;
+  let nextYesB: bigint;
+  let prevNoB: bigint;
+  let nextNoB: bigint;
+  try {
+    prevYesB = BigInt(prevYes);
+    nextYesB = BigInt(nextYes);
+    prevNoB = BigInt(prevNo);
+    nextNoB = BigInt(nextNo);
+  } catch {
+    return;
+  }
+  // Tolerate small drift — totals can shift epoch-to-epoch. 1% threshold
+  // is generous; a shape-adapter bug would zero out a slice (100% drift).
+  const yesDiff = prevYesB > nextYesB ? prevYesB - nextYesB : nextYesB - prevYesB;
+  const noDiff = prevNoB > nextNoB ? prevNoB - nextNoB : nextNoB - prevNoB;
+  const yesMax = prevYesB > nextYesB ? prevYesB : nextYesB;
+  const noMax = prevNoB > nextNoB ? prevNoB : nextNoB;
+  // Avoid divide-by-zero. If both sides are zero, the slice agrees.
+  const yesDriftBps = yesMax > 0n ? (yesDiff * 10000n) / yesMax : 0n;
+  const noDriftBps = noMax > 0n ? (noDiff * 10000n) / noMax : 0n;
+  if (yesDriftBps > 100n || noDriftBps > 100n) {
+    _tallyMismatchLoggedThisCycle = true;
+    console.warn(
+      `Governance intake: tally drift on ${actionId}: ` +
+        `drep.yes ${prevYesB} -> ${nextYesB} (${yesDriftBps}bps), ` +
+        `drep.no ${prevNoB} -> ${nextNoB} (${noDriftBps}bps). ` +
+        `Continuing with new tally; suppressing further mismatch warnings this cycle.`,
+    );
+  }
 }
 
 /**
