@@ -68,6 +68,36 @@ const MAX_PAGE_SIZE = 100;
 const MAX_SCAN_ROUNDS = 50;
 const SCAN_PER_ROUND = 200;
 
+/**
+ * Module-level response cache. CloudFront in front of the API caches the
+ * exact same response for 30s, but a cold-edge or invalidated CloudFront
+ * entry still hits this Lambda. Without this in-Lambda cache, every cold
+ * miss does a full directory Scan + in-memory sort (the heaviest endpoint
+ * we have). With it, the second request from a CloudFront miss within 30s
+ * reuses the in-memory result and skips the Scan entirely.
+ *
+ * Cache key combines all parameters that change the response (sort,
+ * search, includeInactive, page, pageSize). The serialized JSON makes
+ * collisions impossible at the cost of one stringify per request — fine.
+ */
+interface CachedListEntry {
+  body: ListResponseBody;
+  expiresAt: number;
+}
+interface ListResponseBody {
+  items: DRepDirectoryItem[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+const _listCache = new Map<string, CachedListEntry>();
+const LIST_CACHE_TTL_MS = 30_000;
+/** Bound the cache. Each entry holds up to `pageSize` (≤100) items, and
+ *  the typical hot-set is at most a few sort/search permutations × pages.
+ *  Over the cap we drop the oldest entry. */
+const LIST_CACHE_MAX_ENTRIES = 50;
+
 type SortKey = 'power' | 'delegators' | 'recent' | 'name';
 
 function parseSort(raw: string | undefined): SortKey {
@@ -224,6 +254,10 @@ async function scanAllMatching(opts: {
 export const handler = async (
   event: APIGatewayProxyEventV2,
 ): Promise<APIGatewayProxyResultV2> => {
+  // Same Cache-Control on every code path so CloudFront edge can cache
+  // even a cache-hit Lambda response.
+  const cacheHeaders = { 'Cache-Control': 'public, max-age=30, s-maxage=30' };
+
   try {
     const qs = event.queryStringParameters ?? {};
     const sort = parseSort(qs['sort']);
@@ -235,6 +269,18 @@ export const handler = async (
     // ignored — the response shape no longer carries `lastEvaluatedKey`,
     // and we'd have no way to translate a DynamoDB cursor to a page
     // number anyway. Old clients will land on page 0 and re-paginate.
+
+    // Module-level cache check. We have to clamp `page` against `totalPages`,
+    // and that depends on a Scan result we don't have yet — so we cache by
+    // the *requested* parameters, not the clamped ones. A request for
+    // page=99 vs page=4 (where totalPages=5) results in identical responses
+    // but different cache keys; tolerable, the entries are small.
+    const cacheKey = JSON.stringify({ sort, search, includeInactive, page, pageSize });
+    const cached = _listCache.get(cacheKey);
+    const now = Date.now();
+    if (cached && cached.expiresAt > now) {
+      return ok(cached.body, cacheHeaders);
+    }
 
     const allMatching = await scanAllMatching({ includeInactive, search });
     const comparator = makeComparator(sort);
@@ -249,13 +295,23 @@ export const handler = async (
     const end = start + pageSize;
     const items = allMatching.slice(start, end);
 
-    return ok({
+    const body: ListResponseBody = {
       items,
       total,
       page: clampedPage,
       pageSize,
       totalPages,
-    });
+    };
+
+    // Insert into cache. Evict oldest if over cap (Map preserves insertion
+    // order — the first key is the oldest).
+    _listCache.set(cacheKey, { body, expiresAt: now + LIST_CACHE_TTL_MS });
+    if (_listCache.size > LIST_CACHE_MAX_ENTRIES) {
+      const oldestKey = _listCache.keys().next().value;
+      if (oldestKey !== undefined) _listCache.delete(oldestKey);
+    }
+
+    return ok(body, cacheHeaders);
   } catch (err) {
     console.error('directory/list handler error:', err);
     return internalError('Failed to list DRep directory');
