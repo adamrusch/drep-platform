@@ -155,6 +155,42 @@ const ITEM_CONCURRENCY = 4;
  */
 const ENRICHMENT_VERSION = 11;
 
+/**
+ * Deep equality on two governance action rows, ignoring the volatile
+ * `lastSyncedAt` field. Returns true when a Put would be a no-op for any
+ * downstream reader.
+ *
+ * This is the gate that prevents the hot path from re-writing all ~109
+ * rows on every minute-long cycle. Without it, the previous code wrote
+ * the row even when only `lastSyncedAt` differed — that was the source of
+ * the ~66k WCU/hour leak on `governance_actions`.
+ *
+ * `enrichmentVersion` IS compared: a version bump in code MUST force a
+ * write even if the data fields are identical, since the bump signals a
+ * schema migration. (In practice version bumps land via the cold path,
+ * not here — but the safety net is cheap.)
+ */
+function governanceItemsEqualIgnoringSync(
+  a: GovernanceActionItem,
+  b: GovernanceActionItem,
+): boolean {
+  return canonicalizeGovernanceItem(a) === canonicalizeGovernanceItem(b);
+}
+
+function canonicalizeGovernanceItem(item: GovernanceActionItem): string {
+  return JSON.stringify(item, (key, value) => {
+    if (key === 'lastSyncedAt') return undefined;
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const sorted: Record<string, unknown> = {};
+      for (const k of Object.keys(value).sort()) {
+        sorted[k] = (value as Record<string, unknown>)[k];
+      }
+      return sorted;
+    }
+    return value;
+  });
+}
+
 function isEnrichmentFresh(existing: GovernanceActionItem | undefined, now: number): boolean {
   if (!existing) return false;
   // Require an explicit version stamp — older rows have no `enrichmentVersion`
@@ -426,6 +462,18 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
             lastSyncedAt: now,
             enrichmentVersion: ENRICHMENT_VERSION,
           };
+          // Skip the Put when the only difference would be `lastSyncedAt`.
+          // On a quiet cycle (no status churn, votes identical) this used
+          // to write all ~109 rows every minute = ~66k WCU/hr. Now we only
+          // write when something a downstream reader actually cares about
+          // changed. `lastSyncedAt` is no longer load-bearing for the
+          // enrichment-fresh check on the hot path: the freshness window
+          // is governed by `ENRICHMENT_VERSION` matching, and the cold
+          // path resets the timestamp the next time it runs anyway.
+          if (governanceItemsEqualIgnoringSync(existing as GovernanceActionItem, updated)) {
+            result.skipped++;
+            return;
+          }
           await putItem(tableNames.governanceActions, updated);
           result.skipped++;
           return;
