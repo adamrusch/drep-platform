@@ -2,7 +2,7 @@
  * GET /dreps — paginated DRep directory listing.
  *
  * Query params:
- *   - `?sort=power` (default) | `delegators` | `recent`
+ *   - `?sort=power` (default) | `delegators` | `recent` | `name`
  *     - `power`: voting power desc (uses `votingPower-index` GSI)
  *     - `delegators`: delegator count desc (uses `delegatorCount-index` GSI;
  *       falls back to `power` for rows without delegator counts)
@@ -10,6 +10,9 @@
  *       Never-voted DReps are absent from the index — they sort to the
  *       bottom naturally (i.e. they don't appear in the recent-activity
  *       view at all, which is the intended behavior).
+ *     - `name`: alphabetical asc by `givenName`, with unnamed DReps
+ *       sorted to the end. In-memory sort over a full Scan; pagination
+ *       uses a `{namePage:N}` cursor instead of a DynamoDB key.
  *   - `?includeInactive=true` — by default the listing filters to
  *     `isActive=true`. With this param, inactive (expired-but-still-
  *     registered) DReps are returned mixed in. Search and recent-activity
@@ -31,11 +34,22 @@ import { ok, internalError } from '../_response';
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
 
-type SortKey = 'power' | 'delegators' | 'recent';
+type SortKey = 'power' | 'delegators' | 'recent' | 'name';
 
 function parseSort(raw: string | undefined): SortKey {
-  if (raw === 'delegators' || raw === 'recent') return raw;
+  if (raw === 'delegators' || raw === 'recent' || raw === 'name') return raw;
   return 'power';
+}
+
+/** Sort key for `sort=name`. Lowercased givenName when present; otherwise
+ *  push to the end with a tilde prefix that sorts after all letters in
+ *  ASCII. The drepId tail keeps the sort deterministic across re-fetches.
+ */
+function nameSortKey(item: DRepDirectoryItem): string {
+  const name = (item.givenName as string | undefined)?.trim();
+  if (name && name.length > 0) return name.toLowerCase();
+  const id = (item.drepId as string | undefined) ?? '';
+  return `~${id}`;
 }
 
 /** Parse the `?includeInactive=` flag. Accept the truthy spellings used
@@ -138,6 +152,59 @@ export const handler = async (
               : undefined
             : undefined,
         total: trimmed.length,
+      });
+    }
+
+    // Name sort: there's no GSI for alphabetical ordering since names
+    // are sparse (~1/3 of DReps have a `givenName`). Scan the full table
+    // (paginated until exhausted), sort in-memory, slice by page index.
+    // At ~1000 rows this is fast; revisit with a `nameSort-index` GSI
+    // if the directory grows past ~10k.
+    if (sort === 'name') {
+      // Decode `?lastKey` as a `{ namePage: number }` cursor for this
+      // sort path. Other sort paths use real DynamoDB cursors so we can't
+      // cross-decode safely — but the frontend always re-issues `lastKey`
+      // verbatim from the previous response so this round-trips cleanly.
+      let page = 0;
+      if (exclusiveStartKey && typeof (exclusiveStartKey as Record<string, unknown>)['namePage'] === 'number') {
+        page = (exclusiveStartKey as { namePage: number }).namePage;
+      }
+
+      const collected: DRepDirectoryItem[] = [];
+      let cursor: Record<string, unknown> | undefined;
+      const PER_ROUND = 200;
+      const MAX_ROUNDS = 20; // safety cap; ~4000 rows
+      for (let round = 0; round < MAX_ROUNDS; round++) {
+        const pageResp = await scanItems<DRepDirectoryItem>(tableNames.drepDirectory, {
+          ...(activeFilter
+            ? {
+                filterExpression: activeFilter.filterExpression,
+                expressionAttributeNames: activeFilter.expressionAttributeNames,
+                expressionAttributeValues: activeFilter.expressionAttributeValues,
+              }
+            : {}),
+          limit: PER_ROUND,
+          ...(cursor ? { exclusiveStartKey: cursor } : {}),
+        });
+        collected.push(...pageResp.items);
+        if (!pageResp.lastEvaluatedKey) break;
+        cursor = pageResp.lastEvaluatedKey;
+      }
+      collected.sort((a, b) => {
+        const ka = nameSortKey(a);
+        const kb = nameSortKey(b);
+        return ka < kb ? -1 : ka > kb ? 1 : 0;
+      });
+      const start = page * limit;
+      const end = start + limit;
+      const slice = collected.slice(start, end);
+      const hasMore = end < collected.length;
+      return ok({
+        items: slice,
+        lastEvaluatedKey: hasMore
+          ? Buffer.from(JSON.stringify({ namePage: page + 1 })).toString('base64')
+          : undefined,
+        total: slice.length,
       });
     }
 
