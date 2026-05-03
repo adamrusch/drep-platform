@@ -96,19 +96,54 @@ export interface VoteSlice {
 }
 
 /**
- * Per-role tally with an explicit `notVoted` slice (computed from the
- * role's `totalActive` minus the cast-vote slices). `totalActive` carries
- * the global active voting power for the role at sync time, which is the
- * denominator the user actually cares about — Cardano governance
- * thresholds (e.g. ratification at 51% of active stake) are evaluated
- * against TOTAL active stake, not just stake-that-voted.
+ * Per-role tally with explicit ratification slices.
+ *
+ * CIP-1694 ratification math: `yes`, `no`, `notVoted` together sum to
+ * 100% of `totalActive` — the "active voting stake" denominator. Auto-
+ * abstain delegations (drep_always_abstain) are explicitly NOT in
+ * totalActive: per CIP-1694, they're "actively marked as not participating
+ * in governance" and therefore excluded from the ratification denominator.
+ * `abstain` is informational — it carries explicit on-chain abstain votes
+ * plus auto-abstain (for DReps), and lives outside the ratification math.
+ *
+ * Identity that must hold exactly (BigInt):
+ *   yes.power + no.power + notVoted.power == totalActive.power
+ *
+ * The bigger denominator (`totalRegistered`) includes auto-abstain stake
+ * and is provided so the UI can express "abstain as % of registered
+ * voting stake" if it wants.
  */
 export interface VoteRoleTally {
+  /** Yes-vote slice. For NoConfidence actions, includes auto-no-confidence
+   *  power (since stake delegated to drep_always_no_confidence counts as
+   *  Yes on every NoConfidence action). */
   yes: VoteSlice;
+  /** No-vote slice. For non-NoConfidence actions, includes auto-no-
+   *  confidence power (stake delegated to drep_always_no_confidence counts
+   *  as No on every other action). */
   no: VoteSlice;
-  abstain: VoteSlice;
+  /** "Not voted" — totalActive minus yes minus no. The remaining stake in
+   *  the ratification denominator that hasn't expressed Yes or No. */
   notVoted: VoteSlice;
+  /** Informational only — explicit on-chain abstain votes + auto-abstain
+   *  power (for DReps). NOT in the ratification denominator; do NOT subtract
+   *  this from totalActive when computing notVoted. */
+  abstain: VoteSlice;
+  /** The ratification denominator. For DReps: active DRep voting power +
+   *  auto-no-confidence power (NOT auto-abstain). For SPOs: sum of active
+   *  pool live_stake. For CC: count of authorized members. */
   totalActive: VoteSlice;
+  /** Informational denominator that INCLUDES auto-abstain. For DReps this
+   *  equals totalActive + autoAbstainPower. For roles without an auto-
+   *  abstain analog (SPO, CC) this equals totalActive. Lets the UI compute
+   *  "abstain as % of total registered voting stake" without confusion. */
+  totalRegistered: VoteSlice;
+  /** Informational breakout — auto-abstain power (DRep only). Stringified
+   *  BigInt in lovelace. Undefined when not applicable (SPO, CC) or unknown. */
+  autoAbstainPower?: string;
+  /** Informational breakout — auto-no-confidence power (DRep only).
+   *  Stringified BigInt in lovelace. Undefined when not applicable. */
+  autoNoConfidencePower?: string;
 }
 
 /**
