@@ -39,13 +39,19 @@
  *   - `drep_voting_power_history` — reserved for the sparkline; future
  *     work, not in v1.
  *
- * Idempotency: rows are only re-written when the enrichment version
- * differs OR `lastSyncedAt` is older than `ENRICHMENT_TTL_MS`. Otherwise
- * the sync skips the put — saves DynamoDB write capacity on the steady
- * state where ~99% of DReps haven't changed cycle-over-cycle.
+ * Idempotency: every cycle BatchGets the existing rows, builds the
+ * candidate row from upstream data, and only PutItems when the candidate
+ * differs from the existing row (ignoring `lastSyncedAt`). On a quiet
+ * cycle this writes zero rows — saves the 38k+ WCU/hour the previous
+ * Put-every-row implementation was burning on `drep_directory`. BatchGet
+ * costs ~800 RRU/cycle (negligible) so the read pass is essentially
+ * free. `lastSyncedAt` is no longer touched just to record "we ran" —
+ * the freshness signal is `enrichmentVersion` matching the current code.
  *
- * Cadence: 5 minutes (set by SchedulerStack). DRep registrations move
- * slowly compared to governance votes, so the lower frequency is fine.
+ * Cadence: 30 minutes (set by SchedulerStack). DRep registrations /
+ * retirements move slowly, and the user-visible "Last Voted" timestamps
+ * come from the governance sync's 1-min cadence anyway. Bumped from 5
+ * min as part of a cost fix — see the SchedulerStack comments.
  */
 
 import type { ScheduledEvent, Context } from 'aws-lambda';
@@ -60,7 +66,7 @@ import {
   type KoiosDRepMetadata,
   type KoiosVote,
 } from '../lib/koios';
-import { putItem, tableNames } from '../lib/dynamodb';
+import { putItem, batchGetItems, tableNames } from '../lib/dynamodb';
 import type {
   DRepDirectoryItem,
   DRepReference,
@@ -446,10 +452,27 @@ export async function runDirectorySync(): Promise<DirectorySyncResult> {
     // Continue — rows still get written without fresh activity data.
   }
 
-  // Step 5: write rows. We do not look up the existing row to compare
-  // version/freshness — the cost of a Get-before-Put dwarfs any savings
-  // since DynamoDB Put is cheap. Keep the loop simple; revisit if write
-  // capacity becomes a bottleneck.
+  // Step 5: read existing rows in bulk so we can compare-then-write.
+  // Previous behavior was to Put every row every cycle; on mainnet that
+  // burned ~38k WCU/hour on the directory table for ~zero changes.
+  // BatchGet at 0.5 RRU per item is two orders of magnitude cheaper than
+  // the wasted PutItem volume — the read pass is essentially free
+  // (~800 RRU/cycle) and lets us skip the writes that would have been
+  // identical to the existing row. See commit history for the cost-fix
+  // rationale and CloudWatch numbers.
+  const existingRows = await batchGetItems<DRepDirectoryItem>(
+    tableNames.drepDirectory,
+    drepIds.map((id) => ({ drepId: id, SK: 'PROFILE' })),
+  );
+  const existingByDRep = new Map<string, DRepDirectoryItem>(
+    existingRows.map((r) => [r.drepId, r]),
+  );
+  console.log(
+    `Directory sync: BatchGet returned ${existingRows.length}/${drepIds.length} existing rows`,
+  );
+
+  // Step 6: build candidate rows, compare against existing (ignoring
+  // `lastSyncedAt`), Put only when something genuinely differs.
   const now = new Date().toISOString();
   for (const id of drepIds) {
     try {
@@ -461,16 +484,30 @@ export async function runDirectorySync(): Promise<DirectorySyncResult> {
       const info = infoByDRep.get(id);
       const meta = metaByDRep.get(id);
       const summary = voteSummaries.get(id);
-      const item = buildDirectoryItem(id, listingEntry, info, meta, summary, now);
-      await putItem(tableNames.drepDirectory, item);
-      result.written++;
-      if (item.isRetired) result.retired++;
-      else if (item.isActive) result.active++;
+      const candidate = buildDirectoryItem(id, listingEntry, info, meta, summary, now);
+      const existing = existingByDRep.get(id);
+
+      // Stat counters reflect the candidate's lifecycle classification —
+      // they're informational and computed regardless of whether we write.
+      if (candidate.isRetired) result.retired++;
+      else if (candidate.isActive) result.active++;
       else result.inactive++;
       if (meta) result.withMetadata++;
-      if (item.givenName) result.withGivenName++;
-      if (item.image) result.withImage++;
-      if (item.lastVotedAt) result.withLastVoted++;
+      if (candidate.givenName) result.withGivenName++;
+      if (candidate.image) result.withImage++;
+      if (candidate.lastVotedAt) result.withLastVoted++;
+
+      if (existing && itemsEqualIgnoringSync(existing, candidate)) {
+        // Nothing changed. Skip the Put — do NOT write just to bump
+        // `lastSyncedAt`. The freshness signal is implicit: if the row
+        // exists with `enrichmentVersion === ENRICHMENT_VERSION`, the
+        // sync ran successfully and the data is current.
+        result.skippedFresh++;
+        continue;
+      }
+
+      await putItem(tableNames.drepDirectory, candidate);
+      result.written++;
     } catch (err) {
       console.error(`Directory sync: failed to write ${id}:`, err);
       result.errors++;
@@ -480,11 +517,47 @@ export async function runDirectorySync(): Promise<DirectorySyncResult> {
   console.log(
     `Directory sync complete: total=${result.total} active=${result.active} ` +
       `inactive=${result.inactive} retired=${result.retired} written=${result.written} ` +
+      `skippedFresh=${result.skippedFresh} ` +
       `withMetadata=${result.withMetadata} withGivenName=${result.withGivenName} ` +
       `withImage=${result.withImage} withLastVoted=${result.withLastVoted} ` +
       `errors=${result.errors}`,
   );
   return result;
+}
+
+/**
+ * Deep equality between two directory rows, ignoring the volatile
+ * `lastSyncedAt` field. Returns true when a Put would be a no-op from the
+ * caller's point of view.
+ *
+ * `enrichmentVersion` is included in the comparison: a version bump in
+ * code MUST trigger a Put even if the data fields look identical, since
+ * the bump signals a schema migration.
+ *
+ * Implementation: stringify both sides with `lastSyncedAt` stripped.
+ * JSON.stringify is stable for plain objects with the same key insertion
+ * order, but DynamoDB unmarshalling can re-order keys, so we sort keys
+ * explicitly. The object is small (~20 fields) so this is cheap.
+ */
+function itemsEqualIgnoringSync(a: DRepDirectoryItem, b: DRepDirectoryItem): boolean {
+  return canonicalize(a) === canonicalize(b);
+}
+
+function canonicalize(item: DRepDirectoryItem): string {
+  return JSON.stringify(item, (key, value) => {
+    if (key === 'lastSyncedAt') return undefined;
+    // Stable key order for nested objects. References is an array of
+    // {kind,label,uri} — array order matters for that field (stable from
+    // the source), so we don't sort it.
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const sorted: Record<string, unknown> = {};
+      for (const k of Object.keys(value).sort()) {
+        sorted[k] = (value as Record<string, unknown>)[k];
+      }
+      return sorted;
+    }
+    return value;
+  });
 }
 
 /**
