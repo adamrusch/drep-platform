@@ -9,6 +9,11 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as route53Targets from 'aws-cdk-lib/aws-route53-targets';
+import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
+import * as cloudfrontOrigins from 'aws-cdk-lib/aws-cloudfront-origins';
+import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
+import * as logs from 'aws-cdk-lib/aws-logs';
+import * as budgets from 'aws-cdk-lib/aws-budgets';
 import { Construct } from 'constructs';
 import * as path from 'path';
 import type { DatabaseStack } from './database-stack';
@@ -373,7 +378,31 @@ export class ApiStack extends cdk.Stack {
       exportName: `${stage}-ApiUrl`,
     });
 
-    // ---- Custom domain: api.drep.tools ----
+    // ---- Custom domain + CloudFront in front of the API ----
+    //
+    // Architecture (top → bottom):
+    //   Browser → api.drep.tools (Route 53 alias)
+    //          → CloudFront distribution (cache layer + WAF rate-limit)
+    //          → API Gateway HTTP API regional endpoint (origin)
+    //          → Lambda handlers
+    //
+    // Why CloudFront in front of API Gateway:
+    //   - 95%+ reduction in worst-case attack cost: the heavy read endpoints
+    //     (`/dreps`, `/governance`) are cacheable — a botnet pounding them
+    //     at 10 req/s/IP gets served by the edge with one Lambda invocation
+    //     per 30s window per cache key, instead of one invocation per
+    //     request.
+    //   - WAF rate-based rules attach to CloudFront and inspect there, well
+    //     before traffic reaches API Gateway.
+    //   - Cache headers (Cache-Control: public, s-maxage=30) are emitted by
+    //     each handler; CloudFront honors them.
+    //
+    // CRITICAL: cache key for the cached behaviors must NOT include the
+    // `Cookie` header. If it did, every authenticated user would have their
+    // own edge entry (no benefit) AND a misconfiguration could serve one
+    // user's cookied response to another. The cached endpoints here are
+    // public reads — auth state lives entirely on `/auth/*` (no-cache) and
+    // never appears in cacheable response bodies.
     if (customDomain) {
       const apiCert = acm.Certificate.fromCertificateArn(
         this,
@@ -381,6 +410,16 @@ export class ApiStack extends cdk.Stack {
         customDomain.certificateArn,
       );
 
+      // We still need the API Gateway custom domain mapping so CloudFront
+      // can use a stable origin DNS name (`d-xxx.execute-api...`). Without
+      // the custom domain mapping, we'd point CloudFront at the raw
+      // `<api-id>.execute-api...` host, which works but emits a Host
+      // header that some HTTP API integrations dislike.
+      //
+      // NOTE: the API Gateway custom domain is NOT what end users hit
+      // anymore — Route 53 will point `api.drep.tools` at the CloudFront
+      // distribution below. We keep the API Gateway domain object purely
+      // as a convenient origin handle.
       const apiCustomDomain = new apigwv2.DomainName(this, 'ApiDomainName', {
         domainName: customDomain.apiDomain,
         certificate: apiCert,
@@ -388,39 +427,480 @@ export class ApiStack extends cdk.Stack {
         securityPolicy: apigwv2.SecurityPolicy.TLS_1_2,
       });
 
-      // Map the $default stage to the custom domain.
       new apigwv2.ApiMapping(this, 'ApiMapping', {
         api,
         domainName: apiCustomDomain,
         stage: defaultStage,
       });
 
-      // Route 53 alias for api.drep.tools → API Gateway regional endpoint.
+      // ---- CloudFront cache + origin policies ----
+      //
+      // Cached behavior cache key:
+      //   - Method (GET only — POST/PUT/DELETE go through the no-cache
+      //     default behavior)
+      //   - Path
+      //   - All query strings (includes `?sort=...&page=...&search=...`
+      //     for /dreps; sorting differs by query, so varying matters)
+      //   - NO cookies, NO headers other than Origin (CORS)
+      //
+      // Origin request policy for cached behavior:
+      //   - Forward Origin header (CORS preflight) and the query strings.
+      //   - Do NOT forward Cookie or Authorization — these are cached
+      //     responses, the origin is a public read.
+      const cachedQueryStrings = cloudfront.OriginRequestQueryStringBehavior.all();
+      const cachedKeyPolicy = new cloudfront.CachePolicy(this, 'ApiCachedKeyPolicy', {
+        cachePolicyName: `drep-platform-${stage}-api-cached`,
+        comment: 'Cache GET reads with method+path+query only — no cookies in key.',
+        defaultTtl: cdk.Duration.seconds(30),
+        minTtl: cdk.Duration.seconds(0),
+        maxTtl: cdk.Duration.seconds(300),
+        cookieBehavior: cloudfront.CacheCookieBehavior.none(),
+        headerBehavior: cloudfront.CacheHeaderBehavior.allowList('Origin'),
+        queryStringBehavior: cloudfront.CacheQueryStringBehavior.all(),
+        enableAcceptEncodingGzip: true,
+        enableAcceptEncodingBrotli: true,
+      });
+      const cachedOriginPolicy = new cloudfront.OriginRequestPolicy(
+        this,
+        'ApiCachedOriginPolicy',
+        {
+          originRequestPolicyName: `drep-platform-${stage}-api-cached-origin`,
+          comment: 'Forward Origin header + query strings to API Gateway. No cookies.',
+          cookieBehavior: cloudfront.OriginRequestCookieBehavior.none(),
+          headerBehavior: cloudfront.OriginRequestHeaderBehavior.allowList('Origin'),
+          queryStringBehavior: cachedQueryStrings,
+        },
+      );
+
+      // No-cache (passthrough) cache + origin policies. Used for /auth/*
+      // and any mutation route. Cookies + Authorization + everything else
+      // forward verbatim, and we explicitly disable caching.
+      const passthroughCachePolicy = new cloudfront.CachePolicy(
+        this,
+        'ApiPassthroughCachePolicy',
+        {
+          cachePolicyName: `drep-platform-${stage}-api-passthrough`,
+          comment: 'No edge caching — pass through to origin.',
+          defaultTtl: cdk.Duration.seconds(0),
+          minTtl: cdk.Duration.seconds(0),
+          maxTtl: cdk.Duration.seconds(0),
+          cookieBehavior: cloudfront.CacheCookieBehavior.all(),
+          headerBehavior: cloudfront.CacheHeaderBehavior.allowList(
+            'Authorization',
+            'Origin',
+            'Content-Type',
+          ),
+          queryStringBehavior: cloudfront.CacheQueryStringBehavior.all(),
+          enableAcceptEncodingGzip: true,
+          enableAcceptEncodingBrotli: true,
+        },
+      );
+      // ALL_VIEWER_EXCEPT_HOST_HEADER is a CloudFront-managed origin
+      // request policy that forwards every header / cookie / query string
+      // from the viewer EXCEPT Host (which CloudFront overwrites with the
+      // origin's hostname automatically). Exactly what the auth /
+      // mutation pass-through path needs.
+      const passthroughOriginPolicy = cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER;
+
+      // Origin: API Gateway HTTP API regional domain. We use the API GW
+      // custom-domain regional name (set up above) so the Host header that
+      // CloudFront sends matches what API Gateway expects.
+      const origin = new cloudfrontOrigins.HttpOrigin(
+        apiCustomDomain.regionalDomainName,
+        {
+          protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
+          // Sensible timeouts. Lambda timeout is 30s on most handlers; allow
+          // the full origin response window to avoid CloudFront 502s on
+          // slow but legitimate requests (e.g. /dreps directory scan with
+          // a cold Lambda).
+          readTimeout: cdk.Duration.seconds(30),
+          connectionTimeout: cdk.Duration.seconds(10),
+        },
+      );
+
+      // ---- CloudFront distribution ----
+      //
+      // Default behavior = pass-through (no caching). This is the safe
+      // default — anything we don't explicitly mark cacheable goes
+      // straight to origin with all headers + cookies forwarded.
+      // Cacheable GET routes are added as additionalBehaviors below.
+      const apiDistribution = new cloudfront.Distribution(this, 'ApiDistribution', {
+        comment: `drep-platform ${stage} API edge cache + WAF`,
+        domainNames: [customDomain.apiDomain],
+        certificate: apiCert,
+        defaultBehavior: {
+          origin,
+          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+          allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+          cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
+          cachePolicy: passthroughCachePolicy,
+          originRequestPolicy: passthroughOriginPolicy,
+          // No response headers policy on the default behavior — the
+          // origin's CORS headers pass through verbatim.
+          compress: true,
+        },
+        additionalBehaviors: {
+          // Cacheable GET reads. Each path uses the same cached cache+
+          // origin policies (no cookies, query strings forwarded).
+          //
+          // IMPORTANT: CloudFront path patterns are evaluated in declaration
+          // order. We list specific routes first and broader patterns last.
+          // POST/PUT/DELETE on these paths fall through to the default
+          // (no-cache) behavior because the AllowedMethods on the cached
+          // behaviors is GET/HEAD only — CloudFront will return a 403 for
+          // a POST on a GET-only behavior, which we want to AVOID, so we
+          // include OPTIONS in the cached behaviors and route POSTs via
+          // the no-cache default for explicit paths like /comments and
+          // /clubhouse below.
+          //
+          // To handle this cleanly: cache behaviors below allow GET/HEAD/
+          // OPTIONS only; the matching POST/PUT/DELETE routes (e.g.
+          // /comments/{id} POST, /clubhouse/.../post POST) need their
+          // own no-cache behavior since they share path patterns with
+          // GET reads. We declare those NO-CACHE behaviors FIRST so they
+          // take precedence in CloudFront's longest-prefix-match rules.
+
+          // /auth/* — never cache. Cookies + Authorization headers pass
+          // through unchanged. All HTTP methods allowed.
+          '/auth/*': {
+            origin,
+            viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+            allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+            cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
+            cachePolicy: passthroughCachePolicy,
+            originRequestPolicy: passthroughOriginPolicy,
+            compress: true,
+          },
+          // /comments/* — POST/DELETE are mutations, GET is the only
+          // cacheable read. Since POST and GET share the same path prefix,
+          // we route the entire prefix through the no-cache behavior to
+          // avoid the GET-only-allowed-methods bug. Trade-off: we lose
+          // edge caching on /comments GET, but we still have the
+          // Cache-Control: public, max-age=15 header so browsers cache
+          // it client-side.
+          '/comments/*': {
+            origin,
+            viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+            allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+            cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
+            cachePolicy: passthroughCachePolicy,
+            originRequestPolicy: passthroughOriginPolicy,
+            compress: true,
+          },
+          // /clubhouse/* — same reasoning as /comments. Mutations and reads
+          // share path prefix; route all to no-cache.
+          '/clubhouse/*': {
+            origin,
+            viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+            allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+            cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
+            cachePolicy: passthroughCachePolicy,
+            originRequestPolicy: passthroughOriginPolicy,
+            compress: true,
+          },
+          // /profile/* — POST creates/updates the auth'd user's profile,
+          // GET fetches a public profile. Same shared-prefix issue, route
+          // to no-cache. The handler still emits Cache-Control headers
+          // for the GET, so the browser caches it.
+          '/profile/*': {
+            origin,
+            viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+            allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+            cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
+            cachePolicy: passthroughCachePolicy,
+            originRequestPolicy: passthroughOriginPolicy,
+            compress: true,
+          },
+          // /drep/* (committee routes) — POST + PUT mix with GET. Same
+          // shared-prefix logic: route all through no-cache, rely on
+          // browser caching from origin Cache-Control where applicable.
+          '/drep/*': {
+            origin,
+            viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+            allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+            cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
+            cachePolicy: passthroughCachePolicy,
+            originRequestPolicy: passthroughOriginPolicy,
+            compress: true,
+          },
+          // /governance/sync is a POST — route /governance/sync* to
+          // no-cache to override the cacheable /governance/* below.
+          // (CloudFront uses longest-prefix; this 14-char pattern beats
+          // the 12-char `/governance/*`).
+          '/governance/sync': {
+            origin,
+            viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+            allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+            cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
+            cachePolicy: passthroughCachePolicy,
+            originRequestPolicy: passthroughOriginPolicy,
+            compress: true,
+          },
+          // ---- Cacheable GET routes ----
+          // /governance — list of governance actions (paginated reads).
+          // GET-only for the purpose of caching. We allow GET/HEAD/OPTIONS
+          // (OPTIONS is the CORS preflight, never cached but allowed).
+          '/governance': {
+            origin,
+            viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+            allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
+            cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
+            cachePolicy: cachedKeyPolicy,
+            originRequestPolicy: cachedOriginPolicy,
+            compress: true,
+          },
+          // /governance/* (after /governance/sync) — covers /governance/{id}
+          // and /governance/stats. Both GET, both cacheable.
+          '/governance/*': {
+            origin,
+            viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+            allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
+            cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
+            cachePolicy: cachedKeyPolicy,
+            originRequestPolicy: cachedOriginPolicy,
+            compress: true,
+          },
+          // /dreps — directory list. GET-only.
+          '/dreps': {
+            origin,
+            viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+            allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
+            cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
+            cachePolicy: cachedKeyPolicy,
+            originRequestPolicy: cachedOriginPolicy,
+            compress: true,
+          },
+          // /dreps/* — single-DRep detail.
+          '/dreps/*': {
+            origin,
+            viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+            allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
+            cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
+            cachePolicy: cachedKeyPolicy,
+            originRequestPolicy: cachedOriginPolicy,
+            compress: true,
+          },
+          // /epoch — epoch info, already module-cached at the Lambda layer.
+          '/epoch': {
+            origin,
+            viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+            allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
+            cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
+            cachePolicy: cachedKeyPolicy,
+            originRequestPolicy: cachedOriginPolicy,
+            compress: true,
+          },
+        },
+        priceClass: cloudfront.PriceClass.PRICE_CLASS_100,
+        // No HTTP/3 (default off in CDK). HTTP/2 is fine.
+      });
+
+      // ---- WAF — Layer 2 ----
+      //
+      // Single rate-based rule, scoped CLOUDFRONT (us-east-1 ACL). 2000
+      // requests / 5 min sliding window per source IP, action BLOCK.
+      // Default ACL action ALLOW so only the rate rule blocks.
+      //
+      // Logging: CloudWatch log group with 7-day retention. Required log
+      // group name prefix is `aws-waf-logs-` for WAF to accept it.
+      const wafLogGroup = new logs.LogGroup(this, 'ApiWafLogGroup', {
+        logGroupName: `aws-waf-logs-drep-platform-${stage}-api`,
+        retention: logs.RetentionDays.ONE_WEEK,
+        removalPolicy: stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+      });
+
+      const webAcl = new wafv2.CfnWebACL(this, 'ApiWebAcl', {
+        name: `drep-platform-${stage}-api`,
+        scope: 'CLOUDFRONT',
+        defaultAction: { allow: {} },
+        visibilityConfig: {
+          cloudWatchMetricsEnabled: true,
+          metricName: `drep-platform-${stage}-api-acl`,
+          sampledRequestsEnabled: true,
+        },
+        rules: [
+          {
+            name: 'RateLimitPerIp',
+            priority: 1,
+            statement: {
+              rateBasedStatement: {
+                limit: 2000,
+                aggregateKeyType: 'IP',
+                // 5-minute sliding window — WAF only supports 1 / 2 / 5
+                // / 10 minute windows; 5 is the right one here.
+                evaluationWindowSec: 300,
+              },
+            },
+            action: { block: {} },
+            visibilityConfig: {
+              cloudWatchMetricsEnabled: true,
+              metricName: `drep-platform-${stage}-api-ratelimit`,
+              sampledRequestsEnabled: true,
+            },
+          },
+        ],
+      });
+
+      // Associate the Web ACL with the CloudFront distribution.
+      // CloudFront uses the WebACLId via the distribution's WebACLId
+      // attribute, not a separate association (unlike API Gateway).
+      // We do this via the distribution's underlying CFN resource.
+      const cfnDistribution = apiDistribution.node.defaultChild as cloudfront.CfnDistribution;
+      cfnDistribution.addPropertyOverride('DistributionConfig.WebACLId', webAcl.attrArn);
+
+      // WAF logging configuration. The destination is the CW log group.
+      // Without this, WAF still BLOCKs but we can't audit which IPs/UAs
+      // got blocked.
+      new wafv2.CfnLoggingConfiguration(this, 'ApiWafLogging', {
+        resourceArn: webAcl.attrArn,
+        logDestinationConfigs: [wafLogGroup.logGroupArn],
+      });
+
+      // ---- Route 53 alias: api.drep.tools → CloudFront ----
+      // Replaces the previous ApiGatewayv2 alias target. The CloudFront
+      // distribution is what end-users hit; CloudFront forwards to the
+      // API Gateway origin defined above.
       const zone = route53.HostedZone.fromHostedZoneAttributes(this, 'ApiZone', {
         hostedZoneId: customDomain.hostedZoneId,
         zoneName: customDomain.zoneName,
       });
-      const apiAliasTarget = route53.RecordTarget.fromAlias(
-        new route53Targets.ApiGatewayv2DomainProperties(
-          apiCustomDomain.regionalDomainName,
-          apiCustomDomain.regionalHostedZoneId,
-        ),
+      const apiCloudFrontTarget = route53.RecordTarget.fromAlias(
+        new route53Targets.CloudFrontTarget(apiDistribution),
       );
       new route53.ARecord(this, 'ApiAliasA', {
         zone,
         recordName: customDomain.apiDomain,
-        target: apiAliasTarget,
+        target: apiCloudFrontTarget,
       });
       new route53.AaaaRecord(this, 'ApiAliasAAAA', {
         zone,
         recordName: customDomain.apiDomain,
-        target: apiAliasTarget,
+        target: apiCloudFrontTarget,
       });
 
       new cdk.CfnOutput(this, 'ApiCustomUrl', {
         value: `https://${customDomain.apiDomain}`,
         exportName: `${stage}-ApiCustomUrl`,
       });
+      new cdk.CfnOutput(this, 'ApiDistributionUrl', {
+        value: `https://${apiDistribution.distributionDomainName}`,
+        exportName: `${stage}-ApiDistributionUrl`,
+      });
+      new cdk.CfnOutput(this, 'ApiDistributionId', {
+        value: apiDistribution.distributionId,
+        exportName: `${stage}-ApiDistributionId`,
+      });
+      new cdk.CfnOutput(this, 'ApiWebAclArn', {
+        value: webAcl.attrArn,
+        exportName: `${stage}-ApiWebAclArn`,
+      });
     }
+
+    // ---- Layer 5 — AWS Budgets (alert-only, no auto-action) ----
+    //
+    // IMPORTANT: these budgets are alert-only. Per the user's explicit
+    // instruction, NEVER add automated stop / IAM-deny actions here.
+    // If a future dev wants auto-deny, that's a separate, deliberate
+    // decision — uncommenting an "actions" array here without that
+    // discussion would silently disable the platform on a billing
+    // spike, which is much worse UX than getting an email.
+    //
+    // Budgets are a global service (no region) and free of charge.
+    // They live on the API stack purely for code locality with the
+    // other cost-protection layers.
+    new budgets.CfnBudget(this, 'SoftBudget', {
+      budget: {
+        budgetName: `drep-platform-${stage}-soft-monthly`,
+        budgetType: 'COST',
+        timeUnit: 'MONTHLY',
+        budgetLimit: { amount: 5, unit: 'USD' },
+        // includeCredit: false → measures gross spend before AWS credits.
+        costTypes: {
+          includeCredit: false,
+          includeRefund: false,
+          includeSubscription: true,
+          includeRecurring: true,
+          includeOtherSubscription: true,
+          includeSupport: true,
+          includeTax: true,
+          includeUpfront: true,
+          useBlended: false,
+          useAmortized: false,
+          includeDiscount: true,
+        },
+      },
+      // Alert-only — NO actions block.
+      notificationsWithSubscribers: [
+        {
+          notification: {
+            notificationType: 'ACTUAL',
+            comparisonOperator: 'GREATER_THAN',
+            threshold: 80,
+            thresholdType: 'PERCENTAGE',
+          },
+          subscribers: [
+            { subscriptionType: 'EMAIL', address: 'claude@rusch.me' },
+          ],
+        },
+        {
+          notification: {
+            notificationType: 'ACTUAL',
+            comparisonOperator: 'GREATER_THAN',
+            threshold: 100,
+            thresholdType: 'PERCENTAGE',
+          },
+          subscribers: [
+            { subscriptionType: 'EMAIL', address: 'claude@rusch.me' },
+          ],
+        },
+        {
+          notification: {
+            notificationType: 'ACTUAL',
+            comparisonOperator: 'GREATER_THAN',
+            threshold: 120,
+            thresholdType: 'PERCENTAGE',
+          },
+          subscribers: [
+            { subscriptionType: 'EMAIL', address: 'claude@rusch.me' },
+          ],
+        },
+      ],
+    });
+
+    new budgets.CfnBudget(this, 'HardBudget', {
+      budget: {
+        budgetName: `drep-platform-${stage}-hard-monthly`,
+        budgetType: 'COST',
+        timeUnit: 'MONTHLY',
+        budgetLimit: { amount: 20, unit: 'USD' },
+        costTypes: {
+          includeCredit: false,
+          includeRefund: false,
+          includeSubscription: true,
+          includeRecurring: true,
+          includeOtherSubscription: true,
+          includeSupport: true,
+          includeTax: true,
+          includeUpfront: true,
+          useBlended: false,
+          useAmortized: false,
+          includeDiscount: true,
+        },
+      },
+      // Alert-only — NO actions block. Same rationale as SoftBudget above.
+      notificationsWithSubscribers: [
+        {
+          notification: {
+            notificationType: 'ACTUAL',
+            comparisonOperator: 'GREATER_THAN',
+            threshold: 100,
+            thresholdType: 'PERCENTAGE',
+          },
+          subscribers: [
+            { subscriptionType: 'EMAIL', address: 'claude@rusch.me' },
+          ],
+        },
+      ],
+    });
   }
 }
