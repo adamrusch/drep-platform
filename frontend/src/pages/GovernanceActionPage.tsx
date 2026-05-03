@@ -8,6 +8,7 @@ import { CommentList } from '@/components/CommentList';
 import { CommentForm } from '@/components/CommentForm';
 import { SentimentBlock } from '@/components/SentimentBlock';
 import { Card } from '@/components/ui/Card';
+import { Markdown } from '@/components/ui/Markdown';
 import { Button } from '@/components/ui/Button';
 import { StatusPill } from '@/components/ui/StatusPill';
 import { CastVoteModal } from '@/components/governance/CastVoteModal';
@@ -53,7 +54,11 @@ function isSafeReferenceUri(uri: string): boolean {
   return /^(https?:|ipfs:)/i.test(uri);
 }
 
-/** Render multi-paragraph text safely as plain paragraphs (no HTML). */
+/** Render synthesized plain text — used only for the on-chain Description
+ *  fallback, which is a string we generate ourselves (not user content).
+ *  CIP anchor body fields (Abstract / Motivation / Rationale) flow through
+ *  the `Markdown` component instead, which sanitizes HTML and parses real
+ *  Markdown (headings, lists, links, code blocks). */
 function ProseBlock({ text }: { text: string }): React.ReactElement {
   const paragraphs = text.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
   if (paragraphs.length === 0) {
@@ -367,23 +372,23 @@ export function GovernanceActionPage(): React.ReactElement {
             )}
           </Card>
 
-          {/* Abstract */}
+          {/* Abstract — anchor body content; render as Markdown. */}
           {action.abstract && (
             <Card>
               <h2 className="font-semibold text-[15px] mb-2 text-[var(--text-primary)]">
                 Abstract
               </h2>
-              <ProseBlock text={action.abstract} />
+              <Markdown>{action.abstract}</Markdown>
             </Card>
           )}
 
-          {/* Motivation */}
+          {/* Motivation — anchor body content; render as Markdown. */}
           {action.motivation && (
             <Card>
               <h2 className="font-semibold text-[15px] mb-2 text-[var(--text-primary)]">
                 Motivation
               </h2>
-              <ProseBlock text={action.motivation} />
+              <Markdown>{action.motivation}</Markdown>
             </Card>
           )}
 
@@ -484,11 +489,11 @@ export function GovernanceActionPage(): React.ReactElement {
           />
         </Tabs.Content>
 
-        {/* RATIONALE */}
+        {/* RATIONALE — anchor body content; render as Markdown. */}
         <Tabs.Content value="rationale" className="space-y-4 focus-visible:outline-none">
           {action.rationale ? (
             <Card>
-              <ProseBlock text={action.rationale} />
+              <Markdown>{action.rationale}</Markdown>
             </Card>
           ) : (
             <Card>
