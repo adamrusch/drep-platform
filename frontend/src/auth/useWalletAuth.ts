@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react';
 import { post, get as apiGet, del as apiDelete } from '@/lib/api';
+import { ensureBech32Address } from '@/lib/cardanoAddress';
 import { useAuthStore } from '@/stores/authStore';
 import type { UserRole, SessionType, UserProfile } from '@/types';
 
@@ -46,17 +47,36 @@ export function useWalletAuth(): UseWalletAuthReturn {
       setError(null);
 
       try {
-        // 1. Get the wallet address (prefer stake address for signing)
+        // 1. Get the wallet address (prefer stake address for signing).
+        //
+        // ⚠ Critical: per CIP-30 §5, both `getRewardAddresses` and
+        // `getUsedAddresses` return hex-encoded raw bytes (or CBOR-wrapped
+        // hex per the spec, though no major wallet does that in practice).
+        // Our backend's `/auth/challenge` validates bech32 (`addr…` /
+        // `stake…`), so we MUST convert before posting. See
+        // `lib/cardanoAddress.ts` for the codec rationale.
         const rewardAddresses = await walletApi.getRewardAddresses();
         const usedAddresses = await walletApi.getUsedAddresses();
-        const walletAddress =
-          rewardAddresses[0] ?? usedAddresses[0];
+        const rawAddress = rewardAddresses[0] ?? usedAddresses[0];
 
-        if (!walletAddress) {
+        if (!rawAddress) {
           throw new Error('No wallet address found. Ensure your wallet is unlocked.');
         }
 
-        // 2. Request challenge from backend
+        let walletAddress: string;
+        try {
+          walletAddress = ensureBech32Address(rawAddress);
+        } catch (err) {
+          // The wallet returned something we can't decode. Log the raw
+          // value to the console for debugging without leaking it into
+          // the user-facing toast.
+          console.error('CIP-30 address decode failed:', { rawAddress, err });
+          throw new Error(
+            'Wallet returned an address we could not decode. Try a different account or wallet.',
+          );
+        }
+
+        // 2. Request challenge from backend (bech32 form — backend validates).
         const challenge = await post<ChallengeResponse>('/auth/challenge', {
           walletAddress,
         });
@@ -64,8 +84,11 @@ export function useWalletAuth(): UseWalletAuthReturn {
         // 3. Convert message to hex for CIP-30 signData
         const messageHex = Buffer.from(challenge.message, 'utf-8').toString('hex');
 
-        // 4. Sign with wallet (CIP-30)
-        const { signature, key } = await walletApi.signData(walletAddress, messageHex);
+        // 4. Sign with wallet (CIP-30 §5 specifies the `addr` argument as a
+        // hex-encoded raw-bytes string — the same shape the wallet returned
+        // from `getRewardAddresses`. Passing bech32 may fail address-match
+        // verification on some wallets. Use the original hex form here.)
+        const { signature, key } = await walletApi.signData(rawAddress, messageHex);
 
         // 5. Verify signature with backend
         const authResult = await post<VerifyResponse>('/auth/verify', {
