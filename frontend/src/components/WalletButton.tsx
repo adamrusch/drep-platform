@@ -27,8 +27,32 @@ export function WalletButton({ className }: WalletButtonProps): React.ReactEleme
       if (!cardano) throw new Error('No Cardano wallet found');
       const connector = cardano[walletName];
       if (!connector) throw new Error(`Wallet "${walletName}" is not installed`);
+
+      // Pre-flight: many CIP-30 wallets (notably Eternl) silently return
+      // null from `enable()` if the extension is locked, instead of throwing.
+      // `isEnabled()` lets us surface a clear error before the user faces a
+      // mystery silent failure. We don't gate connect on it (some wallets
+      // don't implement isEnabled), it's a best-effort hint.
+      let alreadyEnabled: boolean | null = null;
+      if (typeof connector.isEnabled === 'function') {
+        try {
+          alreadyEnabled = await connector.isEnabled();
+        } catch {
+          alreadyEnabled = null;
+        }
+      }
+
       const api = await connector.enable();
-      if (!api) throw new Error('Failed to connect wallet');
+      if (!api) {
+        // Silent null is the wallet's way of saying "I rejected the request"
+        // without firing a proper error. Three common root causes — surface
+        // them so the user knows what to check.
+        const niceName = walletName.charAt(0).toUpperCase() + walletName.slice(1);
+        const hint = alreadyEnabled === false
+          ? `${niceName} returned no API — the wallet is likely locked. Open the ${niceName} extension, unlock it, and try again.`
+          : `${niceName} did not return an API. Check that ${niceName} is unlocked, on the correct network (${CARDANO_NETWORK}), and that drep.tools is authorized in the extension's Connected dApps list.`;
+        throw new Error(hint);
+      }
 
       // CIP-30 returns 1 for mainnet, 0 for testnets (preprod/preview).
       // Enforce mainnet to prevent users from accidentally connecting on the
