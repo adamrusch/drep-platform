@@ -141,6 +141,18 @@ export function GovernanceActionCard({
               title="Title and abstract sourced from gov.tools proposal-discussion forum (no on-chain anchor)"
             />
           )}
+          {/* Yellow "Hash mismatch" pill: the off-chain body was retrievable
+              and is shown on the detail page, but its bytes don't hash-match
+              the on-chain anchor. Always render on the list card so the user
+              sees the integrity caveat without having to click through. See
+              GovernanceActionPage.tsx for the longer tooltip on the detail page. */}
+          {action.anchorHashMismatch && (
+            <StatusPill
+              status="warning"
+              label="Hash mismatch"
+              title="The on-chain anchor hash doesn't match the served content. The content is shown for reference but its integrity cannot be cryptographically verified."
+            />
+          )}
         </div>
         {action.anchorUrl ? (
           <a

@@ -80,6 +80,25 @@ export interface GovernanceAction {
    *  anchor body via the IPFS multi-gateway fallback. Undefined for rows
    *  that never needed the fallback. */
   metadataRecoveredAt?: string;
+  /** True when the IPFS body was reachable but its blake2b-256 did NOT
+   *  match the on-chain `meta_hash`. The content is still surfaced (so the
+   *  user sees the proposer's actual published copy), but `anchorVerified`
+   *  is forced to false and the UI renders a "Hash mismatch" warning. Only
+   *  set on rows where every reachable gateway returned the same wrong-
+   *  hash body — i.e. the body is presumed authoritative-but-mismatched
+   *  (proposer published mismatched content) rather than tampered-with. */
+  anchorHashMismatch?: boolean;
+  /** Short git SHA (10 hex chars) of the historical commit from which we
+   *  recovered this anchor body via the `raw.githubusercontent.com`
+   *  history walk. Set only when the current branch ref no longer serves
+   *  the right bytes (file was moved/deleted/edited) but a prior commit
+   *  does. Hash IS verified on the historical bytes — `anchorVerified`
+   *  stays true on these rows. */
+  anchorRecoveredFromCommit?: string;
+  /** ISO-8601 commit date of the historical commit identified by
+   *  `anchorRecoveredFromCommit`. Surfaces the audit trail: the user sees
+   *  when the bytes they're reading were committed. */
+  anchorRecoveredFromCommitDate?: string;
   // ---- On-chain summary (built from governance_description) ----
   summary?: string;
   details?: GovernanceDetail[];
@@ -614,6 +633,15 @@ export interface GovernanceActionItem {
   /** ISO timestamp of the IPFS fallback recovery. See
    *  `GovernanceAction.metadataRecoveredAt`. */
   metadataRecoveredAt?: string;
+  /** True when IPFS served content whose hash didn't match the on-chain
+   *  anchor hash. See `GovernanceAction.anchorHashMismatch`. */
+  anchorHashMismatch?: boolean;
+  /** Short git SHA (10 hex chars) of the historical commit identified by
+   *  the GitHub history-walk fallback. See
+   *  `GovernanceAction.anchorRecoveredFromCommit`. */
+  anchorRecoveredFromCommit?: string;
+  /** ISO-8601 date of that historical commit. */
+  anchorRecoveredFromCommitDate?: string;
   // ---- On-chain summary ----
   summary?: string;
   details?: GovernanceDetail[];
