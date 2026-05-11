@@ -230,11 +230,34 @@ export function GovernanceActionPage(): React.ReactElement {
         </div>
         {/* Title slot: anchor title in bold; italic muted placeholder when
             absent. The synthesized on-chain summary lives below as a
-            subtitle in either case. */}
+            subtitle in either case. When the anchor URL is present but the
+            body content is unreachable (Koios + multi-gateway IPFS fallback
+            both failed) we surface a more honest "Metadata unavailable"
+            label plus a direct link to the raw anchor URL so users can try
+            themselves. */}
         {title ? (
           <h1 className="text-[26px] font-bold leading-tight tracking-tight text-[var(--text-primary)]">
             {title}
           </h1>
+        ) : action.anchorUrl ? (
+          <div className="flex items-baseline gap-2 flex-wrap">
+            <h1
+              className="text-[20px] italic font-medium leading-tight text-[var(--text-tertiary)]"
+              title="The on-chain anchor exists but its body could not be retrieved from any public IPFS gateway."
+            >
+              Metadata unavailable
+            </h1>
+            <a
+              href={action.anchorUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-[12px] text-[var(--text-tertiary)] hover:text-[var(--brand-primary)] hover:underline"
+              title={action.anchorUrl}
+            >
+              View anchor URL
+              <ExternalLink size={11} strokeWidth={2} aria-hidden="true" />
+            </a>
+          </div>
         ) : (
           <h1 className="text-[20px] italic font-medium leading-tight text-[var(--text-tertiary)]">
             (No off-chain metadata)
