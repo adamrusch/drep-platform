@@ -62,6 +62,15 @@ export interface GovernanceAction {
   proposalPillarId?: number;
   /** Indicates which off-chain source produced the displayed metadata. */
   metadataSource?: GovernanceMetadataSource;
+  /** Public IPFS gateway URL (e.g. `https://ipfs.io/ipfs/Qm…`) that served
+   *  the hash-verified anchor body when Koios's internal gateway couldn't
+   *  retrieve it. Undefined on the happy path (Koios sufficed) and on rows
+   *  where every public gateway also failed. */
+  metadataGateway?: string;
+  /** ISO timestamp of the sync cycle that recovered the anchor body via
+   *  the IPFS multi-gateway fallback. Undefined for rows that didn't need
+   *  the fallback. */
+  metadataRecoveredAt?: string;
   // ---- On-chain summary (built from governance_description) ----
   summary?: string;
   details?: GovernanceDetail[];

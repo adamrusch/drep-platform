@@ -43,6 +43,11 @@ interface GovernanceStats {
   byStatus: Record<string, number>;
   /** Counts bucketed by `actionType`. Same dropping rule as `byStatus`. */
   byType: Record<string, number>;
+  /** Counts bucketed by `metadataSource`. Keys are `on-chain-anchor` /
+   *  `proposal-pillar` / `none`. Surfaces metadata-coverage health: a
+   *  growing `none` bucket means more anchors we can't retrieve, which
+   *  the multi-gateway IPFS fallback is intended to keep at zero. */
+  byMetadataSource: Record<string, number>;
   /** Sum of `treasuryWithdrawalLovelace` across ENACTED TreasuryWithdrawals
    *  ONLY. Active / dropped / expired treasury withdrawals haven't moved
    *  any ADA — including them would overstate the figure. Stringified
@@ -73,6 +78,7 @@ async function computeStats(): Promise<GovernanceStats> {
   let total = 0;
   const byStatus: Record<string, number> = {};
   const byType: Record<string, number> = {};
+  const byMetadataSource: Record<string, number> = {};
   let treasuryWithdrawnLovelace = 0n;
   let earliest: string | undefined;
   let latest: string | undefined;
@@ -83,7 +89,7 @@ async function computeStats(): Promise<GovernanceStats> {
   do {
     const result = await scanItems<GovernanceActionItem>(tableNames.governanceActions, {
       projectionExpression:
-        '#status, actionType, submittedAt, treasuryWithdrawalLovelace',
+        '#status, actionType, submittedAt, treasuryWithdrawalLovelace, metadataSource',
       expressionAttributeNames: { '#status': 'status' },
       ...(exclusiveStartKey ? { exclusiveStartKey } : {}),
     });
@@ -100,6 +106,15 @@ async function computeStats(): Promise<GovernanceStats> {
       if (actionType) {
         byType[actionType] = (byType[actionType] ?? 0) + 1;
       }
+
+      // Coverage bucket. Older rows without a `metadataSource` stamp (synced
+      // before enrichmentVersion 5) collapse into a `legacy` bucket rather
+      // than `none` — they may have valid body fields, just no source tag.
+      const metadataSource =
+        typeof item.metadataSource === 'string' && item.metadataSource.length > 0
+          ? item.metadataSource
+          : 'legacy';
+      byMetadataSource[metadataSource] = (byMetadataSource[metadataSource] ?? 0) + 1;
 
       // Treasury sum: include ONLY enacted TreasuryWithdrawals. Active
       // withdrawals haven't been ratified, dropped/expired ones never will
@@ -140,6 +155,7 @@ async function computeStats(): Promise<GovernanceStats> {
     total,
     byStatus,
     byType,
+    byMetadataSource,
     treasuryWithdrawnLovelace: treasuryWithdrawnLovelace.toString(),
     earliestSubmittedAt: earliest,
     latestSubmittedAt: latest,

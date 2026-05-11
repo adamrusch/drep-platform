@@ -10,9 +10,11 @@ import {
   mapBlockfrostProposalToGovernanceAction,
   mapKoiosProposalToGovernanceAction,
   mapStatus,
+  parseCip108Body,
   type AnchorContent,
   type BlockfrostProposal,
 } from '../lib/blockfrost';
+import { extractIpfsCid, fetchIpfsAnchor } from '../lib/ipfsGateway';
 import {
   listProposals as listKoiosProposals,
   listActiveDReps,
@@ -152,8 +154,22 @@ const ITEM_CONCURRENCY = 4;
  * `koiosVotesToBlockfrostShape`. Bumping the version forces re-tally on
  * the next sync so any rows still carrying a Blockfrost-derived tally
  * get re-stamped from the Koios source.
+ * v11 → v12: multi-gateway IPFS fallback for the ~7 mainnet actions whose
+ * on-chain anchor exists but whose `meta_json` came back null from Koios
+ * (Koios runs a single internal IPFS gateway, and several broken CIDs
+ * aren't routable from that node). When the Koios record has a
+ * `meta_url` + `meta_hash` but null `meta_json`, we try a short list of
+ * public IPFS gateways (`ipfs.io`, Pinata, dweb.link, …) in series,
+ * blake2b-256-verify the response against the on-chain hash, and parse
+ * the recovered body through `parseCip108Body`. Recovered rows are
+ * stamped with `metadataGateway` (which gateway URL succeeded) and
+ * `metadataRecoveredAt` (ISO timestamp). The 24h ENRICHMENT_TTL_MS
+ * already gates the retry rate: a permanently-lost CID produces at most
+ * 1 attempt per row per day, not 1 per minute. Bumping the version
+ * forces all rows to re-run cold enrichment so the recovery pass lands
+ * on the next sync.
  */
-const ENRICHMENT_VERSION = 11;
+const ENRICHMENT_VERSION = 12;
 
 /**
  * Deep equality on two governance action rows, ignoring the volatile
@@ -495,11 +511,91 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
           votes = buildTallyFromKoiosVotes(koiosVotes, lookupBundle, actionType);
         }
 
+        // Holders for the IPFS-fallback recovery state. Populated only when
+        // Koios returned an anchor URL/hash but null `meta_json` and a public
+        // gateway successfully served + hash-verified the body.
+        let metadataGateway: string | undefined;
+        let metadataRecoveredAt: string | undefined;
+
         if (koiosRecord) {
           // ---- Koios fast path ----
           // Bulk listing already gave us metadata, on-chain description,
           // submittedAt, anchor URL/hash/validity, and lifecycle epochs.
           mapped = mapKoiosProposalToGovernanceAction(koiosRecord, currentEpoch, { votes });
+
+          // ---- IPFS fallback recovery (Phase A2) ----
+          // When Koios has the anchor pointer but couldn't fetch/validate the
+          // body, try public IPFS gateways ourselves. Only attempt when:
+          //   - The mapped body is empty (no title AND no abstract / motivation
+          //     / rationale parsed — i.e. Koios returned null `meta_json`).
+          //   - The anchor has a URL we can extract a CID from, AND
+          //   - The anchor has a hash we can verify against.
+          // The 24h enrichment-fresh window means a failed recovery won't
+          // re-fire for 24 hours — so a permanently-lost CID costs us
+          // ~6 gateway hits per day, not per minute.
+          const koiosBodyMissing =
+            !mapped.title &&
+            !mapped.abstract &&
+            !mapped.motivation &&
+            !mapped.rationale;
+          if (
+            koiosBodyMissing &&
+            typeof koiosRecord.meta_url === 'string' &&
+            typeof koiosRecord.meta_hash === 'string'
+          ) {
+            const cid = extractIpfsCid(koiosRecord.meta_url);
+            if (cid) {
+              const recovered = await fetchIpfsAnchor(cid, koiosRecord.meta_hash);
+              if (recovered) {
+                let parsedJson: Record<string, unknown> | null = null;
+                try {
+                  const candidate = JSON.parse(recovered.body) as unknown;
+                  if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+                    parsedJson = candidate as Record<string, unknown>;
+                  }
+                } catch {
+                  // Body wasn't JSON — treat as recoverable-but-not-CIP-108.
+                  // No body fields to populate; just record the gateway that
+                  // served it so a future debug pass can inspect.
+                }
+                if (parsedJson) {
+                  const cip108 = parseCip108Body(parsedJson);
+                  // Overlay recovered CIP-108 fields onto the mapped record.
+                  // Only fill fields the on-chain anchor body is the canonical
+                  // source for; description (which falls back to the on-chain
+                  // summary) is re-derived from the recovered body fields.
+                  mapped = {
+                    ...mapped,
+                    title: cip108.title ?? mapped.title,
+                    abstract: cip108.abstract ?? mapped.abstract,
+                    motivation: cip108.motivation ?? mapped.motivation,
+                    rationale: cip108.rationale ?? mapped.rationale,
+                    references: cip108.references ?? mapped.references,
+                    links: cip108.references?.map((r) => r.uri) ?? mapped.links,
+                    // The hash matched — we KNOW this body is the on-chain
+                    // anchor verbatim. Surface that to the UI verification pill.
+                    anchorVerified: true,
+                    description:
+                      cip108.abstract ??
+                      cip108.motivation ??
+                      cip108.rationale ??
+                      mapped.description,
+                  };
+                }
+                metadataGateway = recovered.gatewayUsed;
+                metadataRecoveredAt = now;
+                console.log(
+                  `IPFS fallback recovered: actionId=${actionId} cid=${cid} ` +
+                    `gateway=${recovered.gatewayUsed} bodyLen=${recovered.body.length}`,
+                );
+              } else {
+                console.log(
+                  `IPFS fallback failed: actionId=${actionId} cid=${cid} ` +
+                    `(no public gateway returned hash-matching body)`,
+                );
+              }
+            }
+          }
         } else {
           // ---- Legacy Blockfrost fallback ----
           // Koios was unreachable OR didn't carry this specific action.
@@ -604,6 +700,14 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
           proposalPillarUrl: pillarEntry?.proposalPillarUrl,
           proposalPillarId: pillarEntry?.id,
           metadataSource,
+          // Populated only when the IPFS multi-gateway fallback recovered a
+          // body that Koios couldn't fetch. `metadataGateway` is the full
+          // gateway URL that served the bytes; `metadataRecoveredAt` is when
+          // we succeeded. Both undefined on the happy path (Koios sufficed)
+          // and on persistent-failure rows.
+          metadataGateway: metadataGateway ?? (existing?.metadataGateway as string | undefined),
+          metadataRecoveredAt:
+            metadataRecoveredAt ?? (existing?.metadataRecoveredAt as string | undefined),
           summary: mapped.summary,
           details: mapped.details,
           proposerAddress: mapped.proposerAddress,
