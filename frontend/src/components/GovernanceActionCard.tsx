@@ -171,10 +171,21 @@ export function GovernanceActionCard({
         )}
       </div>
 
-      {/* Title slot — bold when present, italic muted placeholder otherwise. */}
+      {/* Title slot — bold when present, italic muted placeholder otherwise.
+          When the anchor URL is set but its body couldn't be retrieved
+          (Koios + IPFS multi-gateway fallback both failed) we surface a
+          more honest "Metadata unavailable" label; the Metadata link in
+          the header row already lets users try the raw anchor themselves. */}
       {hasTitle ? (
         <h3 className="font-semibold text-[15px] leading-snug line-clamp-2 text-[var(--text-primary)] tracking-tight">
           {action.title}
+        </h3>
+      ) : action.anchorUrl ? (
+        <h3
+          className="text-[14px] italic leading-snug text-[var(--text-tertiary)]"
+          title="The on-chain anchor exists but its body could not be retrieved from any public IPFS gateway."
+        >
+          Metadata unavailable
         </h3>
       ) : (
         <h3 className="text-[14px] italic leading-snug text-[var(--text-tertiary)]">

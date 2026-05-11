@@ -71,6 +71,15 @@ export interface GovernanceAction {
    *  Useful for the UI to render a "Discussion forum" pill when a
    *  proposal-pillar fallback was used. */
   metadataSource?: GovernanceMetadataSource;
+  /** Public IPFS gateway URL (e.g. `https://ipfs.io/ipfs/Qm…`) that served
+   *  the hash-verified anchor body when Koios's internal gateway couldn't
+   *  retrieve it. Undefined on the happy path (Koios sufficed) and on rows
+   *  where every gateway failed. Informational/debug only. */
+  metadataGateway?: string;
+  /** ISO-8601 timestamp of the sync cycle that successfully recovered this
+   *  anchor body via the IPFS multi-gateway fallback. Undefined for rows
+   *  that never needed the fallback. */
+  metadataRecoveredAt?: string;
   // ---- On-chain summary (built from governance_description) ----
   summary?: string;
   details?: GovernanceDetail[];
@@ -599,6 +608,12 @@ export interface GovernanceActionItem {
   proposalPillarUrl?: string;
   proposalPillarId?: number;
   metadataSource?: GovernanceMetadataSource;
+  /** Gateway URL of the IPFS fallback hit that produced this row's body.
+   *  See `GovernanceAction.metadataGateway`. */
+  metadataGateway?: string;
+  /** ISO timestamp of the IPFS fallback recovery. See
+   *  `GovernanceAction.metadataRecoveredAt`. */
+  metadataRecoveredAt?: string;
   // ---- On-chain summary ----
   summary?: string;
   details?: GovernanceDetail[];
