@@ -14,7 +14,11 @@ import {
   type AnchorContent,
   type BlockfrostProposal,
 } from '../lib/blockfrost';
-import { extractIpfsCid, fetchIpfsAnchor } from '../lib/ipfsGateway';
+import {
+  extractIpfsCid,
+  fetchIpfsAnchor,
+  fetchGithubHistoricalAnchor,
+} from '../lib/ipfsGateway';
 import {
   listProposals as listKoiosProposals,
   listActiveDReps,
@@ -168,8 +172,34 @@ const ITEM_CONCURRENCY = 4;
  * 1 attempt per row per day, not 1 per minute. Bumping the version
  * forces all rows to re-run cold enrichment so the recovery pass lands
  * on the next sync.
+ * v12 → v13: two extra fallback techniques for the last 2 mainnet
+ * holdouts whose body Koios couldn't fetch and whose IPFS multi-gateway
+ * walk failed in v12.
+ *   (a) IPFS hash-mismatch surfacing. When every reachable public gateway
+ *       returns the same body and that body does NOT hash-match the on-
+ *       chain anchor hash, we now still surface the content with
+ *       `anchorVerified: false` and a new `anchorHashMismatch: true` flag.
+ *       Rationale: some proposers (joke proposals, copy-paste errors)
+ *       publish mismatched content. CIP-1694 doesn't require us to hide
+ *       it; it just means we can't attest to chain integrity. The UI
+ *       renders a prominent "Hash mismatch" warning. Recovers the HOSKY
+ *       Hard Fork proposal from governance day 1.
+ *   (b) `raw.githubusercontent.com` historical-commit walk. When the
+ *       anchor URL is a branch-ref github raw URL (e.g. `…/refs/heads/main/
+ *       path/to/file`) and the current bytes don't hash-match (or 404),
+ *       we walk that file's commit history via the GitHub Commits API
+ *       and return the first commit whose blob hash-matches the on-chain
+ *       anchor. Hash IS verified on the historical bytes, so
+ *       `anchorVerified` stays true. Rows recovered this way carry
+ *       `anchorRecoveredFromCommit` (short SHA) and
+ *       `anchorRecoveredFromCommitDate`. Recovers the ICC PPU October
+ *       2024 action whose file was moved by commit `c221c0f6f6` ("change
+ *       path for existing action to break rendering") but whose parent
+ *       `cd7bccf0e4` still has the right bytes.
+ * Bumping the version forces all rows to re-run cold enrichment so the
+ * new recovery paths land on the next sync.
  */
-const ENRICHMENT_VERSION = 12;
+const ENRICHMENT_VERSION = 13;
 
 /**
  * Deep equality on two governance action rows, ignoring the volatile
@@ -511,11 +541,15 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
           votes = buildTallyFromKoiosVotes(koiosVotes, lookupBundle, actionType);
         }
 
-        // Holders for the IPFS-fallback recovery state. Populated only when
-        // Koios returned an anchor URL/hash but null `meta_json` and a public
-        // gateway successfully served + hash-verified the body.
+        // Holders for the fallback-recovery audit fields. Populated only when
+        // a fallback technique successfully (or, for hash-mismatch, partially)
+        // recovered the off-chain body that Koios couldn't fetch. See the
+        // v12 / v13 ENRICHMENT_VERSION notes above for the per-field meaning.
         let metadataGateway: string | undefined;
         let metadataRecoveredAt: string | undefined;
+        let anchorHashMismatch: boolean | undefined;
+        let anchorRecoveredFromCommit: string | undefined;
+        let anchorRecoveredFromCommitDate: string | undefined;
 
         if (koiosRecord) {
           // ---- Koios fast path ----
@@ -523,16 +557,33 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
           // submittedAt, anchor URL/hash/validity, and lifecycle epochs.
           mapped = mapKoiosProposalToGovernanceAction(koiosRecord, currentEpoch, { votes });
 
-          // ---- IPFS fallback recovery (Phase A2) ----
+          // ---- Anchor-fallback chain (Koios body was missing) ----
+          //
           // When Koios has the anchor pointer but couldn't fetch/validate the
-          // body, try public IPFS gateways ourselves. Only attempt when:
-          //   - The mapped body is empty (no title AND no abstract / motivation
-          //     / rationale parsed — i.e. Koios returned null `meta_json`).
-          //   - The anchor has a URL we can extract a CID from, AND
+          // body, we run a layered fallback chain. Each technique covers a
+          // different failure mode of the off-chain transport:
+          //   1. IPFS hash-match — Koios couldn't route the CID but a public
+          //      gateway can. Body bytes hash-verify against the on-chain
+          //      anchor hash. Canonical, anchorVerified=true.
+          //   2. IPFS hash-mismatch — every reachable gateway returned the
+          //      SAME body whose hash differs from the on-chain hash. The
+          //      proposer published mismatched content (joke proposal,
+          //      copy-paste error). Surface it with anchorVerified=false and
+          //      anchorHashMismatch=true so the UI renders a clear warning.
+          //   3. GitHub commit-walk — anchor URL is on raw.githubusercontent.com
+          //      with a branch ref. The file was edited after submission; we
+          //      walk the file's commit history and return the first commit
+          //      whose blob hash-matches. anchorVerified=true (the historical
+          //      bytes hashed correctly).
+          //
+          // Only attempt when:
+          //   - The mapped body is empty (no title AND no abstract/motivation/
+          //     rationale parsed — i.e. Koios returned null `meta_json`), AND
+          //   - The anchor has a URL we can route, AND
           //   - The anchor has a hash we can verify against.
           // The 24h enrichment-fresh window means a failed recovery won't
-          // re-fire for 24 hours — so a permanently-lost CID costs us
-          // ~6 gateway hits per day, not per minute.
+          // re-fire for 24 hours — so a permanently-lost anchor costs us
+          // at most one walk per row per day, not one per minute.
           const koiosBodyMissing =
             !mapped.title &&
             !mapped.abstract &&
@@ -543,27 +594,45 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
             typeof koiosRecord.meta_url === 'string' &&
             typeof koiosRecord.meta_hash === 'string'
           ) {
-            const cid = extractIpfsCid(koiosRecord.meta_url);
+            const metaUrl = koiosRecord.meta_url;
+            const metaHash = koiosRecord.meta_hash;
+
+            // ---- Technique 1+2: IPFS gateway walk ----
+            // Returns null only if no gateway is reachable AT ALL. A
+            // non-null result carries `hashMatch: true|false` so we branch
+            // here. The function itself handles the multi-gateway walk +
+            // mismatch surfacing logic.
+            const cid = extractIpfsCid(metaUrl);
+            let recovered: { applied: boolean } = { applied: false };
             if (cid) {
-              const recovered = await fetchIpfsAnchor(cid, koiosRecord.meta_hash);
-              if (recovered) {
+              const ipfsRes = await fetchIpfsAnchor(cid, metaHash);
+              if (ipfsRes) {
                 let parsedJson: Record<string, unknown> | null = null;
                 try {
-                  const candidate = JSON.parse(recovered.body) as unknown;
+                  const candidate = JSON.parse(ipfsRes.body) as unknown;
                   if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
                     parsedJson = candidate as Record<string, unknown>;
                   }
                 } catch {
                   // Body wasn't JSON — treat as recoverable-but-not-CIP-108.
-                  // No body fields to populate; just record the gateway that
-                  // served it so a future debug pass can inspect.
+                  // No body fields to populate; the gateway audit fields
+                  // still get stamped so a future debug pass can inspect.
                 }
                 if (parsedJson) {
-                  const cip108 = parseCip108Body(parsedJson);
-                  // Overlay recovered CIP-108 fields onto the mapped record.
-                  // Only fill fields the on-chain anchor body is the canonical
-                  // source for; description (which falls back to the on-chain
-                  // summary) is re-derived from the recovered body fields.
+                  // parseCip108Body itself swallows malformed-shape errors
+                  // (returns {}), but wrap defensively per the holdout
+                  // rationale: the HOSKY body is well-formed but exotic
+                  // proposals might not be.
+                  let cip108;
+                  try {
+                    cip108 = parseCip108Body(parsedJson);
+                  } catch (err) {
+                    console.warn(
+                      `parseCip108Body threw on recovered body for ${actionId}:`,
+                      err,
+                    );
+                    cip108 = {} as ReturnType<typeof parseCip108Body>;
+                  }
                   mapped = {
                     ...mapped,
                     title: cip108.title ?? mapped.title,
@@ -572,8 +641,80 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
                     rationale: cip108.rationale ?? mapped.rationale,
                     references: cip108.references ?? mapped.references,
                     links: cip108.references?.map((r) => r.uri) ?? mapped.links,
-                    // The hash matched — we KNOW this body is the on-chain
-                    // anchor verbatim. Surface that to the UI verification pill.
+                    // When the hash matched we know the bytes are the
+                    // on-chain anchor verbatim — verified=true. When it
+                    // didn't match we surface the content but FORCE
+                    // verified=false so the UI's verification pill is
+                    // honest. anchorHashMismatch is the more specific flag.
+                    anchorVerified: ipfsRes.hashMatch,
+                    description:
+                      cip108.abstract ??
+                      cip108.motivation ??
+                      cip108.rationale ??
+                      mapped.description,
+                  };
+                }
+                metadataGateway = ipfsRes.gatewayUsed;
+                metadataRecoveredAt = now;
+                if (!ipfsRes.hashMatch) {
+                  anchorHashMismatch = true;
+                }
+                recovered.applied = true;
+                console.log(
+                  `IPFS fallback ${ipfsRes.hashMatch ? 'recovered' : 'recovered (HASH MISMATCH)'}: ` +
+                    `actionId=${actionId} cid=${cid} gateway=${ipfsRes.gatewayUsed} ` +
+                    `bodyLen=${ipfsRes.body.length} computedHash=${ipfsRes.computedHash}`,
+                );
+              } else {
+                console.log(
+                  `IPFS fallback failed: actionId=${actionId} cid=${cid} ` +
+                    `(no public gateway reachable)`,
+                );
+              }
+            }
+
+            // ---- Technique 3: GitHub historical-commit walk ----
+            // Only attempt when the IPFS path didn't surface anything (no
+            // body parsed). If IPFS got us a body — even a hash-mismatched
+            // one — we keep that result; running the GitHub walk on top
+            // would mostly be wasted requests for non-github URLs.
+            if (
+              !recovered.applied &&
+              /^https?:\/\/raw\.githubusercontent\.com\//i.test(metaUrl)
+            ) {
+              const gh = await fetchGithubHistoricalAnchor(metaUrl, metaHash);
+              if (gh) {
+                let parsedJson: Record<string, unknown> | null = null;
+                try {
+                  const candidate = JSON.parse(gh.body) as unknown;
+                  if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+                    parsedJson = candidate as Record<string, unknown>;
+                  }
+                } catch {
+                  // Same defensive note as the IPFS branch.
+                }
+                if (parsedJson) {
+                  let cip108;
+                  try {
+                    cip108 = parseCip108Body(parsedJson);
+                  } catch (err) {
+                    console.warn(
+                      `parseCip108Body threw on GitHub-historical body for ${actionId}:`,
+                      err,
+                    );
+                    cip108 = {} as ReturnType<typeof parseCip108Body>;
+                  }
+                  mapped = {
+                    ...mapped,
+                    title: cip108.title ?? mapped.title,
+                    abstract: cip108.abstract ?? mapped.abstract,
+                    motivation: cip108.motivation ?? mapped.motivation,
+                    rationale: cip108.rationale ?? mapped.rationale,
+                    references: cip108.references ?? mapped.references,
+                    links: cip108.references?.map((r) => r.uri) ?? mapped.links,
+                    // The HISTORICAL bytes hash-matched, so anchor IS
+                    // verified — we attest the bytes the user reads are
+                    // the bytes the on-chain hash committed to.
                     anchorVerified: true,
                     description:
                       cip108.abstract ??
@@ -582,16 +723,18 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
                       mapped.description,
                   };
                 }
-                metadataGateway = recovered.gatewayUsed;
+                anchorRecoveredFromCommit = gh.commitSha.slice(0, 10);
+                anchorRecoveredFromCommitDate = gh.commitDate;
                 metadataRecoveredAt = now;
+                recovered.applied = true;
                 console.log(
-                  `IPFS fallback recovered: actionId=${actionId} cid=${cid} ` +
-                    `gateway=${recovered.gatewayUsed} bodyLen=${recovered.body.length}`,
+                  `GitHub history fallback recovered: actionId=${actionId} ` +
+                    `commit=${gh.commitSha.slice(0, 10)} commitDate=${gh.commitDate} ` +
+                    `bodyLen=${gh.body.length}`,
                 );
               } else {
                 console.log(
-                  `IPFS fallback failed: actionId=${actionId} cid=${cid} ` +
-                    `(no public gateway returned hash-matching body)`,
+                  `GitHub history fallback failed: actionId=${actionId} url=${metaUrl}`,
                 );
               }
             }
@@ -708,6 +851,22 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
           metadataGateway: metadataGateway ?? (existing?.metadataGateway as string | undefined),
           metadataRecoveredAt:
             metadataRecoveredAt ?? (existing?.metadataRecoveredAt as string | undefined),
+          // v13 fallback-audit fields. `anchorHashMismatch` is true ONLY on
+          // rows where the IPFS body was reachable but the bytes' hash
+          // disagreed with the on-chain anchor (proposer published mismatched
+          // content). `anchorRecoveredFromCommit` (+ date) is set ONLY on
+          // rows recovered via the GitHub historical-commit walk. All three
+          // are preserved from the existing row on cycles where the cold
+          // path didn't re-fire (so once recovered, the row keeps the audit
+          // trail until something invalidates it).
+          anchorHashMismatch:
+            anchorHashMismatch ?? (existing?.anchorHashMismatch as boolean | undefined),
+          anchorRecoveredFromCommit:
+            anchorRecoveredFromCommit ??
+            (existing?.anchorRecoveredFromCommit as string | undefined),
+          anchorRecoveredFromCommitDate:
+            anchorRecoveredFromCommitDate ??
+            (existing?.anchorRecoveredFromCommitDate as string | undefined),
           summary: mapped.summary,
           details: mapped.details,
           proposerAddress: mapped.proposerAddress,

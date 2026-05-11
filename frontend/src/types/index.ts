@@ -71,6 +71,22 @@ export interface GovernanceAction {
    *  the IPFS multi-gateway fallback. Undefined for rows that didn't need
    *  the fallback. */
   metadataRecoveredAt?: string;
+  /** True when IPFS served body content but its blake2b-256 hash did NOT
+   *  match the on-chain `anchorHash`. The body is surfaced for the user but
+   *  cryptographically unverifiable. `anchorVerified` is forced to false on
+   *  these rows. UI renders a distinct "Hash mismatch" warning (vs the
+   *  green "Anchor verified" badge). */
+  anchorHashMismatch?: boolean;
+  /** Short git SHA (10 hex chars) of the historical commit from which the
+   *  anchor body was recovered. Set only when the `raw.githubusercontent.com`
+   *  history-walk fallback ran — the current branch ref served the wrong
+   *  bytes (file moved/deleted/edited) but a prior commit hash-matched.
+   *  `anchorVerified` stays true because we verified the historical bytes. */
+  anchorRecoveredFromCommit?: string;
+  /** ISO-8601 commit date of the historical commit identified by
+   *  `anchorRecoveredFromCommit`. The UI surfaces it so the user can see
+   *  when the bytes they're reading were committed. */
+  anchorRecoveredFromCommitDate?: string;
   // ---- On-chain summary (built from governance_description) ----
   summary?: string;
   details?: GovernanceDetail[];
