@@ -176,7 +176,25 @@ export function GovernanceActionPage(): React.ReactElement {
             status={action.status}
             label={action.adminOverrideLabel ?? undefined}
           />
-          {hasAnchorIndicator && action.anchorVerified ? (
+          {/* Anchor verification pill — three states for the user:
+              1. `anchorHashMismatch === true` — IPFS returned a real body
+                 but its blake2b-256 doesn't match the on-chain anchor hash.
+                 The proposer published mismatched content (joke proposal,
+                 copy-paste error). The body IS surfaced below, but with
+                 explicit "Hash mismatch" warning so the user knows we
+                 cannot cryptographically attest to its integrity.
+              2. `anchorVerified === true` — body parsed and the bytes
+                 hash-match the on-chain anchor. Green badge.
+              3. `anchorVerified === false` and not a hash-mismatch — anchor
+                 exists but body couldn't be retrieved / parsed at all.
+                 Legacy "Anchor mismatch" pill (predates v13). */}
+          {action.anchorHashMismatch ? (
+            <StatusPill
+              status="warning"
+              label="Hash mismatch"
+              title="The on-chain anchor hash doesn't match the served content. The content is shown for reference but its integrity cannot be cryptographically verified."
+            />
+          ) : hasAnchorIndicator && action.anchorVerified ? (
             <StatusPill status="passed" label="Anchor verified" />
           ) : hasAnchorIndicator ? (
             <StatusPill status="warning" label="Anchor mismatch" />
@@ -484,6 +502,26 @@ export function GovernanceActionPage(): React.ReactElement {
                 <span className="font-medium text-[var(--text-secondary)]">Anchor URL: </span>
                 <span className="break-all">{action.anchorUrl}</span>
               </div>
+              {action.anchorRecoveredFromCommit && (
+                /* When the body came from a historical commit (current branch
+                   ref no longer serves the right bytes), surface the audit
+                   trail: which commit was hash-matched, and when. Hash IS
+                   verified on the historical bytes, so the green "Anchor
+                   verified" pill above is honest — this line just tells the
+                   user where the bytes came from. */
+                <div>
+                  <span className="font-medium text-[var(--text-secondary)]">
+                    Recovered from historical commit:{' '}
+                  </span>
+                  <span className="font-mono">{action.anchorRecoveredFromCommit}</span>
+                  {action.anchorRecoveredFromCommitDate && (
+                    <span className="text-[var(--text-muted)]">
+                      {' '}
+                      ({new Date(action.anchorRecoveredFromCommitDate).toISOString().slice(0, 10)})
+                    </span>
+                  )}
+                </div>
+              )}
               {action.anchorHash && (
                 <div>
                   <span className="font-medium text-[var(--text-secondary)]">Anchor hash: </span>
