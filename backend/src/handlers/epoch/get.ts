@@ -1,5 +1,6 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { getLatestEpoch } from '../../lib/blockfrost';
+import { getCurrentEpochInfo, KoiosError } from '../../lib/koios';
 import { ok, internalError } from '../_response';
 
 interface EpochResponse {
@@ -9,6 +10,14 @@ interface EpochResponse {
   /** Seconds until this epoch ends — the SPA renders this as a countdown. */
   endsInSeconds: number;
 }
+
+/**
+ * Phase C: source-tracking for the operator-visible "where did this epoch
+ * come from" signal. Logged on every miss / fallback so the next audit can
+ * see at a glance how often Blockfrost was reached. Not surfaced in the
+ * response body — purely a CloudWatch breadcrumb.
+ */
+type EpochSource = 'koios' | 'blockfrost-fallback' | 'stale-cache' | 'deterministic-fallback';
 
 /**
  * Module-level cache so a warm Lambda instance can serve hundreds of
@@ -42,6 +51,40 @@ function buildResponse(epoch: Awaited<ReturnType<typeof getLatestEpoch>>): Epoch
   };
 }
 
+/**
+ * Phase C: build the response from a Koios `/epoch_info` row. The field
+ * names differ from Blockfrost — `epoch_no` vs `epoch`, but `start_time`
+ * / `end_time` are identical (Unix seconds). When Koios returns null for
+ * either time field (rare; happens on epochs that haven't fully indexed)
+ * we fall back to the deterministic Shelley math — same approach the
+ * deterministic-fallback branch uses, but inline so we don't fall through
+ * an additional layer.
+ */
+function buildResponseFromKoios(
+  info: Awaited<ReturnType<typeof getCurrentEpochInfo>>,
+): EpochResponse {
+  // Defensive: if start_time / end_time are null on the upstream row,
+  // recompute deterministically from epoch_no. Shelley genesis: epoch 208
+  // began at 2020-07-29 21:44:51 UTC; each epoch is 432000s (5 days).
+  const SHELLEY_EPOCH_208_START = 1596059091;
+  const EPOCH_LENGTH_SECONDS = 432_000;
+  const startTimeSec =
+    typeof info.start_time === 'number' && info.start_time > 0
+      ? info.start_time
+      : SHELLEY_EPOCH_208_START + (info.epoch_no - 208) * EPOCH_LENGTH_SECONDS;
+  const endTimeSec =
+    typeof info.end_time === 'number' && info.end_time > 0
+      ? info.end_time
+      : startTimeSec + EPOCH_LENGTH_SECONDS;
+  const endsInSeconds = Math.max(0, endTimeSec - Math.floor(Date.now() / 1000));
+  return {
+    epoch: info.epoch_no,
+    startTime: new Date(startTimeSec * 1000).toISOString(),
+    endTime: new Date(endTimeSec * 1000).toISOString(),
+    endsInSeconds,
+  };
+}
+
 function refreshEndsInSeconds(body: EpochResponse): EpochResponse {
   // The endTime ISO string is fixed per epoch; only the countdown drifts.
   // Recompute on every served response so cached payloads still feel live.
@@ -55,13 +98,23 @@ function refreshEndsInSeconds(body: EpochResponse): EpochResponse {
 /**
  * GET /epoch
  *
- * Public — no auth required. Wraps Blockfrost `epochsLatest` and returns the
- * shape the SPA needs for the epoch sidebar card and dashboard tile.
+ * Public — no auth required. Returns the shape the SPA needs for the epoch
+ * sidebar card and dashboard tile.
+ *
+ * Data sources (Phase C):
+ *   1. Koios `/tip` + `/epoch_info` (primary)
+ *   2. Blockfrost `epochsLatest` (fallback)
+ *   3. Stale-cache window (30 min) for transient outages on both providers
+ *   4. Deterministic Shelley math (last resort, mainnet only)
  *
  * Cached at the Lambda layer (60s TTL) and at the HTTP layer
- * (Cache-Control: public, max-age=30, s-maxage=60). When Blockfrost rate-
- * limits us (402 Project Over Limit) we serve the most recent good payload
- * instead of bubbling 500s into the sidebar.
+ * (Cache-Control: public, max-age=30, s-maxage=60). When BOTH upstreams are
+ * unavailable we serve stale or deterministically-computed data instead of
+ * bubbling 500s into the sidebar.
+ *
+ * Source-tagging: every served response logs `source=koios |
+ * blockfrost-fallback | stale-cache | deterministic-fallback` so the
+ * operator can measure Blockfrost call volume in steady state.
  */
 export const handler = async (
   _event: APIGatewayProxyEventV2,
@@ -75,17 +128,42 @@ export const handler = async (
     return ok(refreshEndsInSeconds(_cache.body), cacheHeaders);
   }
 
+  // ---- Koios primary (Phase C) ----
+  // Koios `/epoch_info` returns the same shape as Blockfrost's
+  // `epochsLatest`. We try Koios first; on KoiosError we fall through to
+  // the existing Blockfrost path. Falling through preserves the
+  // stale-cache + deterministic-fallback safety net that's already in
+  // place for Blockfrost outages — Phase C doesn't add new failure modes.
+  try {
+    const info = await getCurrentEpochInfo();
+    const body = buildResponseFromKoios(info);
+    _cache = { body, cachedAt: Date.now() };
+    const source: EpochSource = 'koios';
+    console.log(`epoch/get served from source=${source} epoch=${body.epoch}`);
+    return ok(body, cacheHeaders);
+  } catch (koiosErr) {
+    // Koios is down or slow. Log and fall through to Blockfrost.
+    if (koiosErr instanceof KoiosError) {
+      console.warn(`epoch/get: Koios unavailable (${koiosErr.message}); trying Blockfrost`);
+    } else {
+      console.warn('epoch/get: unexpected Koios error; trying Blockfrost:', koiosErr);
+    }
+  }
+
   try {
     const epoch = await getLatestEpoch();
     const body = buildResponse(epoch);
     _cache = { body, cachedAt: Date.now() };
+    const source: EpochSource = 'blockfrost-fallback';
+    console.log(`epoch/get served from source=${source} epoch=${body.epoch}`);
     return ok(body, cacheHeaders);
   } catch (err) {
-    // Stale-while-error: rather than 500 on a Blockfrost rate-limit hiccup,
-    // serve the most recent good response if it's not too old. The sidebar
-    // is a soft surface — a 30-minute-old epoch number is still useful.
+    // Stale-while-error: rather than 500 on a rate-limit hiccup, serve
+    // the most recent good response if it's not too old. The sidebar is
+    // a soft surface — a 30-minute-old epoch number is still useful.
     if (_cache && Date.now() - _cache.cachedAt < STALE_FALLBACK_TTL_MS) {
-      console.warn('epoch/get serving stale cache after upstream failure:', err);
+      const source: EpochSource = 'stale-cache';
+      console.warn(`epoch/get served from source=${source} after upstream failure:`, err);
       return ok(refreshEndsInSeconds(_cache.body), {
         ...cacheHeaders,
         'X-Cache-Source': 'stale-while-error',
@@ -100,7 +178,8 @@ export const handler = async (
     // unavailable (e.g. cold-start during a rolling-window quota outage).
     const network = process.env['CARDANO_NETWORK'] ?? 'mainnet';
     if (network === 'mainnet') {
-      console.warn('epoch/get serving deterministic fallback after upstream failure:', err);
+      const source: EpochSource = 'deterministic-fallback';
+      console.warn(`epoch/get served from source=${source} after upstream failure:`, err);
       const SHELLEY_EPOCH_208_START = 1596059091; // 2020-07-29 21:44:51 UTC
       const EPOCH_LENGTH_SECONDS = 432_000; // 5 days
       const nowSec = Math.floor(Date.now() / 1000);
