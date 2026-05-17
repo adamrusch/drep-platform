@@ -862,35 +862,180 @@ export async function fetchDRepVotes(
   }
 }
 
+/** Defensive cap on `/drep_delegators` pagination. Each page is one HTTP
+ *  round-trip against Koios's PostgREST layer; in practice we've seen
+ *  page 0 in ~1-2s and subsequent pages occasionally stretch to 6-8s
+ *  (Koios load-dependent). With a 5-page cap the worst-case wall-clock
+ *  is ~30-40s, but the typical case is well under 10s and fits comfortably
+ *  inside the API Lambda's 30s budget alongside the parallel `drep_voters`
+ *  call. DReps with > 5000 delegators surface "5000+" (see
+ *  `fetchDRepDelegatorCount`); the exact tail count isn't actionable for
+ *  the user. */
+const DREP_DELEGATORS_MAX_PAGES = 5;
+
 /**
- * Fetch the list of stake addresses delegated to this DRep. Returns null
- * on any failure. The detail handler uses the length of this array as
- * the delegator count — full account list is overkill but Koios's only
- * paid-tier-free endpoint here doesn't expose a count-only variant.
+ * Result shape for `fetchDRepDelegatorCount`. We deliberately do NOT return
+ * the full delegator list — most callers only need the count, and shipping
+ * a 1000+ row array through serializers wastes Lambda memory + bytes.
  *
- * For DReps with thousands of delegators this can be a few KB — well
- * under the 10MB cap.
+ * `truncated: true` means we hit `DREP_DELEGATORS_MAX_PAGES` and there are
+ * more delegators upstream. The UI should render "{count}+" rather than a
+ * precise number.
+ */
+export interface DRepDelegatorCountResult {
+  count: number;
+  truncated: boolean;
+}
+
+/**
+ * Resolve the number of stake accounts delegated to this DRep, walking
+ * Koios's `/drep_delegators` PostgREST pagination (1000 rows per page).
+ *
+ * # Why this exists
+ *
+ * Earlier revisions returned the full delegator-list array and the
+ * detail handler used `.length` as the count. Two issues with that:
+ *   1. Koios paginates at 1000 rows per page (`?limit=1000` is the
+ *      PostgREST cap). A single-page call silently truncated to 1000,
+ *      so every popular DRep on mainnet (Yoroi, EMURGO, Cardano Vision,
+ *      etc.) reported "1,000 delegators" indefinitely.
+ *   2. Returning the full array allocated multi-MB on hot DReps and
+ *      forced the JSON serializer to walk every row, even though the
+ *      handler discarded everything but the length.
+ *
+ * The new shape returns `{ count, truncated }`. The boolean lets the UI
+ * render "5000+" when we hit the page cap, which is honest to the user
+ * (a DRep with 5000+ delegators is "popular"; whether they have 5043 or
+ * 8721 is not actionable).
+ *
+ * # Failure modes
+ *
+ * - First-page failure (network / 5xx / parse): returns `null` so the
+ *   handler can degrade to the cached lifecycle count.
+ * - Mid-walk failure (rare; Koios sometimes rate-limits or gets slow
+ *   on later offsets): returns `{ count: rows_so_far, truncated: true }`.
+ *   Partial-but-flagged is more useful than `null` here.
+ */
+export async function fetchDRepDelegatorCount(
+  drepId: string,
+): Promise<DRepDelegatorCountResult | null> {
+  const body = JSON.stringify({ _drep_id: drepId });
+  let count = 0;
+  for (let page = 0; page < DREP_DELEGATORS_MAX_PAGES; page++) {
+    let res: Response;
+    try {
+      res = await koiosFetch('/drep_delegators', {
+        method: 'POST',
+        body,
+        offset: page * PAGE_SIZE,
+        limit: PAGE_SIZE,
+        timeoutMs: 8_000,
+      });
+    } catch (err) {
+      if (page === 0) {
+        console.warn(`[Koios /drep_delegators] fetch failed for ${drepId}:`, err);
+        return null;
+      }
+      console.warn(
+        `[Koios /drep_delegators] page ${page} failed for ${drepId}, returning partial:`,
+        err,
+      );
+      return { count, truncated: true };
+    }
+    if (!res.ok) {
+      if (page === 0) {
+        console.warn(`[Koios /drep_delegators] HTTP ${res.status} for ${drepId}`);
+        return null;
+      }
+      console.warn(
+        `[Koios /drep_delegators] page ${page} returned HTTP ${res.status}, returning partial`,
+      );
+      return { count, truncated: true };
+    }
+    let parsed: unknown;
+    try {
+      parsed = await readJsonCapped(res, '/drep_delegators');
+    } catch (err) {
+      if (page === 0) {
+        console.warn(`[Koios /drep_delegators] body parse failed for ${drepId}:`, err);
+        return null;
+      }
+      return { count, truncated: true };
+    }
+    if (!Array.isArray(parsed)) {
+      if (page === 0) return null;
+      return { count, truncated: true };
+    }
+    const rows = parsed as KoiosDRepDelegator[];
+    count += rows.length;
+    // PostgREST signals "no more pages" by returning a page shorter than
+    // the requested limit. That's the ONLY way we know we got the full
+    // tail — explicit count or `Content-Range` total would be cleaner but
+    // PostgREST's defaults don't surface either reliably.
+    if (rows.length < PAGE_SIZE) {
+      return { count, truncated: false };
+    }
+  }
+  // We hit the page cap without seeing a short page → more rows upstream.
+  // Surface the cap-of-rows as a "{count}+" sentinel via the truncated flag.
+  return { count, truncated: true };
+}
+
+/**
+ * @deprecated Use `fetchDRepDelegatorCount` instead. Kept temporarily to
+ * give callers a soft migration; this function still exists but now
+ * returns at most `DREP_DELEGATORS_MAX_PAGES * PAGE_SIZE` rows even when
+ * the underlying DRep has more. New code paths should not invoke this.
+ *
+ * Existing callers used `.length` as the count; they continue to work
+ * (with the same truncation caveat) until they're migrated to the count-
+ * only helper.
  */
 export async function fetchDRepDelegators(
   drepId: string,
 ): Promise<KoiosDRepDelegator[] | null> {
-  try {
-    const res = await koiosFetch('/drep_delegators', {
-      method: 'POST',
-      body: JSON.stringify({ _drep_id: drepId }),
-      timeoutMs: 8_000,
-    });
-    if (!res.ok) {
-      console.warn(`[Koios /drep_delegators] HTTP ${res.status} for ${drepId}`);
-      return null;
+  const body = JSON.stringify({ _drep_id: drepId });
+  const all: KoiosDRepDelegator[] = [];
+  for (let page = 0; page < DREP_DELEGATORS_MAX_PAGES; page++) {
+    let res: Response;
+    try {
+      res = await koiosFetch('/drep_delegators', {
+        method: 'POST',
+        body,
+        offset: page * PAGE_SIZE,
+        limit: PAGE_SIZE,
+        timeoutMs: 8_000,
+      });
+    } catch (err) {
+      if (page === 0) {
+        console.warn(`[Koios /drep_delegators] fetch failed for ${drepId}:`, err);
+        return null;
+      }
+      return all;
     }
-    const parsed = (await readJsonCapped(res, '/drep_delegators')) as unknown;
-    if (!Array.isArray(parsed)) return null;
-    return parsed as KoiosDRepDelegator[];
-  } catch (err) {
-    console.warn(`[Koios /drep_delegators] fetch failed for ${drepId}:`, err);
-    return null;
+    if (!res.ok) {
+      if (page === 0) {
+        console.warn(`[Koios /drep_delegators] HTTP ${res.status} for ${drepId}`);
+        return null;
+      }
+      return all;
+    }
+    let parsed: unknown;
+    try {
+      parsed = await readJsonCapped(res, '/drep_delegators');
+    } catch (err) {
+      if (page === 0) return null;
+      return all;
+    }
+    if (!Array.isArray(parsed)) {
+      if (page === 0) return null;
+      return all;
+    }
+    const rows = parsed as KoiosDRepDelegator[];
+    all.push(...rows);
+    if (rows.length < PAGE_SIZE) break;
   }
+  return all;
 }
 
 /**
