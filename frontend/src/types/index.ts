@@ -289,7 +289,12 @@ export interface DRepRecentVote {
 
 export interface DRepDetail extends DRepDirectoryEntry {
   recentVotes?: DRepRecentVote[];
+  /** Live delegator count from Koios `/drep_delegators` pagination walk
+   *  at request time. Capped at 5000 — when `delegatorCountTruncated` is
+   *  true the upstream has more delegators and the UI should render
+   *  "{n}+" rather than the precise count. */
   delegatorCountLive?: number;
+  delegatorCountTruncated?: boolean;
 }
 
 export interface UserProfile {

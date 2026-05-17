@@ -22,17 +22,25 @@ import type {
   DRepDetail,
   DRepRecentVote,
 } from '../../lib/types';
-import { fetchDRepVotes, fetchDRepDelegators } from '../../lib/koios';
+import { fetchDRepVotes, fetchDRepDelegatorCount } from '../../lib/koios';
 import { ok, badRequest, notFound, internalError } from '../_response';
 
 /** 5 minutes — long enough to dedupe a refresh storm on a popular DRep
  *  but short enough that delegations show up in near real-time. */
 const ENRICHMENT_CACHE_TTL_MS = 5 * 60 * 1000;
 
+/** Per-DRep on-demand cache contents.
+ *
+ *  `delegatorCountLive` is the resolved count; `delegatorCountTruncated`
+ *  flags when Koios was paginated past `DREP_DELEGATORS_MAX_PAGES`
+ *  (5000 rows today). The UI renders truncated counts as "{count}+".
+ *  See `lib/koios.ts:fetchDRepDelegatorCount` for the pagination
+ *  contract. */
 interface EnrichmentCacheEntry {
   fetchedAt: number;
   recentVotes?: DRepRecentVote[];
   delegatorCountLive?: number;
+  delegatorCountTruncated?: boolean;
 }
 
 const enrichmentCache = new Map<string, EnrichmentCacheEntry>();
@@ -81,11 +89,13 @@ async function fetchEnrichment(drepId: string): Promise<EnrichmentCacheEntry> {
     return cached;
   }
   // Run both calls in parallel — they don't depend on each other and
-  // each individually has a hard 8s timeout. Combined 99th-percentile
-  // wall-clock here is ~3s on a warm Koios.
-  const [votesRaw, delegatorsRaw] = await Promise.all([
+  // each individually has a hard 8s/page timeout. The delegator count
+  // can paginate up to 5 pages (5000 rows) but each page is one round-
+  // trip; combined 99th-percentile wall-clock here is ~3s on a warm
+  // Koios and ~12s on a popular DRep with > 1000 delegators.
+  const [votesRaw, delegatorCount] = await Promise.all([
     fetchDRepVotes(drepId),
-    fetchDRepDelegators(drepId),
+    fetchDRepDelegatorCount(drepId),
   ]);
   const entry: EnrichmentCacheEntry = { fetchedAt: now };
   if (votesRaw) {
@@ -98,8 +108,11 @@ async function fetchEnrichment(drepId: string): Promise<EnrichmentCacheEntry> {
       .slice(0, 10)
       .map(mapRecentVote);
   }
-  if (delegatorsRaw) {
-    entry.delegatorCountLive = delegatorsRaw.length;
+  if (delegatorCount) {
+    entry.delegatorCountLive = delegatorCount.count;
+    if (delegatorCount.truncated) {
+      entry.delegatorCountTruncated = true;
+    }
   }
   enrichmentCache.set(drepId, entry);
   // Bound the cache — Lambdas are reused but not unbounded. 200 entries
@@ -182,6 +195,12 @@ export const handler = async (
         : {}),
       ...(enrichment.delegatorCountLive !== undefined
         ? { delegatorCountLive: enrichment.delegatorCountLive }
+        : {}),
+      // Truncation flag is only emitted when the underlying Koios walk
+      // hit the page cap; absence means the count is complete. The
+      // frontend reads this to render "{n}+" instead of "{n}".
+      ...(enrichment.delegatorCountTruncated
+        ? { delegatorCountTruncated: true }
         : {}),
     };
 
