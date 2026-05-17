@@ -11,6 +11,7 @@ export class DatabaseStack extends cdk.Stack {
   public readonly drepCommitteesTable: dynamodb.Table;
   public readonly drepDirectoryTable: dynamodb.Table;
   public readonly governanceActionsTable: dynamodb.Table;
+  public readonly governanceVotesTable: dynamodb.Table;
   public readonly commentsTable: dynamodb.Table;
   public readonly clubhousePostsTable: dynamodb.Table;
   public readonly auditLogTable: dynamodb.Table;
@@ -147,6 +148,47 @@ export class DatabaseStack extends cdk.Stack {
       nonKeyAttributes: ['actionId', 'title', 'status', 'actionType'],
     });
 
+    // ---- governance_votes ----
+    // Per-vote event log — one row per individual on-chain governance vote.
+    // Populated by the `governance-intake` sync from Koios's `/vote_list`
+    // (~24k rows on mainnet today, grows by ~50/day). Append-only:
+    // conditional Put on `attribute_not_exists` prevents double-writes when
+    // the sync re-runs.
+    //
+    // PK=`actionId` (`tx_hash#cert_index` — matches `governance_actions.actionId`).
+    // SK=`voteKey` (`${voterRole}#${voterId}#${voteTxHash}` — unique per
+    // individual vote certificate). The SK shape lets a single voter
+    // recorded twice on the same action (vote-change scenarios) keep both
+    // rows; the timeline preserves the full audit trail.
+    //
+    // Access patterns:
+    //   - "Show me every vote on this action, oldest first" — `Query(actionId)`
+    //   - "Show me every vote by this DRep, newest first" — `Query(voterId)`
+    //     via the `voter-blockTime-index` GSI
+    //
+    // Expected size: ~24k rows × ~250B/row = ~6MB today. Growth: 50/day.
+    // Cost: negligible (PAY_PER_REQUEST + ~50 WCU/day steady-state +
+    //       one 24k-WCU backfill = pennies/month).
+    this.governanceVotesTable = new dynamodb.Table(this, 'GovernanceVotesTable', {
+      tableName: `${this.tablePrefix}governance_votes`,
+      partitionKey: { name: 'actionId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'voteKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecovery: true,
+      removalPolicy: props.stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
+    // GSI: query every vote by a single voter, sorted newest-first.
+    // Used by future "DRep voting timeline" UX without needing a Koios
+    // round-trip. `blockTime` (Unix seconds, NUMBER) sorts naturally as
+    // chronological; `ScanIndexForward: false` gives newest-first.
+    this.governanceVotesTable.addGlobalSecondaryIndex({
+      indexName: 'voter-blockTime-index',
+      partitionKey: { name: 'voterId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'blockTime', type: dynamodb.AttributeType.NUMBER },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
     // ---- comments ----
     this.commentsTable = new dynamodb.Table(this, 'CommentsTable', {
       tableName: `${this.tablePrefix}comments`,
@@ -206,6 +248,7 @@ export class DatabaseStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'DRepCommitteesTableName', { value: this.drepCommitteesTable.tableName, exportName: `${props.stage}-DRepCommitteesTableName` });
     new cdk.CfnOutput(this, 'DRepDirectoryTableName', { value: this.drepDirectoryTable.tableName, exportName: `${props.stage}-DRepDirectoryTableName` });
     new cdk.CfnOutput(this, 'GovernanceActionsTableName', { value: this.governanceActionsTable.tableName, exportName: `${props.stage}-GovernanceActionsTableName` });
+    new cdk.CfnOutput(this, 'GovernanceVotesTableName', { value: this.governanceVotesTable.tableName, exportName: `${props.stage}-GovernanceVotesTableName` });
     new cdk.CfnOutput(this, 'CommentsTableName', { value: this.commentsTable.tableName, exportName: `${props.stage}-CommentsTableName` });
     new cdk.CfnOutput(this, 'ClubhousePostsTableName', { value: this.clubhousePostsTable.tableName, exportName: `${props.stage}-ClubhousePostsTableName` });
     new cdk.CfnOutput(this, 'AuditLogTableName', { value: this.auditLogTable.tableName, exportName: `${props.stage}-AuditLogTableName` });
