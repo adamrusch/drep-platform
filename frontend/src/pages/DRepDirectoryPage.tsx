@@ -481,7 +481,11 @@ export function DRepDirectoryPage(): React.ReactElement {
         </h1>
         <p className="text-sm text-[var(--text-secondary)]">
           Every registered Cardano DRep, with bios from their CIP-119 anchor metadata.
-          Synced from Koios every five minutes.
+          {/* Cadence is set in infra/lib/scheduler-stack.ts; bumped from 5min
+              to 30min as part of an emergency WCU-leak fix (commit f6acb024).
+              Keep this string in sync with that schedule — it's the only
+              user-visible signal of the directory's freshness. */}
+          {' '}Synced from Koios every 30 minutes.
         </p>
       </header>
 

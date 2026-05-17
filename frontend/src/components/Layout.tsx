@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { Suspense, lazy, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Home,
@@ -19,9 +19,40 @@ import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
 import { useUiStore } from '@/stores/uiStore';
 import { useThemeStore } from '@/stores/themeStore';
 import { useEpoch } from '@/hooks/useEpoch';
-import { WalletButton } from './WalletButton';
+import { Button } from '@/components/ui/Button';
 import { cn, formatWalletAddress } from '@/lib/utils';
 import type { UserRole } from '@/types';
+
+/**
+ * WalletButton is lazy-loaded so the Mesh chunk (~1.3 MB gz + 5.4 MB
+ * WASM) only fetches when this component renders. The Suspense fallback
+ * is a visually identical, non-functional button — the user sees the
+ * "Connect Wallet" CTA immediately, and clicking it triggers the lazy
+ * import (the click won't register until the real button hydrates, but
+ * the fallback's `onClick` is a no-op so there's no broken-button feel).
+ *
+ * Pages without the topbar (none today) wouldn't load this chunk at all.
+ * Pages that don't render the wallet button (`/dashboard` for an
+ * authenticated user — see the conditional below) display the user's
+ * avatar instead, in which case the topbar's wallet code path is
+ * bypassed entirely.
+ */
+const WalletButton = lazy(() => import('./WalletButton'));
+
+/**
+ * Suspense fallback for the wallet button. Matches the real button's
+ * shape so the topbar layout doesn't shift when the lazy chunk arrives.
+ * The fallback is non-functional by design: clicking it should not
+ * surface a broken state — wait for the chunk and the React.lazy machinery
+ * to swap in the real button.
+ */
+function WalletButtonFallback(): React.ReactElement {
+  return (
+    <Button variant="primary" disabled aria-label="Connect Wallet (loading)">
+      Connect Wallet
+    </Button>
+  );
+}
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -207,7 +238,9 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
               </button>
             </>
           ) : (
-            <WalletButton />
+            <Suspense fallback={<WalletButtonFallback />}>
+              <WalletButton />
+            </Suspense>
           )}
         </div>
       </header>
@@ -250,7 +283,13 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
               <span>Epoch</span>
             </div>
             <div className="epoch-card__num">{epochInfo?.epoch ?? '—'}</div>
-            <div className="epoch-card__sub">Synced from Blockfrost</div>
+            {/* Phase B migrated the primary metadata source to Koios.
+                Blockfrost is kept as a circuit-broken fallback for vote
+                tally edge-cases only — see backend/src/lib/circuitBreaker.ts.
+                We surface Koios in the sidebar so the user sees the true
+                hot-path source; if we ever swap or expose a multi-source
+                aggregation, update this string. */}
+            <div className="epoch-card__sub">Synced from Koios</div>
           </div>
         </div>
       </aside>
