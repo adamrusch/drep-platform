@@ -521,7 +521,13 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
             return;
           }
           await putItem(tableNames.governanceActions, updated);
-          result.skipped++;
+          // Bug fix: the hot path used to increment `skipped` even when
+          // it issued a Put, which made the cycle log line read
+          // `written=0` indefinitely even though DynamoDB was logging
+          // ~30–80 Puts/hr. The metric is the only operator-visible
+          // signal of the actual write rate, so it has to count the
+          // genuine writes the same as the cold path on line ~882.
+          result.synced++;
           return;
         }
 
