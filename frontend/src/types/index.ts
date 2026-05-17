@@ -295,6 +295,23 @@ export interface DRepDetail extends DRepDirectoryEntry {
    *  "{n}+" rather than the precise count. */
   delegatorCountLive?: number;
   delegatorCountTruncated?: boolean;
+  /** Per-epoch voting-power history, oldest-first. Populated by the
+   *  daily `drep-voting-power-history` sync. Undefined on rows that have
+   *  not yet been captured (typical first 24h after a new DRep registers
+   *  or before the Phase C sync deploy has run its first cycle). The
+   *  Sparkline component on the DRep detail page reads this directly. */
+  votingPowerHistory?: DRepVotingPowerSnapshot[];
+}
+
+/**
+ * One epoch-snapshot of a DRep's voting power, sourced from Koios
+ * `/drep_voting_power_history` via the daily sync and surfaced on
+ * `DRepDetail.votingPowerHistory`.
+ */
+export interface DRepVotingPowerSnapshot {
+  epochNo: number;
+  /** Voting power in lovelace, stringified BigInt. */
+  amount: string;
 }
 
 export interface UserProfile {
