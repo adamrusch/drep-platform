@@ -583,6 +583,11 @@ export interface DRepDetail extends DRepDirectoryEntry {
    *  than the exact number when this is true. Absent / false means the
    *  count is exhaustive. */
   delegatorCountTruncated?: boolean;
+  /** Per-epoch voting-power history, oldest-first. Populated by the
+   *  daily `drep-voting-power-history` sync; undefined on rows that
+   *  have not yet been captured (typically the first 24h after a new
+   *  DRep registers). The frontend Sparkline reads this directly. */
+  votingPowerHistory?: DRepVotingPowerSnapshot[];
 }
 
 export interface DRepRecentVote {
@@ -593,6 +598,35 @@ export interface DRepRecentVote {
   vote: string;
   /** Block time as ISO-8601 string (Koios returns Unix seconds). */
   votedAt: string;
+}
+
+/**
+ * One epoch-snapshot of a DRep's voting power, written by the
+ * `drep-voting-power-history` sync (daily). Stored under `drep_directory`
+ * with `SK='POWER#${zero-padded epoch_no}'`. Surfaced on the detail
+ * response as `votingPowerHistory[]` for the Sparkline component.
+ *
+ * `amount` is the stringified BigInt lovelace, matching the convention
+ * used for `votingPower` on the live PROFILE row.
+ */
+export interface DRepVotingPowerSnapshot {
+  epochNo: number;
+  amount: string;
+}
+
+/**
+ * Persisted row shape for the `POWER#`-prefixed history items. Same PK
+ * (`drepId`) as the PROFILE row; SK shape is `POWER#${zero-padded epoch}`.
+ * Frontend never sees this shape directly — the detail handler converts
+ * to `DRepVotingPowerSnapshot[]` before serving.
+ */
+export interface DRepPowerHistoryItem {
+  drepId: string;
+  SK: string;
+  epochNo: number;
+  amount: string;
+  capturedAt: string;
+  [key: string]: unknown;
 }
 
 export interface CommitteeMemberItem {
