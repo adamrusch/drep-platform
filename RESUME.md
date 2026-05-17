@@ -57,3 +57,23 @@
 - [ ] Phase 2: Committee voting, sentiment tracking, rationale documents, on-chain submission
 - [ ] Phase 2: DRep registration on-chain via wallet signing
 - [ ] Performance: chunking optimization for mesh-sdk (~6.8MB bundle — consider dynamic import)
+
+## Phase C — Koios primary everywhere (2026-05-17)
+
+- All steady-state Blockfrost calls migrated to Koios with Blockfrost fallback.
+  See `MIGRATION_PHASE_C.md` for the full inventory + status.
+- New Koios wrappers in `backend/src/lib/koios.ts`: `fetchAccountInfo`,
+  `getCurrentEpochInfo`, `fetchDRepPowerHistory`.
+- Migrated callsites (all keep Blockfrost as fallback):
+  - `epoch/get.ts` — Koios `/tip` + `/epoch_info` primary
+  - `lib/recognition.ts` — Koios `/account_info_cached` primary
+  - `profile/delegationHistory.ts` — Koios `/account_info_cached` primary + 60s LRU
+    (Class C → Class B per Phase 2 audit)
+- New table `governance_votes` — append-only per-vote event log populated
+  by the existing governance-intake sync from Koios `/vote_list`.
+  High-water-mark watermark keeps steady-state cost ~50 WCU/cycle.
+- New table sub-rows on `drep_directory` — `POWER#`-prefixed voting-power
+  history rows. Populated daily by new `drep-voting-power-history` sync
+  Lambda. Surfaced as `votingPowerHistory[]` on the directory detail handler.
+- After Phase C, Blockfrost Discovery tier can be safely downgraded to free —
+  steady-state call volume drops to ~zero (only fires on Koios outage).
