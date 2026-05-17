@@ -97,6 +97,12 @@ export class ApiStack extends cdk.Stack {
       databaseStack.drepCommitteesTable,
       databaseStack.drepDirectoryTable,
       databaseStack.governanceActionsTable,
+      // Phase C: read-only-from-API surface, but we grant RW for symmetry
+      // with the rest of the loop — only the governance-intake Lambda
+      // ever writes. No handler reads it today; the grant unblocks a
+      // future "GET /governance/{actionId}/votes" endpoint without an
+      // infra change.
+      databaseStack.governanceVotesTable,
       databaseStack.commentsTable,
       databaseStack.clubhousePostsTable,
       databaseStack.auditLogTable,

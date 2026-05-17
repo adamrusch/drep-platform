@@ -17,6 +17,7 @@ export interface SchedulerStackProps extends cdk.StackProps {
 export class SchedulerStack extends cdk.Stack {
   public readonly governanceSyncFn: lambdaNodejs.NodejsFunction;
   public readonly directorySyncFn: lambdaNodejs.NodejsFunction;
+  public readonly powerHistorySyncFn: lambdaNodejs.NodejsFunction;
 
   constructor(scope: Construct, id: string, props: SchedulerStackProps) {
     super(scope, id, props);
@@ -40,9 +41,15 @@ export class SchedulerStack extends cdk.Stack {
     });
 
     databaseStack.governanceActionsTable.grantReadWriteData(syncRole);
+    // Phase C: the sync also writes per-vote event rows to
+    // `governance_votes`. Append-only via conditional Put; the actual
+    // write volume is governed by a high-water-mark in `auth_nonces`
+    // (see `persistVoteEvents` in `backend/src/sync/governance-intake.ts`).
+    databaseStack.governanceVotesTable.grantReadWriteData(syncRole);
     // The sync writes a circuit-breaker marker to the auth_nonces table when
     // Blockfrost rate-limits us, so it can skip subsequent runs cleanly
-    // (see backend/src/lib/circuitBreaker.ts).
+    // (see backend/src/lib/circuitBreaker.ts). The Phase C vote-event
+    // high-water-mark also lives here.
     databaseStack.authNoncesTable.grantReadWriteData(syncRole);
     blockfrostSecret.grantRead(syncRole);
 
@@ -182,6 +189,70 @@ export class SchedulerStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'DirectorySyncFnArn', {
       value: this.directorySyncFn.functionArn,
       exportName: `${stage}-DirectorySyncFnArn`,
+    });
+
+    // ---- DRep voting-power history sync Lambda (Phase C) ----
+    // Daily cadence — voting power only changes at epoch boundaries
+    // (~every 5 days), so 24-hour granularity is plenty. Populates the
+    // `POWER#${epoch_no}` rows on the `drep_directory` table; the
+    // detail handler will surface them as `votingPowerHistory` on the
+    // response so the frontend Sparkline can render real data.
+    //
+    // Per-DRep Koios call, paced at ~5 RPS to stay under the public-tier
+    // 10 RPS ceiling. ~1500 active DReps → ~5 min wall-clock, well within
+    // the 10-min Lambda timeout.
+    const powerHistorySyncRole = new iam.Role(this, 'PowerHistorySyncRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+      ],
+    });
+    databaseStack.drepDirectoryTable.grantReadWriteData(powerHistorySyncRole);
+
+    this.powerHistorySyncFn = new lambdaNodejs.NodejsFunction(this, 'PowerHistorySyncFn', {
+      functionName: `drep-platform-${stage}-drep-power-history-sync`,
+      entry: path.join(backendDir, 'src/sync/drep-voting-power-history.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      memorySize: 512,
+      // Daily cadence; 5 min Koios call pacing → 10 min timeout buffers
+      // for any slow-call retries without ever hitting the wall.
+      timeout: cdk.Duration.minutes(10),
+      role: powerHistorySyncRole,
+      environment: {
+        DYNAMODB_TABLE_PREFIX: `drep-platform-${stage}-`,
+        CARDANO_NETWORK: stage === 'staging' ? 'preprod' : 'mainnet',
+      },
+      bundling: {
+        minify: true,
+        sourceMap: false,
+        target: 'es2022',
+        externalModules: ['@aws-sdk/*'],
+        forceDockerBundling: false,
+      },
+      depsLockFilePath: path.join(backendDir, 'package-lock.json'),
+    });
+
+    const powerHistorySyncRule = new events.Rule(this, 'PowerHistorySyncRule', {
+      ruleName: `drep-platform-${stage}-drep-power-history-sync`,
+      description: 'Triggers DRep voting-power history sync (Koios drep_voting_power_history) daily',
+      // 02:00 UTC daily — outside US/EU prime-time so we don't compete
+      // with the Koios anonymous-tier rate budget when users are active.
+      schedule: events.Schedule.cron({ minute: '0', hour: '2' }),
+      enabled: true,
+    });
+
+    powerHistorySyncRule.addTarget(
+      new eventsTargets.LambdaFunction(this.powerHistorySyncFn, {
+        retryAttempts: 1,
+        maxEventAge: cdk.Duration.hours(2),
+      }),
+    );
+
+    new cdk.CfnOutput(this, 'PowerHistorySyncFnArn', {
+      value: this.powerHistorySyncFn.functionArn,
+      exportName: `${stage}-PowerHistorySyncFnArn`,
     });
   }
 }
