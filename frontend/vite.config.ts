@@ -65,7 +65,15 @@ export default defineConfig({
         manualChunks: {
           vendor: ['react', 'react-dom', 'react-router-dom'],
           query: ['@tanstack/react-query'],
-          mesh: ['@meshsdk/react', '@meshsdk/core'],
+          // NOTE: do NOT add an explicit `mesh` group here. The mesh chunk
+          // is anchored by the lazy import in `components/WalletButton.tsx`
+          // and we want Rollup to emit it as a code-split-on-demand chunk,
+          // NOT as an entry-graph chunk. Declaring `mesh` here statically
+          // promotes the chunk into the modulepreload list (Vite adds one
+          // for every named chunk traceable from entry), which is exactly
+          // the behavior we removed. Letting the lazy boundary do the
+          // chunking means Rollup emits the chunk but does NOT preload it
+          // on cold-page loads of `/governance`, `/dreps`, `/`, etc.
         },
       },
     },
