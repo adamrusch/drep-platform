@@ -1,16 +1,43 @@
 import React, { useState } from 'react';
-import { useWallet, useWalletList } from '@meshsdk/react';
+import { MeshProvider, useWallet, useWalletList } from '@meshsdk/react';
 import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
 import { useWalletAuth } from '@/auth/useWalletAuth';
 import { CARDANO_NETWORK } from '@/auth/WalletAuthProvider';
 import { useUiStore } from '@/stores/uiStore';
 import { Button } from '@/components/ui/Button';
 
+/**
+ * Wallet-connection button used in the topbar.
+ *
+ * # Lazy-load contract
+ *
+ * This module is the ONLY consumer of `@meshsdk/react` hooks (`useWallet`,
+ * `useWalletList`, `MeshProvider`). It's also the entry point for the
+ * ~1.3 MB-gzipped mesh chunk + 5.4 MB Cardano serialization-lib WASM.
+ *
+ * To keep first-paint on `/governance` and `/dreps` fast, the import is
+ * dynamic from `Layout.tsx` (and any other host site that lands a wallet
+ * button). The module mounts its own `<MeshProvider>` internally so it
+ * can be plugged in via `React.lazy(() => import('./WalletButton'))`
+ * without the host needing to also wrap a provider around the suspense
+ * boundary.
+ *
+ * The export is a DEFAULT export specifically because `React.lazy` only
+ * works with default exports — see `Layout.tsx` for the consumer.
+ *
+ * # CIP-30 + CARDANO_NETWORK contract
+ *
+ * The button enforces a network match before authenticating: CIP-30's
+ * `getNetworkId()` returns 1 for mainnet, 0 for testnets. We compare
+ * against `CARDANO_NETWORK` so a user connecting their preprod wallet
+ * to a mainnet build sees a clear error instead of a confusing
+ * stake1u… mismatch downstream.
+ */
 interface WalletButtonProps {
   className?: string;
 }
 
-export function WalletButton({ className }: WalletButtonProps): React.ReactElement {
+function WalletButtonInner({ className }: WalletButtonProps): React.ReactElement {
   const { wallet: _wallet, connected: _connected } = useWallet();
   void _wallet;
   void _connected;
@@ -140,3 +167,40 @@ export function WalletButton({ className }: WalletButtonProps): React.ReactEleme
     </div>
   );
 }
+
+/**
+ * Default export wraps the inner button in its own `<MeshProvider>`.
+ *
+ * Why the wrapper lives here rather than at the app root: anchoring
+ * MeshProvider at the app root via the WalletAuthProvider used to pull
+ * the mesh chunk into the entry graph (vite + the rollupOptions chunk
+ * declaration in `vite.config.ts` couldn't break that link). Mounting
+ * MeshProvider inside the lazy-loaded WalletButton module means the
+ * provider AND its dependency tree are emitted as the mesh chunk and
+ * only fetched when this module loads — i.e. when the host renders
+ * the suspense fallback's replacement.
+ *
+ * Mounting MeshProvider per WalletButton instance is fine: it's a
+ * lightweight React context provider underneath; Mesh's internal state
+ * (wallet handle, connected flag) is per-context, and the topbar
+ * mounts exactly one button. If a page ever renders multiple wallet
+ * buttons they'd each get their own Mesh context — that would only
+ * matter if a connection in one had to be observable from the other,
+ * which is not a flow the platform supports.
+ */
+function WalletButton(props: WalletButtonProps): React.ReactElement {
+  return (
+    <MeshProvider>
+      <WalletButtonInner {...props} />
+    </MeshProvider>
+  );
+}
+
+/**
+ * Default + named export of the same component. `React.lazy` requires a
+ * default export; existing consumers (`GuestLanding.tsx`,
+ * `WalletConnectPage.tsx`) import the named binding and don't need to
+ * switch to lazy. Both forms resolve to the MeshProvider-wrapped variant.
+ */
+export default WalletButton;
+export { WalletButton };

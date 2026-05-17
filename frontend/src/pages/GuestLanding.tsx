@@ -1,8 +1,13 @@
-import React from 'react';
+import React, { Suspense, lazy } from 'react';
 import { Link } from 'react-router-dom';
-import { WalletButton } from '@/components/WalletButton';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
+
+// Lazy-load WalletButton so the Mesh chunk is fetched only when this page
+// actually renders. Keeps `/guest` (and any other page that lands a
+// wallet button) off the modulepreload list for non-wallet pages.
+// See `components/WalletButton.tsx` for the chunk-anchor rationale.
+const WalletButton = lazy(() => import('@/components/WalletButton'));
 
 export function GuestLanding(): React.ReactElement {
   return (
@@ -23,7 +28,15 @@ export function GuestLanding(): React.ReactElement {
         </div>
 
         <div className="flex flex-col sm:flex-row gap-3 justify-center">
-          <WalletButton />
+          <Suspense
+            fallback={
+              <Button variant="primary" disabled>
+                Connect Wallet
+              </Button>
+            }
+          >
+            <WalletButton />
+          </Suspense>
           <Button asChild variant="secondary">
             <Link to="/governance">Browse Governance Actions</Link>
           </Button>
