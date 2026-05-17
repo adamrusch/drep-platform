@@ -575,9 +575,14 @@ export interface DRepDetail extends DRepDirectoryEntry {
    *  was unreachable. */
   recentVotes?: DRepRecentVote[];
   /** Total count of stake addresses delegating to this DRep. Populated
-   *  from `/drep_delegators` length at request time; undefined if Koios
-   *  was unreachable. */
+   *  from `/drep_delegators` pagination walk at request time; undefined
+   *  if Koios was unreachable. May be capped at 5000 (see truncated flag). */
   delegatorCountLive?: number;
+  /** True when the live count walk hit `DREP_DELEGATORS_MAX_PAGES`
+   *  (5000 rows today). UI should render "{delegatorCountLive}+" rather
+   *  than the exact number when this is true. Absent / false means the
+   *  count is exhaustive. */
+  delegatorCountTruncated?: boolean;
 }
 
 export interface DRepRecentVote {

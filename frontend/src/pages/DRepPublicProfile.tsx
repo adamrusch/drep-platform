@@ -313,7 +313,14 @@ export function DRepPublicProfile(): React.ReactElement {
             Delegators
           </div>
           <div className="font-medium text-[var(--text-primary)] tabular-nums">
-            {typeof delegatorCount === 'number' ? delegatorCount.toLocaleString() : '—'}
+            {typeof delegatorCount === 'number'
+              ? // `delegatorCountTruncated` is only set when the live count
+                // hit the Koios-pagination cap (currently 5000 rows). Render
+                // "{count}+" so the user knows the precise number is larger
+                // than what the count says. See backend/src/lib/koios.ts
+                // `fetchDRepDelegatorCount` for the truncation contract.
+                `${delegatorCount.toLocaleString()}${drep.delegatorCountTruncated ? '+' : ''}`
+              : '—'}
           </div>
         </div>
         <div>
