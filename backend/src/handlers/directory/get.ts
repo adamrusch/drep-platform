@@ -16,11 +16,13 @@
  */
 
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
-import { getItem, tableNames } from '../../lib/dynamodb';
+import { getItem, queryItems, tableNames } from '../../lib/dynamodb';
 import type {
   DRepDirectoryItem,
   DRepDetail,
   DRepRecentVote,
+  DRepPowerHistoryItem,
+  DRepVotingPowerSnapshot,
 } from '../../lib/types';
 import { fetchDRepVotes, fetchDRepDelegatorCount } from '../../lib/koios';
 import { ok, badRequest, notFound, internalError } from '../_response';
@@ -165,6 +167,38 @@ export const handler = async (
       enrichment = { fetchedAt: Date.now() };
     }
 
+    // Phase C: voting-power history. Read all `POWER#`-prefixed rows for
+    // this DRep in a single Query. The history is small (~73 rows/year)
+    // and lives under the same partition as the PROFILE row, so this is
+    // one round-trip. Failures here are non-fatal — the Sparkline just
+    // won't render. The DDB Query is fully cached: this code does NOT
+    // hit Koios. The daily sync owns the upstream calls.
+    let votingPowerHistory: DRepVotingPowerSnapshot[] | undefined;
+    try {
+      const powerRows = await queryItems<DRepPowerHistoryItem>(
+        tableNames.drepDirectory,
+        {
+          keyConditionExpression: '#pk = :drepId AND begins_with(#sk, :powerPrefix)',
+          expressionAttributeNames: { '#pk': 'drepId', '#sk': 'SK' },
+          expressionAttributeValues: {
+            ':drepId': drepId,
+            ':powerPrefix': 'POWER#',
+          },
+          // Oldest-first chronologically (SK is zero-padded epoch number
+          // so lexicographic order == numeric order).
+          scanIndexForward: true,
+          limit: 500, // 500 epochs = ~7 years; plenty of headroom.
+        },
+      );
+      if (powerRows.items.length > 0) {
+        votingPowerHistory = powerRows.items
+          .filter((r) => typeof r.epochNo === 'number' && typeof r.amount === 'string')
+          .map((r) => ({ epochNo: r.epochNo, amount: r.amount }));
+      }
+    } catch (err) {
+      console.warn(`directory/get: power-history query failed for ${drepId}:`, err);
+    }
+
     const detail: DRepDetail = {
       drepId: cached.drepId,
       hex: cached.hex,
@@ -201,6 +235,9 @@ export const handler = async (
       // frontend reads this to render "{n}+" instead of "{n}".
       ...(enrichment.delegatorCountTruncated
         ? { delegatorCountTruncated: true }
+        : {}),
+      ...(votingPowerHistory !== undefined
+        ? { votingPowerHistory }
         : {}),
     };
 
