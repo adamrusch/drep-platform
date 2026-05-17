@@ -82,13 +82,23 @@ export class FrontendStack extends cdk.Stack {
     // tightening target in QA_FINAL.md once we can shim or vendor those
     // call sites; until then a CSP with 'unsafe-eval' is *still* much
     // stronger than the (no-CSP) baseline that shipped before.
+    //
+    // NOTE on connect-src: Phase B (commit 118ea5a6) moved Blockfrost
+    // server-side only; the frontend bundle contains zero `blockfrost`
+    // references. Removing `https://*.blockfrost.io` from the allowlist
+    // tightens the CSP without affecting any code path — every outbound
+    // request from the SPA goes through `lib/api.ts` which hits
+    // `api.drep.tools` exclusively. If a future feature ever needs the
+    // browser to call Blockfrost directly (probably never — server-side
+    // proxying is cheaper and gives us caching control), re-add this
+    // entry then.
     const cspDirective = [
       "default-src 'self'",
       "script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'",
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
       "font-src 'self' https://fonts.gstatic.com data:",
       "img-src 'self' data: blob: https:",
-      `connect-src 'self' ${apiOriginsForCsp} https://*.blockfrost.io`.trim(),
+      `connect-src 'self' ${apiOriginsForCsp}`.trim(),
       "frame-ancestors 'none'",
       "base-uri 'self'",
       "form-action 'self'",
