@@ -18,6 +18,7 @@ Table-name prefix on every table: `drep-platform-{stage}-` (`prod`, `dev`,
 - [drep_committees](#drep_committees)
 - [drep_directory](#drep_directory)
 - [governance_actions](#governance_actions)
+- [governance_votes](#governance_votes)
 - [comments](#comments)
 - [clubhouse_posts](#clubhouse_posts)
 - [audit_log](#audit_log)
@@ -148,6 +149,34 @@ Single-partition pattern is documented inline in `database-stack.ts:86-124`.
 Acceptable at ~2000 rows with PAY_PER_REQUEST adaptive capacity. Revisit at
 ~10k rows.
 
+### `POWER#` sub-rows (Phase C, added 2026-05-17)
+
+The directory table now hosts a second SK shape: `POWER#${zero-padded epoch_no}`.
+One row per (drepId, epoch) snapshot of voting power, populated daily by
+the new `drep-voting-power-history` sync from Koios
+`/drep_voting_power_history`. Surfaced by `directory/get.ts` as
+`votingPowerHistory[]` on the response, which the frontend Sparkline reads.
+
+| Field         | Type | Role                                                                  |
+|---------------|------|-----------------------------------------------------------------------|
+| `drepId`      | S    | PK — same as the PROFILE row                                          |
+| `SK`          | S    | `POWER#${epoch_no zero-padded to 6 digits}` (e.g. `POWER#000515`)     |
+| `epochNo`     | N    | Epoch this snapshot represents                                        |
+| `amount`      | S    | Voting power in lovelace, stringified BigInt                          |
+| `capturedAt`  | S    | ISO-8601 of the sync run that wrote this row                          |
+
+Access pattern: `Query(drepId)` with `begins_with(SK, "POWER#")` returns
+the full history for one DRep in chronological order (lexical = numeric
+order on the zero-padded epoch). The detail handler does this on every
+cold-cache miss; results are folded into the 5-min handler cache.
+
+Idempotency: conditional Put on `attribute_not_exists(SK)`. Historical
+snapshots are immutable, so re-attempted writes silently skip.
+
+Cost: ~1500 active DReps × ~73 rows/year = ~110k items/year. Each row
+~200B → ~22MB/year of storage. Daily sync issues ~1500 Koios calls and
+~110k conditional Puts (mostly skips); steady-state WCU ~$0.14/day.
+
 Sample item:
 
 ```json
@@ -172,6 +201,18 @@ Sample item:
   "image": "https://example.com/avatar.png",
   "enrichmentVersion": 3,
   "lastSyncedAt": "2026-05-01T12:00:00Z"
+}
+```
+
+Sample `POWER#` sub-row:
+
+```json
+{
+  "drepId": "drep1...",
+  "SK": "POWER#000515",
+  "epochNo": 515,
+  "amount": "1234567890123",
+  "capturedAt": "2026-05-17T02:00:00Z"
 }
 ```
 
@@ -247,6 +288,71 @@ Sample item:
   "votingRoles": {"drep": true, "spo": false, "committee": true},
   "enrichmentVersion": 11,
   "lastSyncedAt": "2026-05-01T12:00:00Z"
+}
+```
+
+---
+
+## governance_votes
+
+Per-vote event log — one row per individual on-chain governance vote
+across DReps, SPOs, and the Constitutional Committee. Phase C addition
+(2026-05-17). Populated by `sync/governance-intake.ts` from Koios
+`/vote_list` (the same call already used for per-proposal tallies and
+DRep last-voted timestamps; we just persist the rows now). Append-only.
+
+Use cases:
+- Vote-timeline rendering on the governance-action detail page
+  (`Query(actionId)`).
+- "DRep voting history" UX powered by the `voter-blockTime-index` GSI
+  (`Query(voterId)` with `ScanIndexForward: false`).
+- Independent audit / data-export — exporting the table is a complete
+  snapshot of mainnet governance voting since Phase C deploy.
+
+| Field          | Type | Role                                                                                |
+|----------------|------|-------------------------------------------------------------------------------------|
+| `actionId`     | S    | PK — `tx_hash#cert_index` matching `governance_actions.actionId`                    |
+| `voteKey`      | S    | SK — `${voterRole}#${voterId}#${voteTxHash}`, unique per vote certificate           |
+| `voterRole`    | S    | `'DRep' \| 'SPO' \| 'ConstitutionalCommittee'`                                      |
+| `voterId`      | S    | Bech32 DRep ID, pool ID, or CC hot ID                                               |
+| `vote`         | S    | `'Yes' \| 'No' \| 'Abstain'`                                                        |
+| `votedAt`      | S    | ISO-8601 timestamp of the `block_time`                                              |
+| `blockTime`    | N    | Unix seconds — used as the GSI sort key                                             |
+| `epochNo`      | N    | Epoch in which the vote was cast                                                    |
+| `voteTxHash`   | S    | Tx hash of the vote certificate (part of `voteKey` so vote-changes coexist as rows) |
+| `metaUrl`      | S    | Off-chain rationale anchor URL (optional)                                           |
+| `metaHash`     | S    | Off-chain anchor hash (optional)                                                    |
+| `ingestedAt`   | S    | ISO-8601 when this row was first written                                            |
+
+GSI: `voter-blockTime-index`
+- PK: `voterId`
+- SK: `blockTime` (NUMBER)
+- Projection: ALL
+- Access pattern: per-voter timeline, newest-first via `ScanIndexForward: false`
+
+Write semantics: conditional Put with
+`attribute_not_exists(actionId) AND attribute_not_exists(voteKey)`. A
+high-water-mark stored in `auth_nonces` (`nonce='_watermark:governance_votes_block_time'`)
+bounds how far back each cycle walks, capping per-cycle DynamoDB cost at
+~50 WCU steady-state instead of ~24k WCU. See `persistVoteEvents` in
+`backend/src/sync/governance-intake.ts` for the watermark contract.
+
+Expected size: 24k rows × ~250B = ~6MB today. Growth: ~50/day.
+
+Sample item:
+
+```json
+{
+  "actionId": "abc123...#0",
+  "voteKey": "DRep#drep1xyz...#fff...",
+  "voterRole": "DRep",
+  "voterId": "drep1xyz...",
+  "vote": "Yes",
+  "votedAt": "2026-05-15T08:32:15Z",
+  "blockTime": 1747212735,
+  "epochNo": 515,
+  "voteTxHash": "fff...",
+  "ingestedAt": "2026-05-17T00:00:00Z"
 }
 ```
 
@@ -350,8 +456,10 @@ the data fields look identical. See full inline history in
 | 8 -> 9 | `votingRoles` (CIP-1694 applicability map per action type) stamped on every action. DRep `abstain.power` no longer includes auto-abstain stake. |
 | 9 -> 10 | `treasuryWithdrawalLovelace` persisted on TreasuryWithdrawals. Surfaced for `/governance/stats`. |
 | 10 -> 11 | Phase B — per-proposal vote tallies now come from Koios `/vote_list`. ~99% Blockfrost call reduction on the vote-tally path. |
+| 11 -> 12 | Multi-gateway IPFS fallback for actions whose anchor exists on-chain but whose `meta_json` came back null from Koios. New fields: `metadataGateway`, `metadataRecoveredAt`. |
+| 12 -> 13 | Two more anchor-recovery techniques: IPFS hash-mismatch surfacing (new `anchorHashMismatch` flag) and `raw.githubusercontent.com` historical-commit walk (new `anchorRecoveredFromCommit` / `anchorRecoveredFromCommitDate` fields). Phase C does NOT bump this further — the per-vote event log lives in a separate table (`governance_votes`). |
 
-Current: **v11**.
+Current: **v13**.
 
 ### drep_directory — `ENRICHMENT_VERSION`
 

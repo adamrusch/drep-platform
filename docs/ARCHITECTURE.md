@@ -188,10 +188,11 @@ SPA (DRepPublicProfile.tsx)
   v  GET /dreps/{drepId}
 Lambda drepDirectoryGetFn (handlers/directory/get.ts)
   |
-  v  GetItem on drep_directory
+  v  GetItem on drep_directory (PROFILE row)
+  v  + Query on drep_directory (POWER#* rows — Phase C voting-power history)
   v  + on-demand calls to Koios for delegators / recent votes
        (5-min in-Lambda cache)
-DynamoDB + Koios -> response
+DynamoDB + Koios -> response (with votingPowerHistory[] for Sparkline)
 ```
 
 ### Comments (governance + clubhouse)
@@ -204,7 +205,7 @@ SPA (CommentList.tsx + CommentForm.tsx)
 Lambda comments/list.ts | comments/create.ts
   |
   |  POST validates JWT cookie + mutation-nonce + Ed25519 signature
-  |  Optional: lookupRecognition(stakeAddress) -> Blockfrost (best-effort)
+  |  Optional: lookupRecognition(stakeAddress) -> Koios primary, Blockfrost fallback (best-effort)
   v
 DynamoDB Put on comments table
 ```
@@ -244,9 +245,17 @@ Implementation: `backend/src/lib/auth.ts` + `handlers/auth/*`.
 - **Circuit breaker**: at the top of each cycle, check the persistent
   marker in `auth_nonces`; if open, skip the cycle entirely. Quota errors
   (402/429) on Blockfrost calls open the marker for 6 hours.
-- **Enrichment versioning**: `ENRICHMENT_VERSION = 11` today. Bumping
+- **Enrichment versioning**: `ENRICHMENT_VERSION = 13` today. Bumping
   forces a re-enrichment of every row. Full version history is in the
-  source comments (`backend/src/sync/governance-intake.ts:67-156`).
+  source comments (`backend/src/sync/governance-intake.ts:67-201`).
+- **Phase C — per-vote event persistence**: at the same point the cycle
+  already has the global `vote_list` in memory, the sync writes one row
+  per individual vote into the new `governance_votes` table
+  (`persistVoteEvents`). Append-only via conditional Put; bounded by a
+  persistent high-water-mark in `auth_nonces` so steady-state cost is
+  ~50 WCU/cycle (only newly-cast votes pay the WCU). Unlocks the
+  governance-action-detail vote-timeline UX without a Koios round-trip
+  on every page load.
 
 ### DRep directory (`backend/src/sync/drep-directory.ts`)
 
@@ -264,6 +273,21 @@ Implementation: `backend/src/lib/auth.ts` + `handlers/auth/*`.
   `Put` rows that genuinely differ (canonicalize-and-stringify, ignoring
   `lastSyncedAt`).
 - No Blockfrost dependency at all.
+
+### DRep voting-power history (`backend/src/sync/drep-voting-power-history.ts`) — Phase C
+
+- **Cadence**: once daily at 02:00 UTC (set by `SchedulerStack`).
+- **One Koios call per active DRep** (`/drep_voting_power_history`),
+  paced at ~5 RPS to stay under the public-tier 10 RPS ceiling. ~1500
+  active DReps → ~5 min wall-clock.
+- **Storage**: `POWER#${zero-padded epoch_no}`-prefixed sub-rows on the
+  existing `drep_directory` table. One row per (drepId, epoch) snapshot.
+  Conditional Put on `attribute_not_exists(SK)` — historical snapshots
+  are immutable so re-attempts silently skip at 1 WCU each.
+- **Surfaced**: `directory/get.ts` queries the `POWER#` rows alongside
+  the `PROFILE` row on every request and serves them as
+  `votingPowerHistory[]`. The frontend Sparkline reads this field.
+- **No Blockfrost dependency.** Pure Koios → DynamoDB sync.
 
 ---
 
@@ -473,9 +497,13 @@ human-in-the-loop awareness.
   often 404s for older actions.
 
 Blockfrost is kept as fallback because it has a stable API contract and is
-operationally robust — and because some endpoints (per-account stake +
-DRep delegation for recognition pills, delegation history) aren't on
-Koios's free tier.
+operationally robust. **Phase C (2026-05-17)** moved the last remaining
+Blockfrost-primary surfaces — `/epoch`, recognition pills, and
+`/profile/{wallet}/delegation-history` — to Koios primary via
+`/epoch_info` and `/account_info_cached`. After Phase C, Blockfrost is
+exercised only when Koios is unreachable; steady-state call volume on
+the Blockfrost project drops to ~zero, and the Discovery tier can be
+safely downgraded to free.
 
 ### HTTP API v2 over REST API
 
