@@ -44,6 +44,11 @@ export const tableNames = {
   drepCommittees: `${TABLE_PREFIX}drep_committees`,
   drepDirectory: `${TABLE_PREFIX}drep_directory`,
   governanceActions: `${TABLE_PREFIX}governance_actions`,
+  /** Per-vote event log; PK=actionId, SK=`${voterRole}#${voterId}#${voteTxHash}`.
+   *  Append-only via conditional Put. Populated by `governance-intake.ts` from
+   *  the Koios `/vote_list` feed. See infra/lib/database-stack.ts and
+   *  docs/SCHEMA.md for the full item shape. */
+  governanceVotes: `${TABLE_PREFIX}governance_votes`,
   comments: `${TABLE_PREFIX}comments`,
   clubhousePosts: `${TABLE_PREFIX}clubhouse_posts`,
   auditLog: `${TABLE_PREFIX}audit_log`,
@@ -137,6 +142,62 @@ export async function putItem<T extends Record<string, unknown>>(
       : {}),
   };
   await docClient.send(new PutCommand(params));
+}
+
+/**
+ * Best-effort append-only write — Put with a `ConditionExpression` that
+ * fails if the (PK, SK) tuple already exists. The promise resolves
+ * regardless of which outcome happened so a caller doing a bulk pass can
+ * count successes and skips without try/catch around every call.
+ *
+ * Returns:
+ *   - `'written'` — the row was newly inserted
+ *   - `'skipped'` — the row already existed (ConditionalCheckFailedException)
+ *   - `'errored'` — any other failure path, with `error` populated
+ *
+ * Used by the `governance-intake` sync to append per-vote rows without
+ * re-writing the same vote on every cycle (~24k rows on mainnet today; a
+ * blind Put loop would burn ~24k WCU/cycle on data that almost never
+ * changes).
+ *
+ * Note: the SDK throws `ConditionalCheckFailedException` for the skip
+ * case; we recognise it by name to avoid coupling to an error class
+ * import. The cost of a skipped write is still one WRU (DynamoDB charges
+ * for the conditional check), but the alternative — Get-then-Put — would
+ * cost ~1.5x more in RCU+WCU and add a round-trip.
+ */
+export async function putItemIfAbsent<T extends Record<string, unknown>>(
+  tableName: string,
+  item: T,
+  /** Names of the partition key (and optionally sort key) attributes. We
+   *  build the ConditionExpression from these so the helper works on any
+   *  table without hardcoding key names. */
+  keyAttributes: { partitionKey: string; sortKey?: string },
+): Promise<{ outcome: 'written' | 'skipped' | 'errored'; error?: unknown }> {
+  const conditionParts: string[] = [`attribute_not_exists(#pk)`];
+  const names: Record<string, string> = { '#pk': keyAttributes.partitionKey };
+  if (keyAttributes.sortKey) {
+    conditionParts.push(`attribute_not_exists(#sk)`);
+    names['#sk'] = keyAttributes.sortKey;
+  }
+  const params: PutCommandInput = {
+    TableName: tableName,
+    Item: item,
+    ConditionExpression: conditionParts.join(' AND '),
+    ExpressionAttributeNames: names,
+  };
+  try {
+    await docClient.send(new PutCommand(params));
+    return { outcome: 'written' };
+  } catch (err) {
+    // The SDK throws a specific error with `name === 'ConditionalCheckFailedException'`
+    // when the condition fails (row already exists). Anything else is a real
+    // failure we surface to the caller.
+    if (err && typeof err === 'object' && (err as { name?: string }).name === 'ConditionalCheckFailedException') {
+      return { outcome: 'skipped' };
+    }
+    return { outcome: 'errored', error: err };
+  }
 }
 
 export async function deleteItem(

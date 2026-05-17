@@ -41,7 +41,7 @@ import {
   DREP_ALWAYS_NO_CONFIDENCE,
   type TallyLookups,
 } from '../lib/voteTally';
-import { getItem, putItem, tableNames } from '../lib/dynamodb';
+import { getItem, putItem, putItemIfAbsent, tableNames } from '../lib/dynamodb';
 import {
   findByAnchorUrl as findPillarByAnchorUrl,
   findByOnChainTxHash as findPillarByTxHash,
@@ -350,6 +350,23 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
     console.log(
       `Governance intake: Koios vote_list returned ${votesRes.value.length} votes across ${votesByActionId.size} proposals`,
     );
+    // ---- Phase C: persist per-vote events ----
+    // Append-only write of every vote into `governance_votes`. Bounded by
+    // a persistent high-water-mark to keep the per-cycle DynamoDB cost
+    // bounded — without it every 1-min sync would re-attempt 24k
+    // conditional Puts (~24k WCU/cycle = 34M WCU/day, ~$43/mo).
+    //
+    // Failures in this pass are non-fatal: vote events are an additive
+    // enrichment, and a failed cycle just means the next cycle picks up
+    // the missed window via the watermark.
+    try {
+      const written = await persistVoteEvents(votesRes.value);
+      console.log(
+        `Governance intake: governance_votes wrote=${written.written} skipped=${written.skipped} errored=${written.errored} watermark=${written.newWatermark}`,
+      );
+    } catch (err) {
+      console.warn('Governance intake: persistVoteEvents failed (non-fatal):', err);
+    }
   } else {
     const err = votesRes.reason;
     if (err instanceof KoiosError) {
@@ -1166,6 +1183,186 @@ async function processWithConcurrency<T>(
   };
   await Promise.all(Array.from({ length: cap }, () => lane()));
 }
+
+// ============================================================
+// Phase C — per-vote event persistence
+// ============================================================
+//
+// Writes one row per individual on-chain governance vote into the
+// `governance_votes` table. The data is already in memory (the
+// `vote_list` fetch above) so we're not adding any Koios calls —
+// this is pure storage.
+//
+// **Cost-control via watermark.** On mainnet today there are ~24k votes;
+// re-writing all of them every 1-minute sync would burn ~24k WCU/cycle
+// (~$43/mo at on-demand rates) for almost no real change — typical
+// daily delta is ~50 new votes. We persist a high-water-mark
+// (max `block_time` seen) in the `auth_nonces` table and only attempt
+// to write votes with `block_time > watermark` on subsequent cycles.
+//
+// **Idempotency** is double-belted: even past the watermark, every Put
+// is conditional on `attribute_not_exists`, so a re-introduced row
+// (e.g. after the watermark gets corrupted) silently lands as "skipped"
+// rather than overwriting an existing entry.
+//
+// **Crash safety:** the watermark is bumped only AFTER all writes for a
+// cycle complete. A crash mid-cycle leaves the watermark un-bumped, so
+// the next cycle re-walks the same window — every duplicate Put becomes
+// a skipped conditional check (1 WCU each, bounded). The walk-forward
+// is bounded too: we never look further back than `WATERMARK_LOOKBACK_SECONDS`,
+// preventing a corrupted watermark from triggering a re-write of 6 months
+// of history.
+
+const VOTE_WATERMARK_KEY = '_watermark:governance_votes_block_time';
+/** Maximum gap between the stored watermark and the oldest vote we'll
+ *  consider writing on this cycle. 24 hours × 3600 s.
+ *
+ *  Sized as a safety net for "container crash mid-cycle" / "DDB watermark
+ *  write failed but cycle wrote rows" / "manual cherry-pick of missed votes."
+ *  Wider than that wastes WCU re-attempting old votes the conditional Put
+ *  will skip anyway — at ~500 votes/day on mainnet, a 24h window means
+ *  ~500 conditional-check WCUs per cycle (~$0.02/day) vs ~33k WCUs for
+ *  a 7-day window. The watermark itself is the primary cost-control;
+ *  this just bounds the worst-case re-walk if something corrupted it. */
+const WATERMARK_LOOKBACK_SECONDS = 24 * 3_600;
+/** Concurrent in-flight conditional Puts. DynamoDB on-demand handles ~4k
+ *  WPS per partition; this table's PK distribution (`actionId` = ~109
+ *  distinct values) sees ~24k votes spread across them, ~220 votes per PK
+ *  in the worst case. 16 lanes is conservative and stays well under the
+ *  per-partition limits while keeping wall-clock under 30s on a cold
+ *  backfill. */
+const VOTE_WRITE_CONCURRENCY = 16;
+
+interface VoteWatermark {
+  /** Last block_time we successfully wrote (or attempted) up to. */
+  blockTime: number;
+}
+
+interface VotePersistResult {
+  written: number;
+  skipped: number;
+  errored: number;
+  newWatermark: number;
+}
+
+async function readVoteWatermark(): Promise<number> {
+  try {
+    const item = await getItem<{ nonce: string; blockTime?: number }>(
+      tableNames.authNonces,
+      { nonce: VOTE_WATERMARK_KEY },
+    );
+    if (item && typeof item.blockTime === 'number' && Number.isFinite(item.blockTime)) {
+      return item.blockTime;
+    }
+  } catch (err) {
+    console.warn('readVoteWatermark failed; treating as 0 (full backfill):', err);
+  }
+  return 0;
+}
+
+async function writeVoteWatermark(blockTime: number): Promise<void> {
+  // `auth_nonces` has TTL on `expiresAt` but the watermark must NOT
+  // expire — write a far-future value (current time + 100 years) so the
+  // DynamoDB TTL janitor never reaps it. The watermark is a permanent
+  // state, not a session marker.
+  const farFuture = Math.floor(Date.now() / 1000) + 100 * 365 * 86_400;
+  await putItem(tableNames.authNonces, {
+    nonce: VOTE_WATERMARK_KEY,
+    kind: 'watermark',
+    walletAddress: '_system',
+    blockTime,
+    expiresAt: farFuture,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+/**
+ * Persist every vote in `votes` to `governance_votes`. Skips rows whose
+ * `block_time` is below the stored watermark; re-attempts (conditional)
+ * for rows at-or-above. Bounded backfill via `WATERMARK_LOOKBACK_SECONDS`.
+ */
+async function persistVoteEvents(votes: readonly KoiosVote[]): Promise<VotePersistResult> {
+  const watermark = await readVoteWatermark();
+  const lookbackFloor = Math.max(0, watermark - WATERMARK_LOOKBACK_SECONDS);
+
+  // Filter to rows we'll consider writing. We pull rows whose block_time
+  // is >= the lookback floor (which equals `watermark - 7d`, or 0 on cold
+  // start). Past that we rely on the conditional Put to no-op.
+  const candidates = votes.filter((v) => {
+    if (typeof v.block_time !== 'number' || !Number.isFinite(v.block_time)) return false;
+    if (typeof v.proposal_tx_hash !== 'string' || v.proposal_tx_hash.length === 0) return false;
+    if (typeof v.voter_id !== 'string' || v.voter_id.length === 0) return false;
+    return v.block_time >= lookbackFloor;
+  });
+
+  if (candidates.length === 0) {
+    return { written: 0, skipped: 0, errored: 0, newWatermark: watermark };
+  }
+
+  let written = 0;
+  let skipped = 0;
+  let errored = 0;
+  let maxBlockTime = watermark;
+
+  let cursor = 0;
+  const lane = async (): Promise<void> => {
+    while (true) {
+      const i = cursor++;
+      if (i >= candidates.length) return;
+      const v = candidates[i]!;
+      const actionId = `${v.proposal_tx_hash}#${v.proposal_index}`;
+      const voteKey = `${v.voter_role}#${v.voter_id}#${v.vote_tx_hash}`;
+      const item = {
+        actionId,
+        voteKey,
+        voterRole: v.voter_role,
+        voterId: v.voter_id,
+        vote: v.vote,
+        votedAt: new Date(v.block_time * 1000).toISOString(),
+        blockTime: v.block_time,
+        epochNo: v.epoch_no,
+        voteTxHash: v.vote_tx_hash,
+        ...(v.meta_url ? { metaUrl: v.meta_url } : {}),
+        ...(v.meta_hash ? { metaHash: v.meta_hash } : {}),
+        ingestedAt: new Date().toISOString(),
+      };
+      const result = await putItemIfAbsent(tableNames.governanceVotes, item, {
+        partitionKey: 'actionId',
+        sortKey: 'voteKey',
+      });
+      if (result.outcome === 'written') {
+        written++;
+      } else if (result.outcome === 'skipped') {
+        skipped++;
+      } else {
+        errored++;
+        if (result.error) {
+          console.warn(`persistVoteEvents put failed for ${actionId}#${voteKey}:`, result.error);
+        }
+      }
+      if (v.block_time > maxBlockTime) maxBlockTime = v.block_time;
+    }
+  };
+  await Promise.all(Array.from({ length: VOTE_WRITE_CONCURRENCY }, () => lane()));
+
+  // Only advance the watermark when we had zero errored writes; a half-
+  // completed cycle should be retried on the next sync rather than
+  // skipped because of the bumped watermark. The conditional-Put
+  // idempotency guarantees no duplicates on the retry.
+  if (errored === 0 && maxBlockTime > watermark) {
+    try {
+      await writeVoteWatermark(maxBlockTime);
+    } catch (err) {
+      console.warn('persistVoteEvents: watermark write failed (will retry next cycle):', err);
+    }
+  }
+
+  return { written, skipped, errored, newWatermark: errored === 0 ? maxBlockTime : watermark };
+}
+
+// Re-export for tests / external introspection. The watermark key is
+// considered an implementation detail.
+export { persistVoteEvents as _persistVoteEvents };
 
 /**
  * EventBridge scheduled Lambda handler — cadence is owned by SchedulerStack
