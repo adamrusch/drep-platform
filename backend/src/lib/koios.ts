@@ -317,6 +317,7 @@ export function _resetCache(): void {
   _committeeCache = null;
   _voteCache = null;
   _tipCache = null;
+  _epochInfoCache = null;
 }
 
 // ---- Internal helpers ----
@@ -828,6 +829,268 @@ export async function getCurrentEpoch(): Promise<number> {
   const epoch = (row as { epoch_no: number }).epoch_no;
   _tipCache = { fetchedAt: now, value: { epoch_no: epoch } };
   return epoch;
+}
+
+// ---- Account info (Phase C: replaces Blockfrost `accounts/{stake_address}`) ----
+//
+// `account_info_cached` is the Koios POST endpoint that returns the same
+// shape Blockfrost's `accounts/{stake_address}` does — stake amount,
+// rewards, current DRep delegation, current pool delegation, registration
+// status — but accepts a batch of addresses in one call. We expose two
+// flavors:
+//   - `fetchAccountInfoBatch(addresses)` for the rare bulk case (none in
+//     production today, but symmetric with `fetchDRepInfoBatch` so future
+//     code can use it without a follow-up migration);
+//   - `fetchAccountInfo(stakeAddress)` for the single-address case used
+//     by `recognition.ts` (per-comment lookup) and `delegationHistory.ts`
+//     (per-request lookup).
+//
+// Field-name mapping vs Blockfrost:
+//   Blockfrost.controlled_amount  -> Koios.total_balance
+//   Blockfrost.drep_id            -> Koios.delegated_drep
+//   Blockfrost.pool_id            -> Koios.delegated_pool
+//   Blockfrost.active             -> Koios.status === 'registered'
+// Other fields are mapped as documented inline; see `KoiosAccountInfo`
+// below for the full type.
+
+/**
+ * One row of the `account_info_cached` response. Fields are nullable per
+ * the spec — a stake address that has never been registered comes back
+ * with most fields null and `status: 'not registered'`.
+ *
+ * `total_balance` is the closest analogue to Blockfrost's
+ * `controlled_amount` — it includes UTxO balance + rewards + reserves +
+ * treasury reward addresses. Stringified to preserve precision past 2^53.
+ */
+export interface KoiosAccountInfo {
+  stake_address: string;
+  /** `'registered' | 'not registered' | 'retired'` — verbatim from upstream. */
+  status: string;
+  /** Bech32 pool ID this stake currently delegates to. Null when undelegated. */
+  delegated_pool: string | null;
+  /** Bech32 DRep ID this stake currently delegates to (or predefined
+   *  `drep_always_abstain` / `drep_always_no_confidence`). Null when
+   *  the stake has not yet voted-delegated. */
+  delegated_drep: string | null;
+  /** Total controlled stake in lovelace, stringified. Includes UTxO +
+   *  rewards available. */
+  total_balance: string;
+  /** UTxO-only balance. */
+  utxo: string | null;
+  /** Lifetime reward sum. */
+  rewards: string | null;
+  /** Lifetime withdrawal sum. */
+  withdrawals: string | null;
+  /** Rewards still claimable (not yet withdrawn). */
+  rewards_available: string | null;
+  /** Lifetime reserve rewards. */
+  reserves: string | null;
+  /** Lifetime treasury rewards. */
+  treasury: string | null;
+  /** Active stake at the current epoch, when known. */
+  active_stake?: string | null;
+  /** Active epoch number for this delegation. */
+  active_epoch_no?: number | null;
+}
+
+/**
+ * Fetch account info for one or more stake addresses via Koios
+ * `/account_info_cached`. Returns the raw rows; the caller is
+ * responsible for shape-adapting to whatever it needs (Blockfrost-shape
+ * for back-compat, or the Koios shape directly).
+ *
+ * Throws `KoiosError` on any failure — single-address callers should
+ * wrap this in their own fallback (the Phase C wrappers below do).
+ */
+export async function fetchAccountInfoBatch(
+  stakeAddresses: readonly string[],
+): Promise<KoiosAccountInfo[]> {
+  if (stakeAddresses.length === 0) return [];
+  const res = await koiosFetch('/account_info_cached', {
+    method: 'POST',
+    body: JSON.stringify({ _stake_addresses: stakeAddresses }),
+    timeoutMs: 8_000,
+  });
+  if (!res.ok) {
+    throw new KoiosError(
+      '/account_info_cached',
+      `HTTP ${res.status} ${res.statusText}`,
+      res.status,
+    );
+  }
+  const parsed = (await readJsonCapped(res, '/account_info_cached')) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new KoiosError('/account_info_cached', 'expected JSON array');
+  }
+  return parsed as KoiosAccountInfo[];
+}
+
+/**
+ * Fetch one stake address's account info. Wraps `fetchAccountInfoBatch`
+ * and unwraps the single row. Returns null when Koios reports the
+ * address is not in the cache (an unregistered or freshly-created stake
+ * address — `account_info_cached` returns an empty array rather than a
+ * row with `status: 'not registered'` in some Koios revisions).
+ *
+ * **Migration rationale:** this is the Koios analogue of Blockfrost's
+ * `accounts(stake_address)`. Both providers source from cardano-db-sync,
+ * so the underlying state is identical — only the response field naming
+ * differs. The Phase C migration uses this as primary and Blockfrost as
+ * fallback for `recognition.ts` and `delegationHistory.ts`.
+ *
+ * Throws `KoiosError` on any transport / 4xx / 5xx failure so the caller
+ * can fall back cleanly.
+ */
+export async function fetchAccountInfo(
+  stakeAddress: string,
+): Promise<KoiosAccountInfo | null> {
+  const rows = await fetchAccountInfoBatch([stakeAddress]);
+  if (rows.length === 0) return null;
+  // Defensive: the upstream sometimes returns a row even for unregistered
+  // addresses, with `status: 'not registered'` and most fields null. The
+  // caller decides how to handle that — we surface the row as-is rather
+  // than collapsing it to null.
+  return rows[0] ?? null;
+}
+
+// ---- Epoch info (Phase C: replaces Blockfrost `epochsLatest`) ----
+//
+// The `/epoch_info` endpoint accepts `?_epoch_no=N` and returns the same
+// fields Blockfrost's `epochsLatest` does (epoch, start_time, end_time,
+// first_block_time, last_block_time, block_count, tx_count, output,
+// fees, active_stake) — plus a few extras Koios indexes that we ignore.
+//
+// We expose two helpers:
+//   - `getCurrentEpochInfo()` — calls `/tip` (already cached) to find
+//     the current epoch, then `/epoch_info` for the details. Two calls
+//     per cold cache, one per warm.
+//   - `getEpochInfo(epochNo)` — explicit epoch lookup. Currently only
+//     used internally by `getCurrentEpochInfo`, exported for future use.
+
+/**
+ * One row of `/epoch_info`. Field names mirror the upstream payload
+ * exactly. Most fields are nullable on epochs that haven't started yet;
+ * for the current/past epoch they should all be populated.
+ */
+export interface KoiosEpochInfo {
+  epoch_no: number;
+  out_sum: string | null;
+  fees: string | null;
+  tx_count: number | null;
+  blk_count: number | null;
+  /** Unix seconds — epoch start. */
+  start_time: number | null;
+  /** Unix seconds — epoch end (deterministic; `start_time + 432000` on mainnet). */
+  end_time: number | null;
+  first_block_time: number | null;
+  last_block_time: number | null;
+  active_stake: string | null;
+  total_rewards: string | null;
+  avg_blk_reward: string | null;
+}
+
+/** Short cache TTL for epoch info — the data only changes every 5 days
+ *  but we want the SPA countdown to feel "fresh" so we re-fetch every
+ *  minute on a warm Lambda. */
+const EPOCH_INFO_CACHE_TTL_MS = 60_000;
+let _epochInfoCache: CacheEntry<KoiosEpochInfo> | null = null;
+
+/**
+ * Fetch the current epoch's full info via Koios. Uses `/tip` for the
+ * current epoch number (cheap; cached at 30s anyway) and `/epoch_info`
+ * for the row. Cached at module scope for `EPOCH_INFO_CACHE_TTL_MS` so
+ * a warm Lambda doesn't hit Koios twice per request burst.
+ *
+ * **Migration rationale:** this is the Koios analogue of Blockfrost's
+ * `epochsLatest`. Used by Phase C in `epoch/get.ts` as primary, with
+ * the existing Blockfrost path as fallback.
+ *
+ * Throws `KoiosError` on any failure so the caller can fall back.
+ */
+export async function getCurrentEpochInfo(): Promise<KoiosEpochInfo> {
+  const now = Date.now();
+  if (_epochInfoCache && now - _epochInfoCache.fetchedAt < EPOCH_INFO_CACHE_TTL_MS) {
+    return _epochInfoCache.value;
+  }
+  const epochNo = await getCurrentEpoch();
+  const info = await getEpochInfo(epochNo);
+  _epochInfoCache = { fetchedAt: now, value: info };
+  return info;
+}
+
+/**
+ * Explicit epoch lookup. Used internally by `getCurrentEpochInfo`;
+ * exported so a future "show epoch N history" page can fetch by epoch
+ * number without duplicating the parsing logic.
+ */
+export async function getEpochInfo(epochNo: number): Promise<KoiosEpochInfo> {
+  const res = await koiosFetch(`/epoch_info?_epoch_no=${epochNo}`, {
+    method: 'GET',
+    timeoutMs: 5_000,
+  });
+  if (!res.ok) {
+    throw new KoiosError(
+      '/epoch_info',
+      `HTTP ${res.status} ${res.statusText}`,
+      res.status,
+    );
+  }
+  const parsed = (await readJsonCapped(res, '/epoch_info')) as unknown;
+  const row = Array.isArray(parsed) ? parsed[0] : parsed;
+  if (!row || typeof row !== 'object' || typeof (row as { epoch_no?: unknown }).epoch_no !== 'number') {
+    throw new KoiosError('/epoch_info', 'missing epoch_no');
+  }
+  return row as KoiosEpochInfo;
+}
+
+// ---- DRep voting power history (Phase C: new sync) ----
+//
+// `/drep_voting_power_history` returns one row per epoch this DRep has
+// existed in, with the voting power they carried at the snapshot
+// boundary. Used by the new daily voting-power-history sync to populate
+// the per-DRep sparkline on the directory detail page.
+
+/** One row of `drep_voting_power_history`. */
+export interface KoiosDRepPowerHistoryRow {
+  drep_id: string;
+  epoch_no: number;
+  /** Voting power in lovelace, stringified BigInt. */
+  amount: string;
+}
+
+/**
+ * Fetch the full voting-power history for one DRep. Returns null on any
+ * failure — the daily sync treats this as best-effort per row and skips
+ * over DReps whose history call fails.
+ */
+export async function fetchDRepPowerHistory(
+  drepId: string,
+): Promise<KoiosDRepPowerHistoryRow[] | null> {
+  try {
+    // Note: the endpoint takes a SINGULAR `_drep_id` parameter, unlike
+    // most other Koios `_drep_*` endpoints which accept an array. Sending
+    // `_drep_ids` instead returns 404 with no error message.
+    const res = await koiosFetch('/drep_voting_power_history', {
+      method: 'POST',
+      body: JSON.stringify({ _drep_id: drepId }),
+      timeoutMs: 8_000,
+    });
+    if (!res.ok) {
+      console.warn(
+        `[Koios /drep_voting_power_history] HTTP ${res.status} for ${drepId}`,
+      );
+      return null;
+    }
+    const parsed = (await readJsonCapped(res, '/drep_voting_power_history')) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    return parsed as KoiosDRepPowerHistoryRow[];
+  } catch (err) {
+    console.warn(
+      `[Koios /drep_voting_power_history] fetch failed for ${drepId}:`,
+      err,
+    );
+    return null;
+  }
 }
 
 /**
