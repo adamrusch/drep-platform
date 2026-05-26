@@ -227,7 +227,14 @@ export function DRepPublicProfile(): React.ReactElement {
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2 flex-wrap mb-1">
               {drep.givenName ? (
-                <h1 className="text-[24px] font-bold tracking-tight text-[var(--text-primary)] truncate">
+                <h1
+                  className={cn(
+                    'text-[24px] font-bold tracking-tight text-[var(--text-primary)] truncate',
+                    // Predefined DRep names are hard-coded by the sync
+                    // (not from a CIP-119 anchor) — italicize to signal.
+                    drep.isPredefined && 'italic',
+                  )}
+                >
                   {drep.givenName}
                 </h1>
               ) : (
@@ -235,7 +242,13 @@ export function DRepPublicProfile(): React.ReactElement {
                   (Unnamed DRep)
                 </h1>
               )}
-              {drep.isActive ? (
+              {drep.isPredefined ? (
+                <StatusPill
+                  status="voting"
+                  label="Predefined"
+                  title="A built-in Cardano DRep used for auto-vote delegations. Not a registered DRep — protocol primitive."
+                />
+              ) : drep.isActive ? (
                 <StatusPill status="active" label="Active" />
               ) : (
                 <StatusPill
@@ -375,27 +388,51 @@ export function DRepPublicProfile(): React.ReactElement {
         )}
       </div>
 
-      {/* Voting power trend — placeholder series until per-DRep history sync lands */}
-      <div className="rounded-token-xl border border-[var(--border-default)] bg-[var(--bg-canvas)] p-5 shadow-token-sm">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="font-semibold text-[15px] text-[var(--text-primary)] flex items-center gap-2">
-            <TrendingUp size={14} strokeWidth={2} className="text-[var(--brand-primary)]" />
-            Voting power trend
-            <span className="text-[11px] text-[var(--text-tertiary)] font-normal ml-1">
-              · last 14 epochs
-            </span>
-          </h2>
-          <span className="inline-flex items-center text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-token-full bg-[var(--bg-muted)] text-[var(--text-tertiary)]">
-            Sample data
-          </span>
+      {/* Predefined-DRep explainer — only renders for the two protocol
+          pseudo-identities. They have no CIP-119 anchor, no Sparkline,
+          no recent-votes table (their auto-vote is computed at
+          ratification time, not recorded per-DRep). The user lands here
+          when navigating from a directory card or a wallet that delegates
+          to one of them; the static explainer is what stops the page
+          from looking broken. */}
+      {drep.isPredefined && (
+        <div className="rounded-token-xl border border-[var(--info)]/30 bg-[var(--info-soft)] p-5 text-sm">
+          <p className="text-[var(--text-primary)] font-medium mb-1">
+            About this predefined DRep
+          </p>
+          <p className="text-[var(--text-secondary)] leading-relaxed">
+            {drep.drepId === 'drep_always_abstain'
+              ? "Stake delegated here is recorded as 'Abstain' on every governance action. Abstain stake is excluded from the active voting denominator under CIP-1694."
+              : "Stake delegated here is recorded as 'No' on most governance actions, and 'Yes' on No-Confidence motions. It counts toward the active voting denominator."}
+          </p>
         </div>
-        <Sparkline
-          points={seededRandomWalk(drep.drepId, 14, 100)}
-          smooth
-          gradientId={`drep-trend-${drep.drepId}`}
-          height={120}
-        />
-      </div>
+      )}
+
+      {/* Voting power trend — placeholder series until per-DRep history sync lands.
+          Hidden for predefined DReps: their voting power swings with chain-wide
+          delegation patterns and the Sparkline is misleading for them. */}
+      {!drep.isPredefined && (
+        <div className="rounded-token-xl border border-[var(--border-default)] bg-[var(--bg-canvas)] p-5 shadow-token-sm">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="font-semibold text-[15px] text-[var(--text-primary)] flex items-center gap-2">
+              <TrendingUp size={14} strokeWidth={2} className="text-[var(--brand-primary)]" />
+              Voting power trend
+              <span className="text-[11px] text-[var(--text-tertiary)] font-normal ml-1">
+                · last 14 epochs
+              </span>
+            </h2>
+            <span className="inline-flex items-center text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-token-full bg-[var(--bg-muted)] text-[var(--text-tertiary)]">
+              Sample data
+            </span>
+          </div>
+          <Sparkline
+            points={seededRandomWalk(drep.drepId, 14, 100)}
+            smooth
+            gradientId={`drep-trend-${drep.drepId}`}
+            height={120}
+          />
+        </div>
+      )}
 
       {/* Bio sections */}
       {drep.objectives && (
@@ -452,7 +489,11 @@ export function DRepPublicProfile(): React.ReactElement {
         </Card>
       )}
 
-      {/* Recent votes */}
+      {/* Recent votes. Predefined DReps don't have per-vote rows in the
+          governance log — their auto-vote is applied at ratification and
+          isn't recorded as an individual vote certificate. Show a static
+          explainer rather than the empty-state "has not voted" copy that
+          would imply they're inactive. */}
       <Card>
         <h2 className="font-semibold text-[15px] mb-3 text-[var(--text-primary)] flex items-center gap-2">
           Recent votes
@@ -460,7 +501,12 @@ export function DRepPublicProfile(): React.ReactElement {
             · last 10
           </span>
         </h2>
-        {drep.recentVotes && drep.recentVotes.length > 0 ? (
+        {drep.isPredefined ? (
+          <p className="text-sm text-[var(--text-tertiary)]">
+            Predefined DReps don't have an individual voting history. Their auto-vote is
+            applied at ratification time to every applicable governance action.
+          </p>
+        ) : drep.recentVotes && drep.recentVotes.length > 0 ? (
           <ul className="space-y-1.5">
             {drep.recentVotes.map((v, i) => {
               const actionId = `${v.proposalTxHash}#${v.proposalIndex}`;

@@ -159,12 +159,28 @@ export const handler = async (
     // On-demand enrichment. Failures land as undefined fields — the
     // detail page renders gracefully without recent votes or live
     // delegator counts.
+    //
+    // For predefined DReps (`drep_always_abstain` / `drep_always_no_confidence`)
+    // we deliberately skip the enrichment Koios calls:
+    //   - `drep_voters`: predefined DReps don't have per-vote rows in
+    //     `/vote_list`; their auto-vote is computed at ratification time,
+    //     not recorded as a vote event. Asking would return [] at best
+    //     and waste a 6-8s round-trip; at worst it errors.
+    //   - `drep_delegators`: Abstain has millions of delegators on
+    //     mainnet; walking 5 pages × 1000 rows = paginated walk that
+    //     dwarfs the 30s Lambda budget. The cached `delegatorCount` (if
+    //     populated by a future sync pass) is the authoritative source
+    //     for predefined DReps.
     let enrichment: EnrichmentCacheEntry;
-    try {
-      enrichment = await fetchEnrichment(drepId);
-    } catch (err) {
-      console.warn(`directory/get: enrichment failed for ${drepId}:`, err);
+    if (cached.isPredefined) {
       enrichment = { fetchedAt: Date.now() };
+    } else {
+      try {
+        enrichment = await fetchEnrichment(drepId);
+      } catch (err) {
+        console.warn(`directory/get: enrichment failed for ${drepId}:`, err);
+        enrichment = { fetchedAt: Date.now() };
+      }
     }
 
     // Phase C: voting-power history. Read all `POWER#`-prefixed rows for
@@ -224,6 +240,14 @@ export const handler = async (
       ...(cached.qualifications !== undefined ? { qualifications: cached.qualifications } : {}),
       ...(cached.paymentAddress !== undefined ? { paymentAddress: cached.paymentAddress } : {}),
       ...(cached.references !== undefined ? { references: cached.references } : {}),
+      // Pass `isPredefined` straight through so the frontend can render
+      // the distinct "Predefined" badge on the detail page. The two
+      // predefined DReps (`drep_always_abstain`, `drep_always_no_confidence`)
+      // have no anchor metadata — the detail page must render gracefully
+      // without `objectives` / `motivations` / `references`. The current
+      // template already handles missing fields cleanly (it gates each
+      // section on the field being present).
+      ...(cached.isPredefined ? { isPredefined: true } : {}),
       ...(enrichment.recentVotes !== undefined
         ? { recentVotes: enrichment.recentVotes }
         : {}),
