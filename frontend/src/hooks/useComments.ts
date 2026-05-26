@@ -1,9 +1,11 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { get, post, del } from '@/lib/api';
-import type { Comment, PaginatedResponse } from '@/types';
+import { useIsAuthenticated } from '@/stores/authStore';
+import type { Comment, MyCommentVotes, PaginatedResponse } from '@/types';
 
 const QUERY_KEYS = {
   list: (actionId: string) => ['comments', actionId] as const,
+  myVotes: (actionId: string) => ['comments', actionId, 'my-votes'] as const,
 };
 
 export function useComments(actionId: string, onlyPublic = false) {
@@ -19,6 +21,25 @@ export function useComments(actionId: string, onlyPublic = false) {
   });
 }
 
+/**
+ * Fetch the caller's own vote map for one action's comments. Fires in
+ * parallel with `useComments` — separate from the public list so the
+ * list response stays cacheable across viewers.
+ *
+ * Auto-disabled when the user isn't authenticated; the hook returns
+ * `{ data: undefined }` and the UI renders neutral up/down state.
+ */
+export function useMyCommentVotes(actionId: string) {
+  const isAuthenticated = useIsAuthenticated();
+  return useQuery({
+    queryKey: QUERY_KEYS.myVotes(actionId),
+    queryFn: () =>
+      get<{ votes: MyCommentVotes }>(`/comments/${encodeURIComponent(actionId)}/my-votes`),
+    enabled: isAuthenticated && Boolean(actionId),
+    staleTime: 30_000,
+  });
+}
+
 interface CreateCommentParams {
   actionId: string;
   body: string;
@@ -26,6 +47,10 @@ interface CreateCommentParams {
   mutationNonce: string;
   mutationSignature: string;
   mutationKey: string;
+  /** Optional — when present, the new comment is a reply to this
+   *  top-level comment. Backend rejects if the named parent is itself
+   *  a reply. */
+  parentCommentId?: string;
 }
 
 export function useCreateComment() {
@@ -36,6 +61,7 @@ export function useCreateComment() {
       post<Comment>(`/comments/${encodeURIComponent(actionId)}`, rest),
     onSuccess: (_data, variables) => {
       void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.list(variables.actionId) });
+      void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.myVotes(variables.actionId) });
     },
   });
 }
@@ -53,6 +79,38 @@ export function useDeleteComment() {
       del(`/comments/${encodeURIComponent(actionId)}/${encodeURIComponent(commentId)}`),
     onSuccess: (_data, variables) => {
       void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.list(variables.actionId) });
+      void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.myVotes(variables.actionId) });
+    },
+  });
+}
+
+interface VoteCommentParams {
+  actionId: string;
+  commentId: string;
+  vote: 'up' | 'down' | 'none';
+}
+
+/**
+ * Cast / change / remove a vote on one comment. Backend snapshots the
+ * voter's current stake at vote time and persists it on the vote row —
+ * the support level is `sum(±lovelace)` across all votes.
+ *
+ * On success we invalidate BOTH the public list (so the new
+ * `supportLovelace` propagates) and the user's own vote map (so the
+ * button highlight matches the new direction).
+ */
+export function useVoteComment() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ actionId, commentId, vote }: VoteCommentParams) =>
+      post<Comment>(
+        `/comments/${encodeURIComponent(actionId)}/${encodeURIComponent(commentId)}/vote`,
+        { vote },
+      ),
+    onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.list(variables.actionId) });
+      void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.myVotes(variables.actionId) });
     },
   });
 }

@@ -1,0 +1,289 @@
+/**
+ * Tests for `comments/create.ts` — covers the new comment-vote feature
+ * touchpoints:
+ *
+ *   1. Seed-upvote: on a fresh comment, the create handler writes a vote
+ *      row keyed by (commentId, authorStakeAddress) with `vote: 'up'`
+ *      and `lovelace` snapshotted from `lookupStake`. The seed lovelace
+ *      is also written onto the comment row as the initial
+ *      `supportLovelace`.
+ *   2. Atomic two-write: `transactWrite` is called with BOTH the comment
+ *      Put and the vote Put — never one without the other (the comment
+ *      claiming +stake support without a matching vote row would be a
+ *      lie).
+ *   3. Reply-depth guard: replying to a top-level comment is allowed;
+ *      replying to a reply is rejected with 400.
+ *   4. `parentCommentId` is persisted verbatim when supplied.
+ *   5. Stake-lookup failure (both providers down) does NOT fail the
+ *      comment write — the comment goes through with supportLovelace=0
+ *      and the seed vote row also carries 0. We deliberately don't
+ *      hard-fail comment creation on upstream outage (different policy
+ *      from the vote handler).
+ */
+
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import type {
+  APIGatewayProxyEventV2WithJWTAuthorizer,
+  APIGatewayProxyResultV2,
+} from 'aws-lambda';
+
+vi.mock('../../lib/dynamodb', () => ({
+  getItem: vi.fn(),
+  transactWrite: vi.fn(),
+  tableNames: {
+    users: 'test-users',
+    drepCommittees: 'test-drep_committees',
+    drepDirectory: 'test-drep_directory',
+    governanceActions: 'test-governance_actions',
+    governanceVotes: 'test-governance_votes',
+    comments: 'test-comments',
+    commentVotes: 'test-comment_votes',
+    clubhousePosts: 'test-clubhouse_posts',
+    auditLog: 'test-audit_log',
+    authNonces: 'test-auth_nonces',
+  },
+}));
+
+vi.mock('../../lib/recognition', () => ({
+  lookupRecognition: vi.fn(),
+  lookupStake: vi.fn(),
+}));
+
+vi.mock('../../lib/auth', async () => {
+  // Use a thin pass-through so we still get the real `buildMutationMessage`
+  // shape, but stub validation + signature verification so the test
+  // doesn't need to produce real Ed25519 signatures.
+  const actual = await vi.importActual<typeof import('../../lib/auth')>('../../lib/auth');
+  return {
+    ...actual,
+    validateMutationNonce: vi.fn(),
+    verifyWalletSignature: vi.fn(),
+  };
+});
+
+import { getItem, transactWrite } from '../../lib/dynamodb';
+import { lookupRecognition, lookupStake } from '../../lib/recognition';
+import { validateMutationNonce, verifyWalletSignature } from '../../lib/auth';
+import { handler } from './create';
+
+const mockGet = vi.mocked(getItem);
+const mockTransact = vi.mocked(transactWrite);
+const mockRecognition = vi.mocked(lookupRecognition);
+const mockStake = vi.mocked(lookupStake);
+const mockNonce = vi.mocked(validateMutationNonce);
+const mockSig = vi.mocked(verifyWalletSignature);
+
+const ACTION_ID = 'aaaaaaaa#0';
+const WALLET = 'stake1uyvjdz9rxsfsmv44rtk75k2rqyqskrga96dgdfrqjvjjpwsefcjnp';
+const STAKE_LOVELACE = '5000000000000'; // 5M ADA
+
+function buildEvent(opts: {
+  walletAddress: string;
+  roles: string[];
+  actionId: string;
+  body: unknown;
+}): APIGatewayProxyEventV2WithJWTAuthorizer {
+  return {
+    body: JSON.stringify(opts.body),
+    pathParameters: { actionId: opts.actionId },
+    requestContext: {
+      authorizer: {
+        lambda: {
+          walletAddress: opts.walletAddress,
+          roles: JSON.stringify(opts.roles),
+          sessionType: 'normal',
+        },
+      },
+    } as unknown as APIGatewayProxyEventV2WithJWTAuthorizer['requestContext'],
+    rawPath: '',
+    rawQueryString: '',
+    headers: {},
+    isBase64Encoded: false,
+    routeKey: '',
+    version: '2.0',
+  } as unknown as APIGatewayProxyEventV2WithJWTAuthorizer;
+}
+
+const validBody = {
+  body: 'I support this proposal because…',
+  isPublic: true,
+  mutationNonce: 'nonce-abc',
+  mutationSignature: 'sig-abc',
+  mutationKey: 'key-abc',
+};
+
+describe('comments/create', () => {
+  beforeEach(() => {
+    mockGet.mockReset();
+    mockTransact.mockReset();
+    mockTransact.mockResolvedValue(undefined);
+    mockRecognition.mockReset();
+    mockRecognition.mockResolvedValue({});
+    mockStake.mockReset();
+    mockStake.mockResolvedValue({ lovelace: STAKE_LOVELACE, source: 'koios' });
+    mockNonce.mockReset();
+    mockNonce.mockResolvedValue({ valid: true });
+    mockSig.mockReset();
+    mockSig.mockReturnValue({ valid: true });
+  });
+
+  it('writes the comment + seed vote atomically with the correct lovelace snapshot', async () => {
+    // First Get is the governance-action existence check.
+    mockGet.mockResolvedValueOnce({ actionId: ACTION_ID, SK: 'ACTION' } as never);
+
+    const res = (await handler(
+      buildEvent({
+        walletAddress: WALLET,
+        roles: ['delegator'],
+        actionId: ACTION_ID,
+        body: validBody,
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 201 });
+
+    // transactWrite called once with exactly TWO items — the comment Put
+    // and the seed-vote Put. Order matters because the test below pulls
+    // the comment from index 0 and the vote from index 1.
+    expect(mockTransact).toHaveBeenCalledTimes(1);
+    const items = mockTransact.mock.calls[0]![0];
+    expect(items).toHaveLength(2);
+
+    const commentPut = (items as Array<{ Put?: { TableName: string; Item: Record<string, unknown> } }>)[0]!.Put!;
+    expect(commentPut.TableName).toBe('test-comments');
+    const comment = commentPut.Item;
+    expect(comment['actionId']).toBe(ACTION_ID);
+    expect(comment['walletAddress']).toBe(WALLET);
+    expect(comment['supportLovelace']).toBe(STAKE_LOVELACE);
+    expect(comment['upvoteCount']).toBe(1);
+    expect(comment['downvoteCount']).toBe(0);
+    expect(comment['parentCommentId']).toBeUndefined();
+
+    const votePut = (items as Array<{ Put?: { TableName: string; Item: Record<string, unknown> } }>)[1]!.Put!;
+    expect(votePut.TableName).toBe('test-comment_votes');
+    const vote = votePut.Item;
+    expect(vote['commentId']).toBe(comment['commentId']);
+    expect(vote['stakeAddress']).toBe(WALLET);
+    expect(vote['vote']).toBe('up');
+    // Seed lovelace must match the comment's initial supportLovelace
+    // EXACTLY — the two together are the snapshot of authorship.
+    expect(vote['lovelace']).toBe(STAKE_LOVELACE);
+    expect(vote['actionId']).toBe(ACTION_ID);
+  });
+
+  it('persists parentCommentId when the parent is top-level', async () => {
+    // Existence check + parent lookup — both succeed.
+    mockGet.mockResolvedValueOnce({ actionId: ACTION_ID, SK: 'ACTION' } as never);
+    mockGet.mockResolvedValueOnce({
+      actionId: ACTION_ID,
+      commentId: 'parent-id',
+      walletAddress: 'stake1otherone',
+      body: 'parent body',
+      isPublic: true,
+      isDRep: false,
+      createdAt: '2026-05-25T00:00:00Z',
+      updatedAt: '2026-05-25T00:00:00Z',
+      // parentCommentId is ABSENT — this is a top-level comment.
+    } as never);
+
+    const res = (await handler(
+      buildEvent({
+        walletAddress: WALLET,
+        roles: ['delegator'],
+        actionId: ACTION_ID,
+        body: { ...validBody, parentCommentId: 'parent-id' },
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 201 });
+    const items = mockTransact.mock.calls[0]![0];
+    const commentPut = (items as Array<{ Put: { Item: Record<string, unknown> } }>)[0]!.Put;
+    expect(commentPut.Item['parentCommentId']).toBe('parent-id');
+  });
+
+  it('rejects replying to a reply with 400 (reply-depth guard)', async () => {
+    mockGet.mockResolvedValueOnce({ actionId: ACTION_ID, SK: 'ACTION' } as never);
+    mockGet.mockResolvedValueOnce({
+      actionId: ACTION_ID,
+      commentId: 'reply-id',
+      walletAddress: 'stake1other',
+      body: 'I am already a reply',
+      isPublic: true,
+      isDRep: false,
+      createdAt: '2026-05-25T00:00:00Z',
+      updatedAt: '2026-05-25T00:00:00Z',
+      // KEY: this parent IS a reply itself. The handler must reject.
+      parentCommentId: 'top-level-id',
+    } as never);
+
+    const res = (await handler(
+      buildEvent({
+        walletAddress: WALLET,
+        roles: ['delegator'],
+        actionId: ACTION_ID,
+        body: { ...validBody, parentCommentId: 'reply-id' },
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 400 });
+    // No write at all — the depth guard must come before transactWrite.
+    expect(mockTransact).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 when the parent comment does not exist', async () => {
+    mockGet.mockResolvedValueOnce({ actionId: ACTION_ID, SK: 'ACTION' } as never);
+    mockGet.mockResolvedValueOnce(undefined);
+
+    const res = (await handler(
+      buildEvent({
+        walletAddress: WALLET,
+        roles: ['delegator'],
+        actionId: ACTION_ID,
+        body: { ...validBody, parentCommentId: 'ghost-id' },
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 404 });
+    expect(mockTransact).not.toHaveBeenCalled();
+  });
+
+  it('still writes when stake lookup fails (lovelace defaults to "0")', async () => {
+    // Both upstreams down — the seed vote falls back to zero weight
+    // rather than failing the post. Comment creation must not be hostage
+    // to an upstream outage.
+    mockGet.mockResolvedValueOnce({ actionId: ACTION_ID, SK: 'ACTION' } as never);
+    mockStake.mockResolvedValueOnce({ lovelace: null, source: null });
+
+    const res = (await handler(
+      buildEvent({
+        walletAddress: WALLET,
+        roles: ['delegator'],
+        actionId: ACTION_ID,
+        body: validBody,
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 201 });
+    const items = mockTransact.mock.calls[0]![0];
+    const comment = (items as Array<{ Put: { Item: Record<string, unknown> } }>)[0]!.Put.Item;
+    const vote = (items as Array<{ Put: { Item: Record<string, unknown> } }>)[1]!.Put.Item;
+    expect(comment['supportLovelace']).toBe('0');
+    expect(vote['lovelace']).toBe('0');
+  });
+
+  it('rejects when the governance action does not exist (404)', async () => {
+    mockGet.mockResolvedValueOnce(undefined);
+
+    const res = (await handler(
+      buildEvent({
+        walletAddress: WALLET,
+        roles: ['delegator'],
+        actionId: ACTION_ID,
+        body: validBody,
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 404 });
+    expect(mockTransact).not.toHaveBeenCalled();
+  });
+});
