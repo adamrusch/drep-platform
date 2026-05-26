@@ -309,6 +309,15 @@ export interface DRepDirectoryEntry {
   qualifications?: string;
   paymentAddress?: string;
   references?: DRepReference[];
+  /** True for the two Cardano predefined DReps (`drep_always_abstain`,
+   *  `drep_always_no_confidence`). These hold the largest voting power
+   *  on mainnet (~9B ADA between them) but have no CIP-119 anchor
+   *  metadata — no name, no image, no objectives. The sync hard-codes
+   *  display names ("Always Abstain" / "Always No-Confidence"). UI uses
+   *  this flag to render a distinct "Predefined" badge and skip avatar
+   *  image fallback logic. Optional for backwards compat with rows
+   *  synced before this flag existed. */
+  isPredefined?: boolean;
   lastSyncedAt: string;
   enrichmentVersion: number;
 }
