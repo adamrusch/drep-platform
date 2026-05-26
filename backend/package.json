@@ -6,6 +6,8 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "clean": "rm -rf dist"
   },
   "dependencies": {
@@ -23,6 +25,7 @@
     "@types/aws-lambda": "^8.10.140",
     "@types/node": "^20.14.0",
     "esbuild": "^0.28.0",
-    "typescript": "^5.4.5"
+    "typescript": "^5.4.5",
+    "vitest": "^4.1.7"
   }
 }
