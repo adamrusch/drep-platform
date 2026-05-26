@@ -106,6 +106,41 @@ export interface GovernanceAction {
    *  NoConfidence. Optional for backwards compat: actions written by an
    *  older sync (< v9) won't carry it; treat absence as "show all roles". */
   votingRoles?: VotingRoles;
+  /** Every individual vote cast on this action, newest-first, with the
+   *  supersede / strikethrough dedupe rule applied. Returned by
+   *  `GET /governance/{actionId}`. Older clients that ignore this field
+   *  keep working. */
+  voteList?: ActionVoteRecord[];
+}
+
+/** Voter role tag — matches the Koios surface. */
+export type VoteVoterRole = 'DRep' | 'SPO' | 'ConstitutionalCommittee';
+
+/**
+ * One vote row on a governance action — the unit rendered by the Votes
+ * tab on the action detail page. Mirrors `backend/src/lib/votes.ts`.
+ *
+ * `superseded === true` rows are votes that the same voter later recast;
+ * the UI renders them with `line-through` styling so the full audit trail
+ * is visible without misleading the reader about which vote is "live".
+ *
+ * `votingPowerLovelace` is the voter's CURRENT voting power, NOT power
+ * at time of vote (the persisted row doesn't carry per-epoch power; see
+ * the TODO in `backend/src/lib/votes.ts`).
+ */
+export interface ActionVoteRecord {
+  voterRole: VoteVoterRole;
+  voterId: string;
+  voterDisplayName?: string;
+  votingPowerLovelace?: string;
+  vote: 'Yes' | 'No' | 'Abstain';
+  votedAt: string;
+  blockTime: number;
+  voteTxHash: string;
+  /** CIP-100 anchor URL the voter posted with this vote (their rationale).
+   *  Open in a new tab with `rel="noopener noreferrer"`. */
+  rationaleUrl?: string;
+  superseded: boolean;
 }
 
 /** Which governance bodies are called to vote on a given action type. */
@@ -323,7 +358,28 @@ export interface UserProfile {
   updatedAt: string;
   roles: UserRole[];
   delegationHistory?: DelegationRecord[];
+  /**
+   * REGISTERED-DRep id (this wallet IS a DRep). Set when the user ran
+   * `/drep/register`. Used for role-gating their own DRep committee.
+   *
+   * NOT to be confused with `delegatedToDrepId` — those are different
+   * concepts on-chain. If you're trying to answer "which DRep does
+   * this wallet back?" use `delegatedToDrepId`, NOT this field.
+   */
   drepId?: string;
+  /**
+   * Live on-chain delegation: the DRep this wallet's stake currently
+   * delegates voting power to. Read live by `/auth/me` from Koios
+   * (Blockfrost fallback) and cached for 60s per Lambda container.
+   *
+   *   - `string` → wallet is delegated to this DRep (bech32 `drep1...`
+   *     or a predefined ID like `drep_always_abstain`).
+   *   - `null` → wallet is NOT delegated (confirmed by the upstream).
+   *   - `undefined` (field absent) → could not determine. Most common
+   *     causes: payment-address auth, both Koios + Blockfrost down,
+   *     or this is a brand-new stake account.
+   */
+  delegatedToDrepId?: string | null;
 }
 
 export interface SocialLinks {
@@ -363,7 +419,22 @@ export interface Comment {
   stakeAda?: string;
   /** Display name of the DRep this commenter delegates to, shown as a pill. */
   drep?: string;
+  /** When present, this comment is a reply to the named top-level
+   *  comment. Replies are restricted to one level deep — the backend
+   *  rejects a reply whose parent is itself a reply. */
+  parentCommentId?: string;
+  /** Stake-weighted support level: signed BigInt (as string) of
+   *  `sum(up.lovelace) - sum(down.lovelace)` across all active votes
+   *  on this comment (including the author's seed upvote). Used to
+   *  render "Support Level: ±X ADA." */
+  supportLovelace?: string;
+  upvoteCount?: number;
+  downvoteCount?: number;
 }
+
+/** Map of `commentId → user's vote` returned by
+ *  `GET /comments/{actionId}/my-votes`. */
+export type MyCommentVotes = Record<string, 'up' | 'down'>;
 
 export type ClubhousePostType = 'discussion' | 'question' | 'poll';
 

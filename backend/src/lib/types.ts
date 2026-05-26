@@ -725,6 +725,56 @@ export interface CommentItem {
   /** Display name (or DRep ID prefix) of the DRep this commenter
    *  delegates to, populated at comment-create time. */
   drep?: string;
+  /** Top-level comment id this comment is a reply to. Undefined for
+   *  top-level comments. Replies are restricted to one level — the create
+   *  handler rejects with 400 if `parentCommentId` itself points to a
+   *  comment that already has a `parentCommentId`. */
+  parentCommentId?: string;
+  /** Denormalized running support level — sum of (lovelace × ±1) across
+   *  every active vote on this comment, stringified BigInt. Seeded with
+   *  the author's stake at create time (implicit upvote). Mutated by
+   *  `handlers/comments/vote.ts` via `transactWrite` so it stays
+   *  consistent with the per-vote rows in the `comment_votes` table.
+   *  Stored as a string (not number) because comment-author stake can
+   *  exceed 2^53 lovelace = 9 quadrillion lovelace = 9 trillion ADA. */
+  supportLovelace?: string;
+  /** Headcount of active upvotes (including author seed). Optional only
+   *  for backwards compat with rows written before this field landed —
+   *  treat absence as zero. */
+  upvoteCount?: number;
+  /** Headcount of active downvotes. */
+  downvoteCount?: number;
+  [key: string]: unknown;
+}
+
+/**
+ * One row of `comment_votes` — PK=`commentId`, SK=`stakeAddress`. Author
+ * seed votes are written here too with no special flag; the author can't
+ * delete their seed vote because the API checks `existing.walletAddress
+ * === voter` and rejects (delete the whole comment instead).
+ *
+ * `lovelace` is a SNAPSHOT taken at vote time. Re-reading would let the
+ * total drift silently as wallets gain/lose balance — we deliberately
+ * fix it on the row so the displayed support level is reproducible.
+ */
+export interface CommentVoteItem {
+  commentId: string;
+  stakeAddress: string;
+  /** Foreign key — same value as the parent comment's `actionId`. We carry
+   *  it on the vote row purely so a future cleanup job can find every
+   *  vote belonging to a deleted action's comments without joining
+   *  through the `comments` table. Not used on the hot read path. */
+  actionId: string;
+  vote: 'up' | 'down';
+  /** Snapshot of the voter's wallet stake in lovelace at vote time,
+   *  stringified BigInt. Signed by the `vote` field — sum-on-read is
+   *  `vote === 'up' ? +lovelace : -lovelace`. */
+  lovelace: string;
+  votedAt: string;
+  /** Optional cache of voter display name, populated best-effort at vote
+   *  time. The frontend doesn't render the vote list, so this is purely
+   *  for a future audit / leaderboard UI. */
+  voterDisplayName?: string;
   [key: string]: unknown;
 }
 
