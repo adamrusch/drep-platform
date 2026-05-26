@@ -8,10 +8,23 @@ import { cn } from '@/lib/utils';
 
 interface CommentFormProps {
   actionId: string;
+  /** When set, the form posts a REPLY to this top-level commentId. The
+   *  layout flips to a tighter inline shape (smaller padding, "Reply"
+   *  button label, Cancel link). */
+  parentCommentId?: string;
+  /** Optional close callback for the reply variant — wired to the
+   *  Cancel link and to the "post succeeded" path so the reply form
+   *  collapses back. */
+  onClose?: () => void;
   className?: string;
 }
 
-export function CommentForm({ actionId, className }: CommentFormProps): React.ReactElement {
+export function CommentForm({
+  actionId,
+  parentCommentId,
+  onClose,
+  className,
+}: CommentFormProps): React.ReactElement {
   const [body, setBody] = useState('');
   const [isPublic, setIsPublic] = useState(true);
   const [signing, setSigning] = useState(false);
@@ -21,6 +34,7 @@ export function CommentForm({ actionId, className }: CommentFormProps): React.Re
   const createComment = useCreateComment();
   const signMutation = useMutationSign();
   const { addToast } = useUiStore();
+  const isReply = parentCommentId !== undefined;
 
   const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
@@ -52,9 +66,14 @@ export function CommentForm({ actionId, className }: CommentFormProps): React.Re
         mutationNonce: signed.mutationNonce,
         mutationSignature: signed.mutationSignature,
         mutationKey: signed.mutationKey,
+        ...(parentCommentId ? { parentCommentId } : {}),
       });
       setBody('');
-      addToast({ title: 'Comment posted', variant: 'success' });
+      addToast({
+        title: isReply ? 'Reply posted' : 'Comment posted',
+        variant: 'success',
+      });
+      onClose?.();
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to post comment';
       setError(msg);
@@ -63,6 +82,9 @@ export function CommentForm({ actionId, className }: CommentFormProps): React.Re
   };
 
   if (!isAuthenticated) {
+    // Reply form is never rendered for unauthenticated users (the Reply
+    // affordance is gated below) — this fallback only matters for the
+    // top-level form.
     return (
       <div
         className={cn(
@@ -97,14 +119,29 @@ export function CommentForm({ actionId, className }: CommentFormProps): React.Re
 
   const isBusy = signing || createComment.isPending;
   return (
-    <form onSubmit={(e) => void handleSubmit(e)} className={cn('space-y-3', className)}>
+    <form
+      onSubmit={(e) => void handleSubmit(e)}
+      className={cn(
+        'space-y-3',
+        isReply &&
+          // Reply variant: indented + slightly muted background, mirrors the
+          // reply container below.
+          'rounded-token-md border border-[var(--border-default)] bg-[var(--bg-subtle)] p-3',
+        className,
+      )}
+    >
       <textarea
         value={body}
         onChange={(e) => setBody(e.target.value)}
-        placeholder="Share your perspective on this governance action…"
-        rows={4}
+        placeholder={
+          isReply
+            ? 'Write a reply…'
+            : 'Share your perspective on this governance action…'
+        }
+        rows={isReply ? 3 : 4}
         maxLength={10_000}
         disabled={isBusy}
+        autoFocus={isReply}
         className={cn(
           'w-full rounded-token-md border border-[var(--border-default)]',
           'bg-[var(--bg-canvas)] text-[var(--text-primary)] px-3 py-2 text-sm',
@@ -114,27 +151,45 @@ export function CommentForm({ actionId, className }: CommentFormProps): React.Re
         )}
       />
       <div className="flex items-center justify-between flex-wrap gap-2">
-        <label className="flex items-center gap-2 text-sm text-[var(--text-secondary)] cursor-pointer">
-          <input
-            type="checkbox"
-            checked={isPublic}
-            onChange={(e) => setIsPublic(e.target.checked)}
-            disabled={isBusy}
-            className="rounded accent-[var(--brand-primary)]"
-          />
-          Make comment public
-        </label>
-        <div className="flex items-center gap-3">
+        {!isReply && (
+          <label className="flex items-center gap-2 text-sm text-[var(--text-secondary)] cursor-pointer">
+            <input
+              type="checkbox"
+              checked={isPublic}
+              onChange={(e) => setIsPublic(e.target.checked)}
+              disabled={isBusy}
+              className="rounded accent-[var(--brand-primary)]"
+            />
+            Make comment public
+          </label>
+        )}
+        <div className={cn('flex items-center gap-3', isReply && 'ml-auto')}>
           <span className="text-xs text-[var(--text-tertiary)] tabular-nums">
             {body.length}/10,000
           </span>
+          {isReply && onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={isBusy}
+              className="text-xs text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:underline"
+            >
+              Cancel
+            </button>
+          )}
           <Button
             type="submit"
             variant="primary"
             size="sm"
             disabled={isBusy || !body.trim()}
           >
-            {signing ? 'Signing…' : createComment.isPending ? 'Posting…' : 'Post Comment'}
+            {signing
+              ? 'Signing…'
+              : createComment.isPending
+                ? 'Posting…'
+                : isReply
+                  ? 'Post Reply'
+                  : 'Post Comment'}
           </Button>
         </div>
       </div>
@@ -146,11 +201,13 @@ export function CommentForm({ actionId, className }: CommentFormProps): React.Re
           {error}
         </div>
       )}
-      <p className="text-[11px] text-[var(--text-muted)] leading-relaxed">
-        Posting requires a fresh wallet signature. Your wallet will prompt you
-        to sign a one-time message — this does not cost any fees and does not
-        broadcast a transaction.
-      </p>
+      {!isReply && (
+        <p className="text-[11px] text-[var(--text-muted)] leading-relaxed">
+          Posting requires a fresh wallet signature. Your wallet will prompt you
+          to sign a one-time message — this does not cost any fees and does not
+          broadcast a transaction.
+        </p>
+      )}
     </form>
   );
 }

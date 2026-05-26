@@ -19,13 +19,31 @@ import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
 export function ClubhouseLanding(): React.ReactElement {
   const navigate = useNavigate();
   const isAuthenticated = useIsAuthenticated();
-  const drepId = useAuthStore((s) => s.drepId);
+  const registeredDrepId = useAuthStore((s) => s.drepId);
   const { data: profile } = useMe();
 
-  // Pick the most recent active delegation, falling back to the auth
-  // context's drepId (set when a lead-DRep wallet logs in).
+  // Routing priority (most specific to least):
+  //  1. `profile.delegatedToDrepId` — live on-chain delegation read by
+  //     `/auth/me`. THIS is the right answer 99% of the time: "the DRep
+  //     this wallet currently backs." Reads fresh on every session mount.
+  //  2. `registeredDrepId` (`drepId` in the auth store) — set when the
+  //     logged-in wallet IS itself a DRep. Routes a DRep into their own
+  //     clubhouse so they can manage their delegators' threads.
+  //  3. The newest non-undelegated entry in the DDB-stored delegation
+  //     history. Fallback for stale-cache cases where step 1 hasn't
+  //     resolved yet (a flicker on the very first render).
+  //  4. The last entry in the delegation history, undelegated or not —
+  //     surfaces "the DRep you were last with" instead of nothing.
+  //
+  // We deliberately do NOT preserve the old behavior of taking
+  // `registeredDrepId` first — that bug was the entire point of the
+  // "wallet's DRep not recognized" issue: it pinned routing to the DRep
+  // the user REGISTERED AS, not the DRep they DELEGATE to. The fields
+  // are independent on-chain concepts. See the `/auth/me` handler's
+  // file-header for the full rationale.
   const targetDrepId =
-    drepId ??
+    profile?.delegatedToDrepId ??
+    registeredDrepId ??
     profile?.delegationHistory?.find((d) => !d.undelegatedAt)?.drepId ??
     profile?.delegationHistory?.[(profile.delegationHistory?.length ?? 1) - 1]?.drepId;
 
