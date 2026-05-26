@@ -315,6 +315,15 @@ export interface DRepDirectoryEntry {
   qualifications?: string;
   paymentAddress?: string;
   references?: DRepReference[];
+  // ---- Predefined DRep flag ----
+  /** True for the two predefined Cardano auto-vote pseudo-identities
+   *  (`drep_always_abstain` and `drep_always_no_confidence`). These hold
+   *  enormous voting power (9B+ ADA on Abstain today) but have no CIP-119
+   *  anchor body, no givenName, no image. The directory sync synthesizes
+   *  rows for them with hard-coded display names so they surface in the
+   *  listing alongside registered DReps. The frontend uses this flag to
+   *  render a distinct "Predefined" pill and skip the avatar lookup. */
+  isPredefined?: boolean;
   // ---- Sync bookkeeping ----
   lastSyncedAt: string;
   enrichmentVersion: number;
@@ -501,6 +510,17 @@ export interface DRepCommitteeItem {
 export interface DRepDirectoryItem {
   drepId: string;
   SK: 'PROFILE';
+  /** Constant `'DREP_PROFILE'` written on every PROFILE row by the
+   *  directory sync. Partition key for the `entityType-votingPower-index`
+   *  GSI — a sparse-index pattern that lets the list handler do a single
+   *  Query for all PROFILE rows instead of a table-wide Scan that pays
+   *  for reading every `SK='POWER#NNNNNN'` history sub-row. See
+   *  `infra/lib/database-stack.ts` for the GSI definition and the
+   *  2026-05-26 root-cause story. Optional on the Item shape because
+   *  pre-backfill rows synced before this field was introduced won't
+   *  carry it; the backfill script in `backend/scripts/` populates them
+   *  before the new read path is deployed. */
+  entityType?: 'DREP_PROFILE';
   hex: string | null;
   isActive: boolean;
   /** True when this DRep has filed a retirement certificate
@@ -559,6 +579,11 @@ export interface DRepDirectoryItem {
   qualifications?: string;
   paymentAddress?: string;
   references?: DRepReference[];
+  /** True for `drep_always_abstain` / `drep_always_no_confidence`. See
+   *  the `DRepDirectoryEntry.isPredefined` doc for the user-visible
+   *  contract; on the Item shape it's the same value persisted to
+   *  DynamoDB. */
+  isPredefined?: boolean;
   lastSyncedAt: string;
   enrichmentVersion: number;
   [key: string]: unknown;
