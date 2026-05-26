@@ -13,6 +13,7 @@ import { Button } from '@/components/ui/Button';
 import { StatusPill } from '@/components/ui/StatusPill';
 import { CastVoteModal } from '@/components/governance/CastVoteModal';
 import { ShareModal } from '@/components/governance/ShareModal';
+import { VotesTab } from '@/components/governance/VotesTab';
 import { ProposalRail } from '@/components/rails/ProposalRail';
 import { PageWithRail } from '@/components/Layout';
 import { useAuthStore } from '@/stores/authStore';
@@ -136,7 +137,12 @@ export function GovernanceActionPage(): React.ReactElement {
     title ??
     (action.summary && action.summary.length > 0 ? action.summary : 'Governance action');
   const hasAnchorIndicator = typeof action.anchorVerified === 'boolean';
-  const commentCount = commentsData?.items.length ?? 0;
+  // Tab badge counts TOP-LEVEL comments only — replies are hidden by
+  // default behind a per-comment chevron, so counting them here would
+  // overstate the visible discussion size. Replies have a non-empty
+  // `parentCommentId`; top-level comments don't.
+  const commentCount =
+    commentsData?.items.filter((c) => !c.parentCommentId).length ?? 0;
   const proposalUrl =
     typeof window !== 'undefined'
       ? `${window.location.origin}/governance/${encodeURIComponent(action.actionId)}`
@@ -374,6 +380,9 @@ export function GovernanceActionPage(): React.ReactElement {
           <Tabs.Trigger value="overview" className={TAB_TRIGGER_CLASSES}>
             Overview
           </Tabs.Trigger>
+          <Tabs.Trigger value="rationale" className={TAB_TRIGGER_CLASSES}>
+            Rationale
+          </Tabs.Trigger>
           <Tabs.Trigger value="comments" className={TAB_TRIGGER_CLASSES}>
             Public Comments
             {commentCount > 0 && (
@@ -382,8 +391,13 @@ export function GovernanceActionPage(): React.ReactElement {
               </span>
             )}
           </Tabs.Trigger>
-          <Tabs.Trigger value="rationale" className={TAB_TRIGGER_CLASSES}>
-            Rationale
+          <Tabs.Trigger value="votes" className={TAB_TRIGGER_CLASSES}>
+            Votes
+            {action.voteList && action.voteList.length > 0 && (
+              <span className="ml-1.5 inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-token-full bg-[var(--bg-muted)] text-[11px] font-semibold text-[var(--text-tertiary)] tabular-nums">
+                {action.voteList.length}
+              </span>
+            )}
           </Tabs.Trigger>
           <Tabs.Trigger value="clubhouse" className={TAB_TRIGGER_CLASSES}>
             Delegator Clubhouse
@@ -563,6 +577,16 @@ export function GovernanceActionPage(): React.ReactElement {
               </div>
             </Card>
           )}
+        </Tabs.Content>
+
+        {/* VOTES — every individual vote on this action, newest-first.
+            Older votes by the same voter are rendered with strikethrough
+            (`superseded: true`); see `lib/votes.ts` for the dedupe rule.
+            TODO(spo-cc): the backend already returns SPO + CC votes mixed
+            into the same `voteList` — `VotesTab` groups them under
+            separate headers. */}
+        <Tabs.Content value="votes" className="space-y-4 focus-visible:outline-none">
+          <VotesTab votes={action.voteList} />
         </Tabs.Content>
 
         {/* DELEGATOR CLUBHOUSE */}

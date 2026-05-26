@@ -13,6 +13,7 @@ export class DatabaseStack extends cdk.Stack {
   public readonly governanceActionsTable: dynamodb.Table;
   public readonly governanceVotesTable: dynamodb.Table;
   public readonly commentsTable: dynamodb.Table;
+  public readonly commentVotesTable: dynamodb.Table;
   public readonly clubhousePostsTable: dynamodb.Table;
   public readonly auditLogTable: dynamodb.Table;
   public readonly authNoncesTable: dynamodb.Table;
@@ -205,6 +206,36 @@ export class DatabaseStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
+    // ---- comment_votes ----
+    // Per-vote rows for the comment up/downvote feature. One row per
+    // (commentId, stakeAddress) tuple — recasting overwrites the row.
+    //
+    // PK=`commentId` (ULID, globally unique across all actions).
+    // SK=`stakeAddress`.
+    //
+    // Schema rationale: a denormalized `supportLovelace` counter on the
+    // parent `comments` row is the canonical source for the displayed
+    // support level — list reads do NOT fan out into per-comment queries
+    // against this table. The vote handler writes both rows atomically via
+    // `transactWrite` (Put vote row + Update comments counter), so the two
+    // can never drift more than one in-flight transaction's worth.
+    //
+    // This table exists for: (a) reading the caller's prior vote in the
+    // vote handler (single GetItem before the transact), (b) audit and
+    // future moderation paths ("who upvoted X"), (c) future reconciliation
+    // sweep that recomputes the counter from these rows if it ever drifts.
+    //
+    // No GSI — every access path is `GetItem(commentId, stakeAddress)` or
+    // `Query(commentId)` for audit.
+    this.commentVotesTable = new dynamodb.Table(this, 'CommentVotesTable', {
+      tableName: `${this.tablePrefix}comment_votes`,
+      partitionKey: { name: 'commentId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'stakeAddress', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecovery: true,
+      removalPolicy: props.stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
     // ---- clubhouse_posts ----
     this.clubhousePostsTable = new dynamodb.Table(this, 'ClubhousePostsTable', {
       tableName: `${this.tablePrefix}clubhouse_posts`,
@@ -250,6 +281,7 @@ export class DatabaseStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'GovernanceActionsTableName', { value: this.governanceActionsTable.tableName, exportName: `${props.stage}-GovernanceActionsTableName` });
     new cdk.CfnOutput(this, 'GovernanceVotesTableName', { value: this.governanceVotesTable.tableName, exportName: `${props.stage}-GovernanceVotesTableName` });
     new cdk.CfnOutput(this, 'CommentsTableName', { value: this.commentsTable.tableName, exportName: `${props.stage}-CommentsTableName` });
+    new cdk.CfnOutput(this, 'CommentVotesTableName', { value: this.commentVotesTable.tableName, exportName: `${props.stage}-CommentVotesTableName` });
     new cdk.CfnOutput(this, 'ClubhousePostsTableName', { value: this.clubhousePostsTable.tableName, exportName: `${props.stage}-ClubhousePostsTableName` });
     new cdk.CfnOutput(this, 'AuditLogTableName', { value: this.auditLogTable.tableName, exportName: `${props.stage}-AuditLogTableName` });
     new cdk.CfnOutput(this, 'AuthNoncesTableName', { value: this.authNoncesTable.tableName, exportName: `${props.stage}-AuthNoncesTableName` });

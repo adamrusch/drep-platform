@@ -50,6 +50,12 @@ export const tableNames = {
    *  docs/SCHEMA.md for the full item shape. */
   governanceVotes: `${TABLE_PREFIX}governance_votes`,
   comments: `${TABLE_PREFIX}comments`,
+  /** Per-vote rows for comment up/downvotes. PK=`commentId`, SK=`stakeAddress`.
+   *  One row per (comment, voter) tuple — recasting overwrites the row. Sum-
+   *  on-read aggregation is replaced by a denormalized `supportLovelace`
+   *  counter on the comments row, kept consistent via `transactWrite` from
+   *  the vote handler. See `handlers/comments/vote.ts`. */
+  commentVotes: `${TABLE_PREFIX}comment_votes`,
   clubhousePosts: `${TABLE_PREFIX}clubhouse_posts`,
   auditLog: `${TABLE_PREFIX}audit_log`,
   authNonces: `${TABLE_PREFIX}auth_nonces`,

@@ -62,11 +62,23 @@ import { ok, internalError } from '../_response';
 
 const DEFAULT_PAGE_SIZE = 25;
 const MAX_PAGE_SIZE = 100;
-/** Cap the in-memory accumulator at 50 Scan rounds × 200 rows = 10k.
- *  Plenty of headroom for the ~1500-2000 mainnet DReps; protects against
- *  a runaway loop if Koios ever returns an absurd number of entries. */
+/** Cap the in-memory accumulator. The `drep_directory` table now holds a
+ *  mix of `SK='PROFILE'` rows (one per DRep, ~1500-2000 today) AND
+ *  `SK='POWER#NNNNNN'` voting-power-history sub-rows (one per DRep per
+ *  epoch the DRep has been registered in — ~5-10 per DRep on mainnet
+ *  today, growing by ~73/year). The Scan applies the SK filter AFTER
+ *  reading raw items off disk, so the loop must read many more raw items
+ *  than there are DReps before filtering settles.
+ *
+ *  At today's row count (~2k PROFILE + ~10k POWER ≈ 12k total) we want
+ *  the Scan to comfortably exhaust the table on `includeInactive=true`
+ *  (worst case: every PROFILE matches). 50 rounds × 1000 raw items =
+ *  50k headroom — ~4x current total, leaves ~5 years of POWER growth
+ *  before we'd need to revisit. SCAN_PER_ROUND of 1000 is also the
+ *  DynamoDB Scan default page size, which is the cheapest per-round
+ *  shape (one DDB Scan call returns up to 1MB or `limit` rows). */
 const MAX_SCAN_ROUNDS = 50;
-const SCAN_PER_ROUND = 200;
+const SCAN_PER_ROUND = 1000;
 
 /**
  * Module-level response cache. CloudFront in front of the API caches the
@@ -198,18 +210,36 @@ function nameSortKey(item: DRepDirectoryItem): string {
   return `~${item.drepId}`;
 }
 
-/** Scan the entire directory (paginated through DynamoDB's 1MB-per-page
- *  hard cap until exhausted), applying the optional active + retired and
- *  search filters via FilterExpression. Returns the full matching set —
- *  callers sort and slice in memory. */
-async function scanAllMatching(opts: {
+/** Build the DynamoDB FilterExpression / ExpressionAttributeNames /
+ *  ExpressionAttributeValues for `scanAllMatching`. Exported for unit
+ *  tests — the rest of the Scan loop is straightforward pagination.
+ *
+ *  **PROFILE-only filter (2026-05-26):** the `drep_directory` table is now
+ *  shared with the `drep-voting-power-history` sync, which writes
+ *  `SK='POWER#${epoch}'` sub-rows under the same `drepId` partition.
+ *  Without an explicit SK filter the Scan returned those rows mixed in
+ *  with DRep profiles — the frontend got cards with no `givenName` /
+ *  `isActive` / etc., and `total` was wildly inflated (one DRep with 6
+ *  POWER rows counted as 7 items). Filtering to `SK = 'PROFILE'` restores
+ *  the pre-Phase-C behavior: one row per DRep in the result set. */
+export function buildDirectoryListFilter(opts: {
   includeInactive: boolean;
   search: string | undefined;
-}): Promise<DRepDirectoryItem[]> {
-  // Build the FilterExpression dynamically. Conditions are AND-joined.
+}): {
+  filterExpression: string;
+  expressionAttributeNames: Record<string, string>;
+  expressionAttributeValues: Record<string, unknown>;
+} {
   const conditions: string[] = [];
   const names: Record<string, string> = {};
   const values: Record<string, unknown> = {};
+
+  // ALWAYS restrict to the PROFILE rows. The directory table also holds
+  // `SK='POWER#NNNNNN'` voting-power-history sub-rows; those are read by
+  // `directory/get.ts` for the sparkline, not by this list view.
+  conditions.push('#SK = :profileSK');
+  names['#SK'] = 'SK';
+  values[':profileSK'] = 'PROFILE';
 
   if (!opts.includeInactive) {
     // Default view: hide both inactive AND retired DReps. We do NOT use
@@ -229,18 +259,29 @@ async function scanAllMatching(opts: {
     names['#givenNameLower'] = 'givenNameLower';
     values[':q'] = opts.search.toLowerCase();
   }
+  return {
+    filterExpression: conditions.join(' AND '),
+    expressionAttributeNames: names,
+    expressionAttributeValues: values,
+  };
+}
 
+/** Scan the entire directory (paginated through DynamoDB's 1MB-per-page
+ *  hard cap until exhausted), applying the optional active + retired and
+ *  search filters via FilterExpression. Returns the full matching set —
+ *  callers sort and slice in memory. */
+async function scanAllMatching(opts: {
+  includeInactive: boolean;
+  search: string | undefined;
+}): Promise<DRepDirectoryItem[]> {
+  const filter = buildDirectoryListFilter(opts);
   const accumulated: DRepDirectoryItem[] = [];
   let cursor: Record<string, unknown> | undefined;
   for (let round = 0; round < MAX_SCAN_ROUNDS; round++) {
     const page = await scanItems<DRepDirectoryItem>(tableNames.drepDirectory, {
-      ...(conditions.length > 0
-        ? {
-            filterExpression: conditions.join(' AND '),
-            expressionAttributeNames: names,
-            expressionAttributeValues: values,
-          }
-        : {}),
+      filterExpression: filter.filterExpression,
+      expressionAttributeNames: filter.expressionAttributeNames,
+      expressionAttributeValues: filter.expressionAttributeValues,
       limit: SCAN_PER_ROUND,
       ...(cursor ? { exclusiveStartKey: cursor } : {}),
     });

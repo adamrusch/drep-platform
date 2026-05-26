@@ -104,6 +104,7 @@ export class ApiStack extends cdk.Stack {
       // infra change.
       databaseStack.governanceVotesTable,
       databaseStack.commentsTable,
+      databaseStack.commentVotesTable,
       databaseStack.clubhousePostsTable,
       databaseStack.auditLogTable,
       databaseStack.authNoncesTable,
@@ -182,6 +183,8 @@ export class ApiStack extends cdk.Stack {
     const commentsListFn = fn('CommentsListFn', 'handlers/comments/list.ts');
     const commentsCreateFn = fn('CommentsCreateFn', 'handlers/comments/create.ts');
     const commentsDeleteFn = fn('CommentsDeleteFn', 'handlers/comments/delete.ts');
+    const commentsVoteFn = fn('CommentsVoteFn', 'handlers/comments/vote.ts');
+    const commentsMyVotesFn = fn('CommentsMyVotesFn', 'handlers/comments/myVotes.ts');
 
     // ---- Clubhouse handlers ----
     const clubhouseListFn = fn('ClubhouseListFn', 'handlers/clubhouse/list.ts');
@@ -328,6 +331,25 @@ export class ApiStack extends cdk.Stack {
       '/comments/{actionId}/{commentId}',
       commentsDeleteFn,
       'CommentsDelete',
+      true,
+    );
+    // Stake-weighted up/downvote on a comment (or reply). Auth-only; the
+    // mutation-nonce flow is deliberately skipped here (same trade-off as
+    // clubhouse/votePoll — high-frequency, low-stakes).
+    addRoute(
+      apigwv2.HttpMethod.POST,
+      '/comments/{actionId}/{commentId}/vote',
+      commentsVoteFn,
+      'CommentsVote',
+      true,
+    );
+    // The caller's own vote map for one action's comments. Auth-only;
+    // tiny payload, never cached.
+    addRoute(
+      apigwv2.HttpMethod.GET,
+      '/comments/{actionId}/my-votes',
+      commentsMyVotesFn,
+      'CommentsMyVotes',
       true,
     );
 
