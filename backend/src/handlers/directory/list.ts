@@ -53,32 +53,44 @@
  * cap, and the in-memory sort is microseconds). Revisit when the
  * directory grows past ~10k — at that point we'd want a real search
  * service (OpenSearch, Algolia) anyway.
+ *
+ * Backend migration note (2026-05-26): the read path no longer Scans
+ * the base table. The `drep_directory` table is shared with the
+ * `drep-voting-power-history` sync (daily POWER#NNNNNN sub-rows under
+ * the same `drepId` partition), so the table has grown to ~101k items
+ * for ~1623 PROFILE rows. A FilterExpression-driven Scan must pay for
+ * reading every POWER row off disk before filtering settles, and was
+ * exhausting its raw-item budget — returning only ~800 of 1623 PROFILE
+ * rows and silently dropping DReps from the listing. The new path uses
+ * a sparse GSI partitioned on `entityType='DREP_PROFILE'`: POWER rows
+ * don't carry the attribute and are excluded automatically, so the
+ * Query is O(PROFILE rows) not O(table size). See
+ * `infra/lib/database-stack.ts` for the GSI definition.
  */
 
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
-import { scanItems, tableNames } from '../../lib/dynamodb';
+import { queryItems, tableNames } from '../../lib/dynamodb';
 import type { DRepDirectoryItem } from '../../lib/types';
 import { ok, internalError } from '../_response';
 
 const DEFAULT_PAGE_SIZE = 25;
 const MAX_PAGE_SIZE = 100;
-/** Cap the in-memory accumulator. The `drep_directory` table now holds a
- *  mix of `SK='PROFILE'` rows (one per DRep, ~1500-2000 today) AND
- *  `SK='POWER#NNNNNN'` voting-power-history sub-rows (one per DRep per
- *  epoch the DRep has been registered in — ~5-10 per DRep on mainnet
- *  today, growing by ~73/year). The Scan applies the SK filter AFTER
- *  reading raw items off disk, so the loop must read many more raw items
- *  than there are DReps before filtering settles.
- *
- *  At today's row count (~2k PROFILE + ~10k POWER ≈ 12k total) we want
- *  the Scan to comfortably exhaust the table on `includeInactive=true`
- *  (worst case: every PROFILE matches). 50 rounds × 1000 raw items =
- *  50k headroom — ~4x current total, leaves ~5 years of POWER growth
- *  before we'd need to revisit. SCAN_PER_ROUND of 1000 is also the
- *  DynamoDB Scan default page size, which is the cheapest per-round
- *  shape (one DDB Scan call returns up to 1MB or `limit` rows). */
-const MAX_SCAN_ROUNDS = 50;
-const SCAN_PER_ROUND = 1000;
+/** Cap on the per-call Query pagination loop. The new GSI is partitioned
+ *  on `entityType='DREP_PROFILE'` and holds exactly one item per registered
+ *  DRep (plus the two synthesized predefined-DRep rows) — ~1625 today.
+ *  With 1MB Query pages and the ALL projection (~1KB/item), one Query call
+ *  returns up to ~1000 items. 10 rounds × 1000 items = 10,000 PROFILE
+ *  headroom — ~6x current size, leaves multi-year growth headroom. The
+ *  GSI is sparse: POWER history sub-rows don't carry the partition-key
+ *  attribute and are excluded automatically, so this Query is O(PROFILE
+ *  rows) not O(table size) — fixing the bug that previously hid DReps
+ *  from the listing once POWER rows accumulated past the Scan's ceiling. */
+const MAX_QUERY_ROUNDS = 10;
+/** Name of the new sparse GSI on the `drep_directory` table — see
+ *  `infra/lib/database-stack.ts` for the definition and the
+ *  2026-05-26 root-cause story. */
+const ENTITY_TYPE_GSI_NAME = 'entityType-votingPower-index';
+const ENTITY_TYPE_PROFILE = 'DREP_PROFILE';
 
 /**
  * Module-level response cache. CloudFront in front of the API caches the
@@ -105,6 +117,15 @@ interface ListResponseBody {
 }
 const _listCache = new Map<string, CachedListEntry>();
 const LIST_CACHE_TTL_MS = 30_000;
+
+/** Test-only escape hatch — same convention as `_resetCurrentDrepCache`
+ *  in `lib/recognition.ts`. Lets the test harness reset the module-level
+ *  cache between cases so a cached response from a prior test doesn't
+ *  short-circuit the Query mock. Not exported as part of the public API
+ *  contract — production callers should never need to invalidate. */
+export function _resetListCache(): void {
+  _listCache.clear();
+}
 /** Bound the cache. Each entry holds up to `pageSize` (≤100) items, and
  *  the typical hot-set is at most a few sort/search permutations × pages.
  *  Over the cap we drop the oldest entry. */
@@ -211,21 +232,23 @@ function nameSortKey(item: DRepDirectoryItem): string {
 }
 
 /** Build the DynamoDB FilterExpression / ExpressionAttributeNames /
- *  ExpressionAttributeValues for `scanAllMatching`. Exported for unit
- *  tests — the rest of the Scan loop is straightforward pagination.
+ *  ExpressionAttributeValues for the active/retired/search filter applied
+ *  on top of the `entityType-votingPower-index` Query.
  *
- *  **PROFILE-only filter (2026-05-26):** the `drep_directory` table is now
- *  shared with the `drep-voting-power-history` sync, which writes
- *  `SK='POWER#${epoch}'` sub-rows under the same `drepId` partition.
- *  Without an explicit SK filter the Scan returned those rows mixed in
- *  with DRep profiles — the frontend got cards with no `givenName` /
- *  `isActive` / etc., and `total` was wildly inflated (one DRep with 6
- *  POWER rows counted as 7 items). Filtering to `SK = 'PROFILE'` restores
- *  the pre-Phase-C behavior: one row per DRep in the result set. */
+ *  **Migration note (2026-05-26):** the read path switched from Scan to
+ *  Query against a new sparse GSI partitioned on `entityType='DREP_PROFILE'`.
+ *  The GSI is by definition PROFILE-only (POWER history rows don't carry
+ *  the partition-key attribute), so the previous `SK = 'PROFILE'` filter
+ *  is no longer needed — DynamoDB only ever returns PROFILE rows. The
+ *  surviving filter conditions handle the user-toggleable concerns:
+ *  active-only and name search. Exported for unit tests. */
 export function buildDirectoryListFilter(opts: {
   includeInactive: boolean;
   search: string | undefined;
 }): {
+  /** Empty string when no filter is needed (default view with no search).
+   *  Callers must skip passing `filterExpression` to Query in that case —
+   *  DynamoDB rejects an empty FilterExpression. */
   filterExpression: string;
   expressionAttributeNames: Record<string, string>;
   expressionAttributeValues: Record<string, unknown>;
@@ -234,17 +257,15 @@ export function buildDirectoryListFilter(opts: {
   const names: Record<string, string> = {};
   const values: Record<string, unknown> = {};
 
-  // ALWAYS restrict to the PROFILE rows. The directory table also holds
-  // `SK='POWER#NNNNNN'` voting-power-history sub-rows; those are read by
-  // `directory/get.ts` for the sparkline, not by this list view.
-  conditions.push('#SK = :profileSK');
-  names['#SK'] = 'SK';
-  values[':profileSK'] = 'PROFILE';
-
   if (!opts.includeInactive) {
-    // Default view: hide both inactive AND retired DReps. We do NOT use
-    // `attribute_not_exists(isRetired)` because rows synced before
-    // enrichmentVersion 3 didn't carry the field — they were all
+    // Default view: hide both inactive AND retired DReps. Predefined
+    // DReps (`drep_always_abstain`, `drep_always_no_confidence`) carry
+    // `isActive=true` and `isRetired=false` from the sync, so they
+    // surface in this view — which is the desired behavior: they hold
+    // ~9B ADA of voting power and should appear in the default list.
+    //
+    // We do NOT use `attribute_not_exists(isRetired)` because rows synced
+    // before enrichmentVersion 3 didn't carry the field — they were all
     // implicitly registered. Pre-v3 rows have `isRetired` absent, which
     // we treat as `false` (the v2 sync filtered out non-registered).
     conditions.push('#isActive = :true');
@@ -266,28 +287,57 @@ export function buildDirectoryListFilter(opts: {
   };
 }
 
-/** Scan the entire directory (paginated through DynamoDB's 1MB-per-page
- *  hard cap until exhausted), applying the optional active + retired and
- *  search filters via FilterExpression. Returns the full matching set —
- *  callers sort and slice in memory. */
-async function scanAllMatching(opts: {
+/** Query every PROFILE row via the sparse `entityType-votingPower-index`
+ *  GSI. Returns the full matching set — callers sort and slice in memory.
+ *
+ *  The Query partitions on `entityType='DREP_PROFILE'` (one logical
+ *  partition holding only the 1623-ish PROFILE rows; POWER history rows
+ *  are excluded automatically because they don't carry the attribute).
+ *  Filter conditions are applied AFTER the Query reads the items, so the
+ *  filter ordering doesn't affect read-capacity cost — DynamoDB bills for
+ *  every item examined, but on this GSI "items examined" equals "PROFILE
+ *  rows," which is the same as the matching set in the broad case. */
+async function queryAllMatching(opts: {
   includeInactive: boolean;
   search: string | undefined;
 }): Promise<DRepDirectoryItem[]> {
   const filter = buildDirectoryListFilter(opts);
   const accumulated: DRepDirectoryItem[] = [];
   let cursor: Record<string, unknown> | undefined;
-  for (let round = 0; round < MAX_SCAN_ROUNDS; round++) {
-    const page = await scanItems<DRepDirectoryItem>(tableNames.drepDirectory, {
-      filterExpression: filter.filterExpression,
-      expressionAttributeNames: filter.expressionAttributeNames,
-      expressionAttributeValues: filter.expressionAttributeValues,
-      limit: SCAN_PER_ROUND,
+  for (let round = 0; round < MAX_QUERY_ROUNDS; round++) {
+    const page = await queryItems<DRepDirectoryItem>(tableNames.drepDirectory, {
+      indexName: ENTITY_TYPE_GSI_NAME,
+      keyConditionExpression: '#et = :entityType',
+      expressionAttributeNames: {
+        '#et': 'entityType',
+        ...filter.expressionAttributeNames,
+      },
+      expressionAttributeValues: {
+        ':entityType': ENTITY_TYPE_PROFILE,
+        ...filter.expressionAttributeValues,
+      },
+      // Filter only applied when there's actually something to filter on —
+      // an empty FilterExpression is rejected by DynamoDB.
+      ...(filter.filterExpression
+        ? { filterExpression: filter.filterExpression }
+        : {}),
+      // We always sort in memory below for non-`power` sorts; for `power`
+      // the GSI sort key (`votingPowerSort`) already orders the rows. We
+      // re-sort regardless so the comparator-driven path stays uniform
+      // across sort modes — the cost is a microsecond per request.
       ...(cursor ? { exclusiveStartKey: cursor } : {}),
     });
     accumulated.push(...page.items);
     if (!page.lastEvaluatedKey) break;
     cursor = page.lastEvaluatedKey;
+  }
+  if (accumulated.length >= MAX_QUERY_ROUNDS * 1000) {
+    // Loud signal that we've grown past the buffer headroom — would only
+    // trip if PROFILE count exceeds 10k. Bump `MAX_QUERY_ROUNDS` at that
+    // point or move to keyset pagination at the handler boundary.
+    console.warn(
+      `directory/list: hit MAX_QUERY_ROUNDS (${MAX_QUERY_ROUNDS}) — accumulator may be incomplete (${accumulated.length} rows)`,
+    );
   }
   return accumulated;
 }
@@ -323,7 +373,7 @@ export const handler = async (
       return ok(cached.body, cacheHeaders);
     }
 
-    const allMatching = await scanAllMatching({ includeInactive, search });
+    const allMatching = await queryAllMatching({ includeInactive, search });
     const comparator = makeComparator(sort);
     allMatching.sort(comparator);
     const total = allMatching.length;

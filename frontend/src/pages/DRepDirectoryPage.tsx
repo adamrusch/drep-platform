@@ -178,10 +178,20 @@ function DRepCard({ drep }: DRepCardProps): React.ReactElement {
   const objectivesPreview = drep.objectives
     ? drep.objectives.replace(/\s+/g, ' ').trim().slice(0, 140)
     : null;
-  // Lifecycle status badge — three states. Retired is distinct from
-  // inactive (an inactive DRep can still come back; retired filed a
-  // retirement certificate and is permanently out).
-  const statusBadge = drep.isRetired ? (
+  // Lifecycle status badge — four states. Predefined DReps
+  // (drep_always_abstain / drep_always_no_confidence) take priority over
+  // the active/inactive/retired axis because they don't sit on that
+  // lifecycle at all — they're protocol primitives, not registered
+  // DReps. Retired is distinct from inactive (an inactive DRep can still
+  // come back; retired filed a retirement certificate and is permanently
+  // out).
+  const statusBadge = drep.isPredefined ? (
+    <StatusPill
+      status="voting"
+      label="Predefined"
+      title="A built-in Cardano DRep used for auto-vote delegations. These pseudo-identities are not registered like normal DReps but hold significant voting power."
+    />
+  ) : drep.isRetired ? (
     <StatusPill
       status="neutral"
       label="Retired"
@@ -223,7 +233,16 @@ function DRepCard({ drep }: DRepCardProps): React.ReactElement {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap mb-0.5">
             {drep.givenName ? (
-              <h3 className="font-semibold text-[15px] text-[var(--text-primary)] tracking-tight truncate">
+              <h3
+                className={cn(
+                  'font-semibold text-[15px] text-[var(--text-primary)] tracking-tight truncate',
+                  // Predefined DRep names are hard-coded by the sync
+                  // (not authored by the DRep) — italicize so the user
+                  // sees at a glance that this isn't a self-attested
+                  // CIP-119 givenName.
+                  drep.isPredefined && 'italic',
+                )}
+              >
                 {drep.givenName}
               </h3>
             ) : (

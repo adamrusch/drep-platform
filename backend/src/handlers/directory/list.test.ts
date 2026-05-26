@@ -2,114 +2,134 @@
  * Regression tests for the DRep directory list handler — specifically
  * the FilterExpression builder.
  *
- * # The bug this guards against (2026-05-26)
+ * # The bug history this guards against
+ *
+ * ## 2026-05-17 (Phase C) — POWER rows leak into the listing
  *
  * The `drep_directory` DynamoDB table was originally one-row-per-DRep
- * with `SK='PROFILE'`. Phase C (2026-05-17) added the
- * `drep-voting-power-history` daily sync, which writes `SK='POWER#NNNNNN'`
- * sub-rows under the same `drepId` partition for the sparkline data on
- * the per-DRep detail page.
+ * with `SK='PROFILE'`. Phase C added the `drep-voting-power-history`
+ * daily sync, which writes `SK='POWER#NNNNNN'` sub-rows under the same
+ * `drepId` partition for the per-DRep sparkline data.
  *
- * The list handler's Scan was not filtered by SK. Result:
+ * The list handler's Scan was not filtered by SK. POWER rows leaked into
+ * the listing — the frontend rendered cards with no `givenName` /
+ * `isActive` / etc., and `total` was wildly inflated.
  *
- *   - `?includeInactive=true` returned every POWER row mixed in with the
- *     DRep profiles. Each DRep appeared ~6x today (1 PROFILE + ~5 POWER
- *     rows for the epochs since CIP-1694 went live). The `total` field
- *     in the response was wildly inflated and the frontend rendered
- *     cards with no `givenName` / `isActive` / etc.
+ * Fix at the time: a `SK = 'PROFILE'` clause on the Scan's FilterExpression.
  *
- *   - `?includeInactive=false` filtered out POWER rows (they don't have
- *     `isActive=true`) but the Scan's 10k-raw-item ceiling (50 rounds ×
- *     200 items) was being burned reading POWER rows from disk, so only
- *     a small fraction of PROFILE rows survived to the filter step.
- *     Mainnet showed only ~33 active DReps when Koios reported ~270.
+ * ## 2026-05-26 — Scan read-side budget exhausts before reaching all PROFILE rows
+ *
+ * The compound table now holds 1623 PROFILE rows alongside ~100k POWER
+ * rows. The Scan with FilterExpression pays for reading every POWER row
+ * off disk before the filter selects PROFILE rows out. Empirically the
+ * Scan was exhausting its 50k raw-item ceiling and returning only ~800
+ * of 1623 PROFILE rows — DReps were missing from the directory listing
+ * entirely. Also: the two predefined DReps (`drep_always_abstain` /
+ * `drep_always_no_confidence`) — which hold ~9B ADA between them — were
+ * explicitly filtered out of the sync.
+ *
+ * Fix:
+ *   - Read path: switched from Scan-with-filter to Query against a new
+ *     sparse `entityType-votingPower-index` GSI. The GSI is partitioned
+ *     on a constant `entityType='DREP_PROFILE'` attribute that the sync
+ *     writes ONLY on PROFILE rows; POWER rows are excluded automatically
+ *     by sparseness. The Query is O(PROFILE rows) not O(table size).
+ *   - As a consequence, the `SK = 'PROFILE'` clause in the FilterExpression
+ *     is no longer needed (and no longer present) — the GSI handles it.
+ *   - Sync injects the predefined DReps as synthesized PROFILE rows with
+ *     hardcoded display names + `isPredefined=true`.
  *
  * # Coverage
  *
  * The pure `buildDirectoryListFilter` function is tested directly. The
- * handler's Scan loop is straightforward pagination — exercising it
- * end-to-end would require mocking DynamoDB, which adds setup complexity
- * for zero behavioral coverage beyond what the unit-level helper gives.
+ * handler's Query loop is exercised by the new `queryAllMatching` /
+ * regression-row-count test in `list.queryPath.test.ts`.
  *
- * Three guarantees we want to lock in:
- *   1. EVERY query has `SK = :profileSK` in its FilterExpression — no
- *      future change can accidentally remove that.
- *   2. `includeInactive=false` keeps the `isActive=true` filter +
- *      `isRetired` exclusion as before.
- *   3. `search` filter still works alongside the PROFILE+active filters.
+ * Guarantees we lock in here:
+ *   1. The FilterExpression NEVER carries `SK = 'PROFILE'` anymore —
+ *      that's the GSI's job. A regression to a Scan-based filter would
+ *      reintroduce the POWER-rows-mixing bug AND the row-budget bug.
+ *   2. `includeInactive=false` keeps the `isActive=true` + `isRetired`
+ *      exclusion filters intact.
+ *   3. `search` filter works alongside the active filters.
+ *   4. With no filters (`includeInactive=true`, no `search`) the filter
+ *      expression is empty so the handler skips passing it to Query
+ *      (an empty FilterExpression is a DynamoDB error).
  */
 
 import { describe, it, expect } from 'vitest';
 import { buildDirectoryListFilter } from './list';
 
 describe('buildDirectoryListFilter', () => {
-  it('always restricts to SK=PROFILE, even with no other filters', () => {
+  it('returns an empty FilterExpression when no filters apply (includeInactive=true, no search)', () => {
     const result = buildDirectoryListFilter({ includeInactive: true, search: undefined });
 
-    // The SK filter MUST be in the expression — its absence is the
-    // root cause of the "POWER rows leaking into the directory" bug.
-    expect(result.filterExpression).toContain('#SK = :profileSK');
-    expect(result.expressionAttributeNames['#SK']).toBe('SK');
-    expect(result.expressionAttributeValues[':profileSK']).toBe('PROFILE');
-
-    // With `includeInactive=true` no other conditions are added — the
-    // SK-only filter is the entire expression.
-    expect(result.filterExpression).toBe('#SK = :profileSK');
+    // No filter conditions: the new Query-against-GSI path uses the
+    // sparse `entityType` partition key to scope to PROFILE rows; nothing
+    // else needs filtering when both toggles are off. The empty string
+    // is the signal to the handler to skip passing FilterExpression to
+    // Query (DynamoDB rejects an empty FilterExpression).
+    expect(result.filterExpression).toBe('');
+    expect(result.expressionAttributeNames).toEqual({});
+    expect(result.expressionAttributeValues).toEqual({});
   });
 
-  it('combines SK=PROFILE with isActive=true + isRetired exclusion on the default view', () => {
+  it('NEVER carries a SK="PROFILE" clause in the FilterExpression', () => {
+    // The previous bug-fix added `SK = :profileSK` to every code path.
+    // The 2026-05-26 GSI migration removes that clause (the GSI is
+    // partitioned on `entityType` which is only present on PROFILE
+    // rows). If someone re-adds the clause without thinking, they
+    // signal that the GSI assumption is broken and we'd want to know
+    // about it — this assertion is the canary.
+    const variants = [
+      buildDirectoryListFilter({ includeInactive: true, search: undefined }),
+      buildDirectoryListFilter({ includeInactive: false, search: undefined }),
+      buildDirectoryListFilter({ includeInactive: true, search: 'foo' }),
+      buildDirectoryListFilter({ includeInactive: false, search: 'foo' }),
+    ];
+    for (const v of variants) {
+      expect(v.filterExpression).not.toContain('SK');
+      expect(v.expressionAttributeNames).not.toHaveProperty('#SK');
+      expect(v.expressionAttributeValues).not.toHaveProperty(':profileSK');
+    }
+  });
+
+  it('adds isActive=true + isRetired exclusion on the default view (includeInactive=false)', () => {
     const result = buildDirectoryListFilter({ includeInactive: false, search: undefined });
 
-    // SK filter still present — regression guard for the bug above.
-    expect(result.filterExpression).toContain('#SK = :profileSK');
-
-    // Active-only filters layered on top, AND-joined.
     expect(result.filterExpression).toContain('#isActive = :true');
     expect(result.filterExpression).toContain(
       '(attribute_not_exists(#isRetired) OR #isRetired = :false)',
     );
 
-    // Conditions are joined with ' AND '.
-    expect(result.filterExpression).toMatch(/ AND /);
-
-    // Attribute name / value bindings cover everything referenced.
     expect(result.expressionAttributeNames).toMatchObject({
-      '#SK': 'SK',
       '#isActive': 'isActive',
       '#isRetired': 'isRetired',
     });
     expect(result.expressionAttributeValues).toMatchObject({
-      ':profileSK': 'PROFILE',
       ':true': true,
       ':false': false,
     });
   });
 
-  it('combines SK=PROFILE with search filter when search is provided', () => {
+  it('adds search filter when search is provided', () => {
     const result = buildDirectoryListFilter({ includeInactive: true, search: 'Yoroi' });
 
-    // SK filter present.
-    expect(result.filterExpression).toContain('#SK = :profileSK');
-    // Search filter present, lowercased (the directory stores
-    // `givenNameLower` for case-insensitive contains).
     expect(result.filterExpression).toContain('contains(#givenNameLower, :q)');
     expect(result.expressionAttributeNames['#givenNameLower']).toBe('givenNameLower');
     expect(result.expressionAttributeValues[':q']).toBe('yoroi');
   });
 
-  it('combines all three filter layers when both flags are set', () => {
+  it('combines isActive + isRetired + search when all are set', () => {
     const result = buildDirectoryListFilter({ includeInactive: false, search: 'Cardano' });
 
-    expect(result.filterExpression).toContain('#SK = :profileSK');
     expect(result.filterExpression).toContain('#isActive = :true');
+    expect(result.filterExpression).toContain(
+      '(attribute_not_exists(#isRetired) OR #isRetired = :false)',
+    );
     expect(result.filterExpression).toContain('contains(#givenNameLower, :q)');
-    // The order in the joined string is deterministic — SK first
-    // (cheapest selectivity), then isActive/isRetired, then search.
-    // This ordering is documentation-only (DynamoDB doesn't care) but
-    // a regression in ordering would suggest someone moved conditions
-    // around without thinking about why.
     expect(result.filterExpression).toMatch(
-      /#SK = :profileSK AND #isActive = :true AND \(attribute_not_exists\(#isRetired\) OR #isRetired = :false\) AND contains\(#givenNameLower, :q\)/,
+      /^#isActive = :true AND \(attribute_not_exists\(#isRetired\) OR #isRetired = :false\) AND contains\(#givenNameLower, :q\)$/,
     );
   });
 
