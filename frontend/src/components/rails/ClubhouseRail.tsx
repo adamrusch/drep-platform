@@ -1,76 +1,174 @@
 import React from 'react';
+import { Link } from 'react-router-dom';
 import { Sparkles, Users } from 'lucide-react';
 import { Card, CardHeader, CardTitle } from '@/components/ui/Card';
-
-const SoonPill = (): React.ReactElement => (
-  <span className="inline-flex items-center text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-token-full bg-[var(--bg-muted)] text-[var(--text-tertiary)]">
-    Soon
-  </span>
-);
+import { useActiveThreads, useTopContributors } from '@/hooks/useClubhouseRail';
+import { formatRelativeTime, formatWalletAddress } from '@/lib/utils';
 
 /**
- * Right-rail for the Delegator Clubhouse. Mirrors the chrome from
- * `clubhouse.jsx:358–467` (ClubhouseRail) but with placeholder data —
- * the real per-DRep activity stream + contributor leaderboard isn't
- * wired up yet, but the design layout needs to be visible.
+ * Right-rail for the Delegator Clubhouse.
+ *
+ * Two real-data cards (no longer "Soon" placeholders):
+ *   - Active threads — top 5 posts by replies in the last 24h. Each
+ *     entry is a deep-link back to the clubhouse with the post id in
+ *     the URL fragment, so the dedicated post handler can scroll to
+ *     it when we land that view (for now the fragment is purely
+ *     informational — the clubhouse renders a flat list).
+ *   - Top contributors — top 5 wallets by participation in this
+ *     clubhouse. See `backend/src/handlers/clubhouse/_rail.ts` for the
+ *     scoring formula and why we don't stake-weight today.
+ *
+ * Empty states render distinct copy ("be first") rather than hiding
+ * the card so the rail layout stays stable across clubhouses.
+ *
+ * Loading skeletons render at the same row height as the populated
+ * row so the layout doesn't jump when the data lands.
  */
-export function ClubhouseRail(): React.ReactElement {
+interface ClubhouseRailProps {
+  /** The DRep whose clubhouse is currently being viewed. Both rail
+   *  cards key their queries off this. When absent, both queries are
+   *  short-circuited via `enabled: false` and we render the empty
+   *  states. */
+  drepId: string;
+}
+
+export function ClubhouseRail({ drepId }: ClubhouseRailProps): React.ReactElement {
   return (
     <>
-      <Card>
-        <CardHeader>
-          <CardTitle>
-            <Sparkles size={14} strokeWidth={2} className="text-[var(--brand-primary)]" />
-            Active threads
-          </CardTitle>
-          <SoonPill />
-        </CardHeader>
-        <ul className="space-y-3 text-sm">
-          {[
-            'Treasury withdrawal milestones',
-            'Constitutional update feedback',
-            'Stake-weighted committee votes',
-          ].map((thread) => (
+      <ActiveThreadsCard drepId={drepId} />
+      <TopContributorsCard drepId={drepId} />
+    </>
+  );
+}
+
+// ---- Active threads card ----
+
+function ActiveThreadsCard({ drepId }: { drepId: string }): React.ReactElement {
+  const { data, isLoading } = useActiveThreads(drepId);
+  const threads = data?.items ?? [];
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>
+          <Sparkles size={14} strokeWidth={2} className="text-[var(--brand-primary)]" />
+          Active threads
+        </CardTitle>
+      </CardHeader>
+      {isLoading ? (
+        <ul className="space-y-3 text-sm" aria-busy="true">
+          {Array.from({ length: 3 }).map((_, i) => (
             <li
-              key={thread}
+              key={i}
+              className="h-4 rounded-token-md bg-[var(--bg-muted)] animate-pulse"
+            />
+          ))}
+        </ul>
+      ) : threads.length === 0 ? (
+        <p className="text-[12.5px] text-[var(--text-tertiary)] italic">
+          No active threads yet.
+        </p>
+      ) : (
+        <ul className="space-y-3 text-sm">
+          {threads.map((thread) => (
+            <li
+              key={thread.postId}
               className="flex items-start justify-between gap-2 text-[var(--text-secondary)]"
+              title={
+                thread.lastReplyAt
+                  ? `Last reply ${formatRelativeTime(thread.lastReplyAt)}`
+                  : undefined
+              }
             >
-              <span className="truncate">{thread}</span>
-              <span className="text-[11px] text-[var(--text-tertiary)] tabular-nums flex-shrink-0">
-                —
+              {/* Deep-link to the clubhouse with the post id in the
+                  fragment. The clubhouse page itself renders a flat
+                  list today, so the fragment is informational — once
+                  we add scroll-to-post behavior, the link will land
+                  the reader on the thread. */}
+              <Link
+                to={`/drep/${encodeURIComponent(drepId)}/delegators#${encodeURIComponent(thread.postId)}`}
+                className="truncate hover:text-[var(--text-primary)] hover:underline"
+              >
+                {thread.title}
+              </Link>
+              <span
+                className="text-[11px] text-[var(--text-tertiary)] tabular-nums flex-shrink-0"
+                aria-label={`${thread.replyCount24h} ${thread.replyCount24h === 1 ? 'reply' : 'replies'} in the last 24 hours`}
+              >
+                {thread.replyCount24h}
               </span>
             </li>
           ))}
         </ul>
-      </Card>
+      )}
+    </Card>
+  );
+}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>
-            <Users size={14} strokeWidth={2} className="text-[var(--brand-primary)]" />
-            Top contributors
-          </CardTitle>
-          <SoonPill />
-        </CardHeader>
-        <ol className="space-y-2.5 text-sm">
-          {[
-            { rank: 1, name: 'LUCID_STAKER', count: 48 },
-            { rank: 2, name: 'block_Architect', count: 36 },
-            { rank: 3, name: 'ada_pioneer', count: 29 },
-          ].map((c) => (
-            <li key={c.rank} className="flex items-center gap-3">
-              <span className="text-[11px] font-semibold text-[var(--text-tertiary)] w-4 tabular-nums">
-                {c.rank}
-              </span>
-              <span className="w-7 h-7 rounded-token-full bg-[var(--brand-primary-soft)] text-[var(--brand-primary)] flex items-center justify-center text-[11px] font-semibold flex-shrink-0">
-                {c.name.slice(0, 2).toUpperCase()}
-              </span>
-              <span className="flex-1 truncate text-[var(--text-secondary)]">{c.name}</span>
-              <span className="text-[11px] tabular-nums text-[var(--text-tertiary)]">{c.count}</span>
-            </li>
+// ---- Top contributors card ----
+
+function TopContributorsCard({ drepId }: { drepId: string }): React.ReactElement {
+  const { data, isLoading } = useTopContributors(drepId);
+  const contributors = data?.items ?? [];
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>
+          <Users size={14} strokeWidth={2} className="text-[var(--brand-primary)]" />
+          Top contributors
+        </CardTitle>
+      </CardHeader>
+      {isLoading ? (
+        <ol className="space-y-2.5 text-sm" aria-busy="true">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <li
+              key={i}
+              className="h-7 rounded-token-md bg-[var(--bg-muted)] animate-pulse"
+            />
           ))}
         </ol>
-      </Card>
-    </>
+      ) : contributors.length === 0 ? (
+        <p className="text-[12.5px] text-[var(--text-tertiary)] italic">
+          No contributors yet — be first.
+        </p>
+      ) : (
+        <ol className="space-y-2.5 text-sm">
+          {contributors.map((c, i) => {
+            // Resolved displayName if available, else a truncated bech32.
+            // Truncation length mirrors the rest of the app
+            // (`formatWalletAddress` default = 8 chars per side).
+            const label = c.displayName ?? formatWalletAddress(c.walletAddress);
+            // Two-letter initial badge from whatever label we have.
+            const initial = label.replace(/\W+/g, '').slice(0, 2).toUpperCase() || '??';
+            return (
+              <li key={c.walletAddress} className="flex items-center gap-3">
+                <span className="text-[11px] font-semibold text-[var(--text-tertiary)] w-4 tabular-nums">
+                  {i + 1}
+                </span>
+                <span
+                  className="w-7 h-7 rounded-token-full bg-[var(--brand-primary-soft)] text-[var(--brand-primary)] flex items-center justify-center text-[11px] font-semibold flex-shrink-0"
+                  aria-hidden="true"
+                >
+                  {initial}
+                </span>
+                <span
+                  className="flex-1 truncate text-[var(--text-secondary)]"
+                  title={c.walletAddress}
+                >
+                  {label}
+                </span>
+                <span
+                  className="text-[11px] tabular-nums text-[var(--text-tertiary)]"
+                  aria-label={`${c.contributionCount} ${c.contributionCount === 1 ? 'contribution' : 'contributions'}`}
+                >
+                  {c.contributionCount}
+                </span>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+    </Card>
   );
 }

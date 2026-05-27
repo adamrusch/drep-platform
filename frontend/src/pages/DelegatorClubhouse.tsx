@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import {
   Check,
   ChevronDown,
@@ -16,13 +17,20 @@ import {
   useDeleteClubhousePost,
   useVotePoll,
 } from '@/hooks/useClubhouse';
-import { useAuthStore } from '@/stores/authStore';
+import { useMe } from '@/hooks/useAuth';
+import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
 import { formatRelativeTime, formatWalletAddress, cn } from '@/lib/utils';
+import { get } from '@/lib/api';
 import { Composer } from '@/components/clubhouse/Composer';
 import { ClubhouseRail } from '@/components/rails/ClubhouseRail';
 import { PageWithRail } from '@/components/Layout';
 import { Button } from '@/components/ui/Button';
-import type { ClubhousePost, ClubhouseComment, ClubhousePollOption } from '@/types';
+import type {
+  ClubhousePost,
+  ClubhouseComment,
+  ClubhousePollOption,
+  DRepDetail,
+} from '@/types';
 
 /**
  * Delegator Clubhouse — the README's hero flow.
@@ -39,11 +47,87 @@ export function DelegatorClubhouse(): React.ReactElement {
   const { drepId } = useParams<{ drepId: string }>();
   const { data, isLoading } = useClubhousePosts(drepId ?? '');
   const { walletAddress, roles } = useAuthStore();
+  const isAuthenticated = useIsAuthenticated();
+  const { data: profile } = useMe();
   const deletePost = useDeleteClubhousePost();
-  const canPost =
+
+  // Pull a name for THIS DRep so the disabled-state copy can interpolate
+  // it ("Connect a wallet delegated to {drepName}..."). We share the
+  // `drep-detail` query key with `DRepPublicProfile.tsx` so React-Query
+  // can hit the existing cache when the user navigated here from the
+  // public profile. The query is `enabled: Boolean(drepId)` so it
+  // short-circuits on the empty-drepId routing edge case.
+  const { data: drepDetail } = useQuery({
+    queryKey: ['drep-detail', drepId],
+    queryFn: () => get<DRepDetail>(`/dreps/${encodeURIComponent(drepId ?? '')}`),
+    enabled: Boolean(drepId),
+    staleTime: 5 * 60 * 1000,
+  });
+  const drepName =
+    (drepDetail?.givenName?.trim() ?? '') !== ''
+      ? drepDetail!.givenName!
+      : drepId
+        ? formatWalletAddress(drepId, 10)
+        : 'this DRep';
+
+  // ---- Posting gate ----
+  //
+  // Top-level POSTS in a clubhouse are role-gated — only the DRep's
+  // committee can author them (`lead_drep`, `committee_member`,
+  // `trusted_delegator`). This matches the server-side check in
+  // `backend/src/handlers/clubhouse/createPost.ts`. We keep that gate
+  // as-is.
+  //
+  // The PREVIOUS bug was using THIS gate's copy for the "Connect a
+  // wallet that delegates to this DRep" disabled state — which was
+  // misleading because a normal delegator who IS delegated to this
+  // DRep would see it and think they couldn't comment either. They can:
+  // see the depth-2 reply form on every post.
+  //
+  // New gate logic (matches the spec verbatim):
+  //   - Authenticated AND (delegated to this DRep OR role-holder) →
+  //     show the Composer (top-level post authoring).
+  //   - Authenticated AND (delegated correctly but no role) → no
+  //     Composer, but they can still REPLY to existing posts. No
+  //     disabled banner — that surface is implicit through the post
+  //     stream.
+  //   - Authenticated AND delegated to a DIFFERENT DRep → "Connect a
+  //     wallet delegated to {drepName}..."
+  //   - Not authenticated → "Sign in to post in this clubhouse"
+  const isRoleHolder =
     roles.includes('lead_drep') ||
     roles.includes('committee_member') ||
     roles.includes('trusted_delegator');
+  // `delegatedToDrepId` lives on the `UserProfile` returned by /auth/me.
+  // `undefined` = couldn't determine (Koios+Blockfrost down or payment-
+  // address auth); we treat that as "unknown" — neither correctly-
+  // delegated nor wrong-DRep. `null` is a confirmed undelegated state.
+  const liveDelegatedToDrepId = profile?.delegatedToDrepId;
+  const isCorrectlyDelegated =
+    typeof liveDelegatedToDrepId === 'string' && liveDelegatedToDrepId === drepId;
+  const canPost = isRoleHolder || isCorrectlyDelegated;
+
+  // Gate-state copy. Only renders when the Composer is hidden.
+  let gateMessage: string | null = null;
+  if (drepId && !canPost) {
+    if (!isAuthenticated) {
+      gateMessage = 'Sign in to post in this clubhouse.';
+    } else if (
+      typeof liveDelegatedToDrepId === 'string' &&
+      liveDelegatedToDrepId !== drepId
+    ) {
+      // Definitive wrong-DRep — surface the actionable nudge.
+      gateMessage = `Connect a wallet delegated to ${drepName} to post in this clubhouse.`;
+    } else if (liveDelegatedToDrepId === null) {
+      // Wallet IS authenticated but is confirmed undelegated.
+      gateMessage = `Connect a wallet delegated to ${drepName} to post in this clubhouse.`;
+    } else {
+      // Unknown delegation (`undefined`) — happens when payment-address
+      // auth is in use OR both upstreams are down. Use a softer copy
+      // that doesn't accuse the user of being wrongly-delegated.
+      gateMessage = `Connect a wallet delegated to ${drepName} to post in this clubhouse.`;
+    }
+  }
 
   const center = (
     <>
@@ -64,11 +148,13 @@ export function DelegatorClubhouse(): React.ReactElement {
         </p>
       </div>
 
-      {/* Composer — only members of this clubhouse can post */}
+      {/* Composer — visible to role-holders AND wallets currently
+          delegated to this DRep. See the gate-state comment block at
+          the top of this component for the full decision tree. */}
       {drepId && canPost && <Composer drepId={drepId} />}
-      {drepId && !canPost && (
+      {gateMessage && (
         <div className="rounded-token-xl border border-dashed border-[var(--border-default)] bg-[var(--bg-subtle)] p-4 text-[13px] text-[var(--text-tertiary)] text-center">
-          Connect a wallet that delegates to this DRep to post in the clubhouse.
+          {gateMessage}
         </div>
       )}
 
@@ -103,7 +189,7 @@ export function DelegatorClubhouse(): React.ReactElement {
     </>
   );
 
-  return <PageWithRail rail={<ClubhouseRail />}>{center}</PageWithRail>;
+  return <PageWithRail rail={<ClubhouseRail drepId={drepId ?? ''} />}>{center}</PageWithRail>;
 }
 
 /**
