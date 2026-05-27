@@ -85,7 +85,11 @@ export const handler = async (
         ...safeUser,
         walletAddress: authCtx.walletAddress,
         roles: authCtx.roles,
-        drepId: authCtx.drepId,
+        // Response field name kept as `drepId` (the public API surface
+        // consumed by the SPA's auth store) but sourced from the
+        // semantically clearer `registeredDrepId` JWT claim. See
+        // `lib/auth.ts` for the JWT field rename and rollout window.
+        drepId: authCtx.registeredDrepId,
         // `delegatedToDrepId` is the live on-chain delegation. See the
         // file-header comment for why this is a separate field from
         // `drepId` and which one each UX surface should consume.
