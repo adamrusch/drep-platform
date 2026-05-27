@@ -485,7 +485,10 @@ interface ClubhouseCommentRowProps {
  * Sub-replies indent under their reply (single line of vertical rule);
  * the visual depth-2 step is one indent past the depth-1 step.
  */
-function ClubhouseCommentRow({
+// Exported for unit tests (depth-2 cap behavior). Production callers use
+// it indirectly through the page module — there's no need to import it
+// from anywhere else.
+export function ClubhouseCommentRow({
   comment,
   depth,
   drepId,

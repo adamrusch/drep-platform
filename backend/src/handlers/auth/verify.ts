@@ -9,6 +9,7 @@ import {
   hashValue,
 } from '../../lib/auth';
 import { getItem, putItem, tableNames } from '../../lib/dynamodb';
+import { _invalidateForStake } from '../../lib/recognition';
 import type { UserItem, SessionType } from '../../lib/types';
 import { ok, badRequest, unauthorized, internalError } from '../_response';
 
@@ -96,6 +97,18 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     };
 
     await putItem(tableNames.users, userItem as unknown as Record<string, unknown>);
+
+    // Bust the recognition LRU for this stake (this-container only). A
+    // user who re-delegated between two sign-ins would otherwise see the
+    // OLD DRep's clubhouse routing for up to 60s. Per-container scope is
+    // documented on `_invalidateForStake`; other containers will catch
+    // up within their own TTL window. Best-effort — never fail the
+    // verify on a cache-eviction error.
+    try {
+      _invalidateForStake(walletAddress);
+    } catch (err) {
+      console.warn('verify: recognition cache eviction failed (non-fatal):', err);
+    }
 
     const cookieHeader = buildSetCookieHeader(token, sessionType);
 
