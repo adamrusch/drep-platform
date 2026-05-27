@@ -131,6 +131,55 @@ export function DelegatorClubhouse(): React.ReactElement {
 
   const center = (
     <>
+      {/* DRep identity header — name, picture, and CIP-119 objectives.
+          Renders as soon as the /dreps/{drepId} query resolves. Avatar
+          falls back to a Radio icon for predefined DReps (no image
+          available) or a neutral disk for registered DReps that haven't
+          uploaded one. Description shows `objectives` (CIP-119 primary
+          description) with a fall-through to `motivations` if absent. */}
+      {drepDetail && (
+        <header className="flex items-start gap-4 sm:gap-5 p-5 sm:p-6 rounded-token-2xl border border-[var(--border-default)] bg-[var(--bg-canvas)]">
+          <div className="flex-shrink-0">
+            {drepDetail.image ? (
+              <img
+                src={drepDetail.image}
+                alt=""
+                referrerPolicy="no-referrer"
+                className="w-16 h-16 sm:w-20 sm:h-20 rounded-token-full object-cover border border-[var(--border-subtle)]"
+                onError={(e) => {
+                  // Image URL was set but failed to load (404, CORS, etc.).
+                  // Hide the broken-image glyph; the layout already
+                  // tolerates a missing avatar.
+                  e.currentTarget.style.display = 'none';
+                }}
+              />
+            ) : drepDetail.isPredefined ? (
+              <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-token-full bg-[var(--info-soft)] flex items-center justify-center">
+                <Radio size={28} className="text-[var(--info)]" strokeWidth={2} />
+              </div>
+            ) : (
+              <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-token-full bg-[var(--bg-subtle)] border border-[var(--border-subtle)]" />
+            )}
+          </div>
+
+          <div className="flex-1 min-w-0">
+            <h1
+              className={cn(
+                'm-0 text-[22px] sm:text-[26px] font-bold tracking-tight text-[var(--text-primary)]',
+                drepDetail.isPredefined && 'italic',
+              )}
+            >
+              {drepName}
+            </h1>
+            {(drepDetail.objectives || drepDetail.motivations) && (
+              <p className="text-[13.5px] sm:text-[14px] text-[var(--text-secondary)] mt-2 leading-relaxed whitespace-pre-wrap">
+                {drepDetail.objectives || drepDetail.motivations}
+              </p>
+            )}
+          </div>
+        </header>
+      )}
+
       <div
         className="relative overflow-hidden rounded-token-2xl border border-[var(--border-default)] p-6 sm:p-8"
         style={{ background: 'var(--bg-hero)' }}
