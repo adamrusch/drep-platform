@@ -31,7 +31,7 @@ export class DatabaseStack extends cdk.Stack {
       partitionKey: { name: 'walletAddress', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'SK', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: props.stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
@@ -48,7 +48,7 @@ export class DatabaseStack extends cdk.Stack {
       partitionKey: { name: 'drepId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'SK', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: props.stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
@@ -83,7 +83,7 @@ export class DatabaseStack extends cdk.Stack {
       partitionKey: { name: 'drepId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'SK', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: props.stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
@@ -171,7 +171,7 @@ export class DatabaseStack extends cdk.Stack {
       partitionKey: { name: 'actionId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'SK', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: props.stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
@@ -215,7 +215,7 @@ export class DatabaseStack extends cdk.Stack {
       partitionKey: { name: 'actionId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'voteKey', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: props.stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
@@ -236,7 +236,7 @@ export class DatabaseStack extends cdk.Stack {
       partitionKey: { name: 'actionId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'commentId', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: props.stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
@@ -272,7 +272,7 @@ export class DatabaseStack extends cdk.Stack {
       partitionKey: { name: 'commentId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'stakeAddress', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: props.stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
@@ -282,7 +282,7 @@ export class DatabaseStack extends cdk.Stack {
       partitionKey: { name: 'drepId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'postId', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: props.stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
@@ -298,6 +298,7 @@ export class DatabaseStack extends cdk.Stack {
       partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING }, // entityType#entityId
       sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING }, // timestamp#eventType
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       timeToLiveAttribute: 'ttl',
       removalPolicy: props.stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
@@ -306,10 +307,17 @@ export class DatabaseStack extends cdk.Stack {
     // Stores both auth challenge nonces and mutation nonces.
     // Item shape: { nonce, kind: 'challenge' | 'mutation', walletAddress, expiresAt (epoch seconds for TTL), message? }
     // DynamoDB TTL on expiresAt handles cleanup automatically.
+    //
+    // PITR enabled for uniformity even though the practical recovery
+    // window here is small (rows live for minutes). The circuit-breaker
+    // and Phase C vote-event high-water-mark markers also live in this
+    // table — those rows have a 24-hour TTL and would be worth
+    // recovering if an operator accidentally truncated the table.
     this.authNoncesTable = new dynamodb.Table(this, 'AuthNoncesTable', {
       tableName: `${this.tablePrefix}auth_nonces`,
       partitionKey: { name: 'nonce', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       timeToLiveAttribute: 'expiresAt',
       removalPolicy: props.stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
