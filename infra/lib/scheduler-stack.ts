@@ -18,6 +18,8 @@ export class SchedulerStack extends cdk.Stack {
   public readonly governanceSyncFn: lambdaNodejs.NodejsFunction;
   public readonly directorySyncFn: lambdaNodejs.NodejsFunction;
   public readonly powerHistorySyncFn: lambdaNodejs.NodejsFunction;
+  public readonly poolMetadataSyncFn: lambdaNodejs.NodejsFunction;
+  public readonly ccMembersSyncFn: lambdaNodejs.NodejsFunction;
 
   constructor(scope: Construct, id: string, props: SchedulerStackProps) {
     super(scope, id, props);
@@ -253,6 +255,123 @@ export class SchedulerStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'PowerHistorySyncFnArn', {
       value: this.powerHistorySyncFn.functionArn,
       exportName: `${stage}-PowerHistorySyncFnArn`,
+    });
+
+    // ---- Pool metadata sync Lambda (Batch D) ----
+    // Populates `pool_metadata` from Koios `/pool_list` + `/pool_metadata`.
+    // Daily cadence — pool ticker / name changes move very slowly. The
+    // compare-then-write idempotency path keeps quiet-day WCU near zero.
+    // ~6500 pools × ~140 batched calls ≈ 30s wall-clock; the 5-min
+    // timeout is comfortable headroom for slow upstreams.
+    const poolMetadataSyncRole = new iam.Role(this, 'PoolMetadataSyncRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+      ],
+    });
+    databaseStack.poolMetadataTable.grantReadWriteData(poolMetadataSyncRole);
+
+    this.poolMetadataSyncFn = new lambdaNodejs.NodejsFunction(this, 'PoolMetadataSyncFn', {
+      functionName: `drep-platform-${stage}-pool-metadata-sync`,
+      entry: path.join(backendDir, 'src/sync/pool-metadata.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      memorySize: 512,
+      timeout: cdk.Duration.minutes(5),
+      role: poolMetadataSyncRole,
+      environment: {
+        DYNAMODB_TABLE_PREFIX: `drep-platform-${stage}-`,
+        CARDANO_NETWORK: stage === 'staging' ? 'preprod' : 'mainnet',
+      },
+      bundling: {
+        minify: true,
+        sourceMap: false,
+        target: 'es2022',
+        externalModules: ['@aws-sdk/*'],
+        forceDockerBundling: false,
+      },
+      depsLockFilePath: path.join(backendDir, 'package-lock.json'),
+    });
+
+    const poolMetadataSyncRule = new events.Rule(this, 'PoolMetadataSyncRule', {
+      ruleName: `drep-platform-${stage}-pool-metadata-sync`,
+      description: 'Triggers pool metadata sync (Koios pool_list + pool_metadata) daily',
+      // 03:00 UTC — offset from the power-history sync (02:00) so two
+      // anonymous-tier Koios sync passes don't share their RPS budget
+      // with each other.
+      schedule: events.Schedule.cron({ minute: '0', hour: '3' }),
+      enabled: true,
+    });
+
+    poolMetadataSyncRule.addTarget(
+      new eventsTargets.LambdaFunction(this.poolMetadataSyncFn, {
+        retryAttempts: 1,
+        maxEventAge: cdk.Duration.hours(2),
+      }),
+    );
+
+    new cdk.CfnOutput(this, 'PoolMetadataSyncFnArn', {
+      value: this.poolMetadataSyncFn.functionArn,
+      exportName: `${stage}-PoolMetadataSyncFnArn`,
+    });
+
+    // ---- CC members sync Lambda (Batch D) ----
+    // Populates `cc_members` from Koios `/committee_info`. Hourly
+    // cadence, but the Lambda's internal epoch-skip check means the
+    // Koios call only fires on actual epoch transitions (~5 calls/epoch
+    // ≈ 365 calls/year on mainnet). The hourly EventBridge schedule is
+    // there so a "missed epoch transition" lag never exceeds one hour.
+    const ccMembersSyncRole = new iam.Role(this, 'CCMembersSyncRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+      ],
+    });
+    databaseStack.ccMembersTable.grantReadWriteData(ccMembersSyncRole);
+
+    this.ccMembersSyncFn = new lambdaNodejs.NodejsFunction(this, 'CCMembersSyncFn', {
+      functionName: `drep-platform-${stage}-cc-members-sync`,
+      entry: path.join(backendDir, 'src/sync/cc-members.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      memorySize: 256,
+      // The Koios calls return in <1s typically. Tiny budget keeps cold-
+      // start contention down on the ARM Lambda fleet.
+      timeout: cdk.Duration.minutes(1),
+      role: ccMembersSyncRole,
+      environment: {
+        DYNAMODB_TABLE_PREFIX: `drep-platform-${stage}-`,
+        CARDANO_NETWORK: stage === 'staging' ? 'preprod' : 'mainnet',
+      },
+      bundling: {
+        minify: true,
+        sourceMap: false,
+        target: 'es2022',
+        externalModules: ['@aws-sdk/*'],
+        forceDockerBundling: false,
+      },
+      depsLockFilePath: path.join(backendDir, 'package-lock.json'),
+    });
+
+    const ccMembersSyncRule = new events.Rule(this, 'CCMembersSyncRule', {
+      ruleName: `drep-platform-${stage}-cc-members-sync`,
+      description: 'Triggers CC members sync (Koios committee_info) hourly with epoch-skip',
+      schedule: events.Schedule.rate(cdk.Duration.hours(1)),
+      enabled: true,
+    });
+
+    ccMembersSyncRule.addTarget(
+      new eventsTargets.LambdaFunction(this.ccMembersSyncFn, {
+        retryAttempts: 1,
+        maxEventAge: cdk.Duration.hours(2),
+      }),
+    );
+
+    new cdk.CfnOutput(this, 'CCMembersSyncFnArn', {
+      value: this.ccMembersSyncFn.functionArn,
+      exportName: `${stage}-CCMembersSyncFnArn`,
     });
   }
 }

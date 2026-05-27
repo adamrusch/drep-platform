@@ -57,6 +57,16 @@ export const tableNames = {
    *  the vote handler. See `handlers/comments/vote.ts`. */
   commentVotes: `${TABLE_PREFIX}comment_votes`,
   clubhousePosts: `${TABLE_PREFIX}clubhouse_posts`,
+  /** SPO ticker / name / homepage cache populated daily by
+   *  `sync/pool-metadata.ts` from Koios `/pool_list` + `/pool_metadata`.
+   *  PK=`poolId` (bech32 `pool1...`). Read by `recognition.ts`'s
+   *  `getPoolName` and joined onto SPO vote rows by `lib/votes.ts`. */
+  poolMetadata: `${TABLE_PREFIX}pool_metadata`,
+  /** Constitutional Committee member roster populated by
+   *  `sync/cc-members.ts` from Koios `/committee_info`, refreshed once
+   *  per epoch. PK=`ccHotCred` (bech32 `cc_hot...`); reserved row
+   *  `ccHotCred='META'` carries the epoch-skip cursor. */
+  ccMembers: `${TABLE_PREFIX}cc_members`,
   auditLog: `${TABLE_PREFIX}audit_log`,
   authNonces: `${TABLE_PREFIX}auth_nonces`,
 } as const;
