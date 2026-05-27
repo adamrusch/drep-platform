@@ -202,6 +202,18 @@ export class ApiStack extends cdk.Stack {
     );
     const clubhouseDeletePostFn = fn('ClubhouseDeletePostFn', 'handlers/clubhouse/deletePost.ts');
     const clubhouseVotePollFn = fn('ClubhouseVotePollFn', 'handlers/clubhouse/votePoll.ts');
+    // Right-rail data — public reads, separate Lambdas so their in-memory
+    // caches don't fight for warm-container space with the write path.
+    // See backend/src/handlers/clubhouse/_rail.ts for the cache + ranking
+    // contract.
+    const clubhouseActiveThreadsFn = fn(
+      'ClubhouseActiveThreadsFn',
+      'handlers/clubhouse/activeThreads.ts',
+    );
+    const clubhouseTopContributorsFn = fn(
+      'ClubhouseTopContributorsFn',
+      'handlers/clubhouse/topContributors.ts',
+    );
 
     // ---- Profile handlers ----
     const profileGetFn = fn('ProfileGetFn', 'handlers/profile/get.ts');
@@ -391,6 +403,22 @@ export class ApiStack extends cdk.Stack {
       clubhouseVotePollFn,
       'ClubhouseVotePoll',
       true,
+    );
+    // Right-rail data — public reads, no auth gate. These power the
+    // "Active threads" + "Top contributors" cards on the Delegator
+    // Clubhouse page. Both are safe to serve unauthenticated since the
+    // posts they aggregate are themselves public-read.
+    addRoute(
+      apigwv2.HttpMethod.GET,
+      '/clubhouse/{drepId}/rail/active-threads',
+      clubhouseActiveThreadsFn,
+      'ClubhouseRailActiveThreads',
+    );
+    addRoute(
+      apigwv2.HttpMethod.GET,
+      '/clubhouse/{drepId}/rail/top-contributors',
+      clubhouseTopContributorsFn,
+      'ClubhouseRailTopContributors',
     );
 
     // ---- Profile routes ----
