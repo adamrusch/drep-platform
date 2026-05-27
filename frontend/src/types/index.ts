@@ -538,6 +538,43 @@ export interface ClubhouseComment {
   parentCommentId?: string;
 }
 
+/**
+ * One entry returned by `GET /clubhouse/{drepId}/rail/active-threads`.
+ * Powers the "Active threads" card on `ClubhouseRail.tsx`. Ranked
+ * server-side by reply count in the last 24 hours; we render at most
+ * `limit` (default 5) entries.
+ */
+export interface ClubhouseActiveThread {
+  postId: string;
+  /** Short title for the rail. Server-side ranker prefers `post.title`
+   *  then falls back to a truncation of `post.body`. Capped at 80 chars
+   *  for fit. */
+  title: string;
+  /** Reply count over the last 24 hours. The primary ranking metric. */
+  replyCount24h: number;
+  /** ISO-8601 timestamp of the most recent reply on this post. Powers
+   *  the relative-time hint in the rail. Undefined when the post has
+   *  no replies at all (shouldn't normally happen — entries with zero
+   *  recent replies are excluded server-side). */
+  lastReplyAt?: string;
+}
+
+/**
+ * One entry returned by `GET /clubhouse/{drepId}/rail/top-contributors`.
+ * Powers the "Top contributors" card on `ClubhouseRail.tsx`. Ranked
+ * by clubhouse-internal participation (posts + replies authored).
+ * See the handler's `_rail.ts` module header for the metric-choice
+ * rationale.
+ */
+export interface ClubhouseTopContributor {
+  walletAddress: string;
+  /** Server-resolved from the `users` table; undefined when the wallet
+   *  has no profile (the rail formats a truncated bech32 in that case). */
+  displayName?: string;
+  /** Number of posts AND replies by this wallet in this clubhouse. */
+  contributionCount: number;
+}
+
 export interface AuthState {
   walletAddress: string | null;
   roles: UserRole[];
