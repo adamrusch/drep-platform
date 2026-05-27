@@ -1125,29 +1125,62 @@ export async function fetchDRepVotes(
   }
 }
 
-/** Defensive cap on `/drep_delegators` pagination. Each page is one HTTP
- *  round-trip against Koios's PostgREST layer; in practice we've seen
- *  page 0 in ~1-2s and subsequent pages occasionally stretch to 6-8s
- *  (Koios load-dependent). With a 5-page cap the worst-case wall-clock
- *  is ~30-40s, but the typical case is well under 10s and fits comfortably
- *  inside the API Lambda's 30s budget alongside the parallel `drep_voters`
- *  call. DReps with > 5000 delegators surface "5000+" (see
- *  `fetchDRepDelegatorCount`); the exact tail count isn't actionable for
- *  the user. */
-const DREP_DELEGATORS_MAX_PAGES = 5;
+/** Defensive ceiling on the row count we'll accumulate before declaring
+ *  the answer "approximate." Each Koios page is one HTTP round-trip
+ *  (1000 rows max), so this also bounds the round-trips on hot DReps.
+ *
+ *  Background (2026-05-27): the previous design used a 5-page cap
+ *  (effective ceiling of 5000 rows) which on the largest DReps stretched
+ *  wall-clock to ~30-40s — uncomfortably close to the API Lambda's 30s
+ *  timeout. Worse, as the directory grows organically more DReps cross
+ *  the cap, so the worst-case latency was creeping up over time. Cutting
+ *  the cap to 1000 means the worst case is a single Koios round-trip
+ *  (page 0 fills the cap; we stop) and the answer is "1000+" — which is
+ *  not less actionable than "5000+" to a human looking at it.
+ *
+ *  Predefined DReps (Always Abstain, Always No Confidence) already
+ *  bypass this walk in `directory/get.ts` — they have millions of
+ *  delegators and the walk would dwarf the Lambda budget regardless.
+ *
+ *  Env override: `MAX_DELEGATORS_WALK` (a positive integer) lets us
+ *  bump the cap from CDK without a code change if the UX value of a
+ *  precise tail count ever outweighs the latency hit. */
+const MAX_DELEGATORS_WALK_DEFAULT = 1000;
+
+function getMaxDelegatorsWalk(): number {
+  const raw = process.env['MAX_DELEGATORS_WALK'];
+  if (!raw) return MAX_DELEGATORS_WALK_DEFAULT;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return MAX_DELEGATORS_WALK_DEFAULT;
+  return parsed;
+}
+
+/** Hard upper bound on Koios page count. Even with `MAX_DELEGATORS_WALK`
+ *  bumped, we won't walk more than this many pages — a defense against
+ *  a misconfigured override accidentally exhausting the Lambda budget.
+ *  At PAGE_SIZE=1000, this caps the walk at 10k rows. */
+const DREP_DELEGATORS_MAX_PAGES = 10;
 
 /**
  * Result shape for `fetchDRepDelegatorCount`. We deliberately do NOT return
  * the full delegator list — most callers only need the count, and shipping
  * a 1000+ row array through serializers wastes Lambda memory + bytes.
  *
- * `truncated: true` means we hit `DREP_DELEGATORS_MAX_PAGES` and there are
- * more delegators upstream. The UI should render "{count}+" rather than a
- * precise number.
+ * `isApprox: true` means we hit the configured cap (`MAX_DELEGATORS_WALK`)
+ * and stopped — the real count is `>= count`. The UI should render
+ * "{count}+" rather than a precise number. Same flag also surfaces
+ * partial counts from mid-walk failures (Koios rate-limit, network
+ * blip) so the frontend treats them uniformly as "≥ count, don't trust
+ * exactly."
+ *
+ * Renamed from `truncated` on 2026-05-27 for semantic clarity — "approx"
+ * better describes the contract ("the real number is at least this big")
+ * than "truncated" did.
  */
 export interface DRepDelegatorCountResult {
   count: number;
-  truncated: boolean;
+  /** True when the count is a lower bound, not the exact total. See above. */
+  isApprox: boolean;
 }
 
 /**
@@ -1166,23 +1199,24 @@ export interface DRepDelegatorCountResult {
  *      forced the JSON serializer to walk every row, even though the
  *      handler discarded everything but the length.
  *
- * The new shape returns `{ count, truncated }`. The boolean lets the UI
- * render "5000+" when we hit the page cap, which is honest to the user
- * (a DRep with 5000+ delegators is "popular"; whether they have 5043 or
- * 8721 is not actionable).
+ * The new shape returns `{ count, isApprox }`. The boolean lets the UI
+ * render "{count}+" when we hit the configured walk cap. Whether the
+ * actual tail is 1043 or 8721 is not actionable — "1000+" is enough
+ * for the user to know "this is a popular DRep."
  *
  * # Failure modes
  *
  * - First-page failure (network / 5xx / parse): returns `null` so the
  *   handler can degrade to the cached lifecycle count.
  * - Mid-walk failure (rare; Koios sometimes rate-limits or gets slow
- *   on later offsets): returns `{ count: rows_so_far, truncated: true }`.
+ *   on later offsets): returns `{ count: rows_so_far, isApprox: true }`.
  *   Partial-but-flagged is more useful than `null` here.
  */
 export async function fetchDRepDelegatorCount(
   drepId: string,
 ): Promise<DRepDelegatorCountResult | null> {
   const body = JSON.stringify({ _drep_id: drepId });
+  const maxWalk = getMaxDelegatorsWalk();
   let count = 0;
   for (let page = 0; page < DREP_DELEGATORS_MAX_PAGES; page++) {
     let res: Response;
@@ -1203,7 +1237,7 @@ export async function fetchDRepDelegatorCount(
         `[Koios /drep_delegators] page ${page} failed for ${drepId}, returning partial:`,
         err,
       );
-      return { count, truncated: true };
+      return { count, isApprox: true };
     }
     if (!res.ok) {
       if (page === 0) {
@@ -1213,7 +1247,7 @@ export async function fetchDRepDelegatorCount(
       console.warn(
         `[Koios /drep_delegators] page ${page} returned HTTP ${res.status}, returning partial`,
       );
-      return { count, truncated: true };
+      return { count, isApprox: true };
     }
     let parsed: unknown;
     try {
@@ -1223,11 +1257,11 @@ export async function fetchDRepDelegatorCount(
         console.warn(`[Koios /drep_delegators] body parse failed for ${drepId}:`, err);
         return null;
       }
-      return { count, truncated: true };
+      return { count, isApprox: true };
     }
     if (!Array.isArray(parsed)) {
       if (page === 0) return null;
-      return { count, truncated: true };
+      return { count, isApprox: true };
     }
     const rows = parsed as KoiosDRepDelegator[];
     count += rows.length;
@@ -1236,12 +1270,19 @@ export async function fetchDRepDelegatorCount(
     // tail — explicit count or `Content-Range` total would be cleaner but
     // PostgREST's defaults don't surface either reliably.
     if (rows.length < PAGE_SIZE) {
-      return { count, truncated: false };
+      return { count, isApprox: false };
+    }
+    // Stop once we've accumulated MAX_DELEGATORS_WALK rows. The next
+    // page would push count past the cap; on popular DReps the
+    // marginal value of an exact count drops to zero past this point.
+    if (count >= maxWalk) {
+      return { count, isApprox: true };
     }
   }
-  // We hit the page cap without seeing a short page → more rows upstream.
-  // Surface the cap-of-rows as a "{count}+" sentinel via the truncated flag.
-  return { count, truncated: true };
+  // We hit the hard MAX_PAGES safety cap without seeing a short page.
+  // Same flag — the UI doesn't care whether we stopped at the soft cap
+  // or the hard one.
+  return { count, isApprox: true };
 }
 
 /**

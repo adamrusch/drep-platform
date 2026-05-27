@@ -17,7 +17,10 @@
  *   - `walletAddress`: the JWT subject (`sub`)
  *   - `roles`: JSON-serialized array of role strings
  *   - `sessionType`: `'normal'` or `'remember_me'`
- *   - `drepId`: present only when the JWT carries a DRep claim
+ *   - `registeredDrepId`: present only when the JWT carries a DRep claim.
+ *     This is the REGISTERED-DRep id (i.e. the wallet completed
+ *     `/drep/register`) — NOT the DRep the wallet delegates to. The
+ *     latter is fetched live in `/auth/me` as `delegatedToDrepId`.
  *
  * Failure mode: any rejection (missing token, expired, signature
  * invalid, claims malformed) returns `{isAuthorized: false}` — API
@@ -79,7 +82,7 @@ function buildAuthorizedResponse(payload: JWTPayload): APIGatewaySimpleAuthorize
       walletAddress: payload.sub,
       roles: JSON.stringify(payload.roles),
       sessionType: payload.sessionType,
-      ...(payload.drepId ? { drepId: payload.drepId } : {}),
+      ...(payload.registeredDrepId ? { registeredDrepId: payload.registeredDrepId } : {}),
     },
   };
 }

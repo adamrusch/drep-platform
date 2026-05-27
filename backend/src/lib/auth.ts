@@ -275,11 +275,22 @@ const SESSION_DURATIONS: Record<SessionType, number> = {
   remember_me: 30 * 24 * 60 * 60, // 30 days in seconds
 };
 
+/**
+ * Issue a signed JWT for an authenticated wallet session.
+ *
+ * `registeredDrepId` is the wallet's REGISTERED-DRep id (set when this
+ * wallet ran the `/drep/register` flow). It is NOT the DRep the wallet
+ * delegates to — those are two different on-chain concepts; conflating
+ * them caused the "my wallet's chosen DRep isn't recognized" bug.
+ *
+ * Renamed from `drepId` on 2026-05-27. See `verifyJWT` for backward-
+ * compatibility behavior with tokens issued before this rename.
+ */
 export async function issueJWT(
   walletAddress: string,
   roles: UserRole[],
   sessionType: SessionType,
-  drepId?: string,
+  registeredDrepId?: string,
 ): Promise<{ token: string; expiresAt: string }> {
   const secret = await getJwtSecret();
   const durationSecs = SESSION_DURATIONS[sessionType];
@@ -288,7 +299,7 @@ export async function issueJWT(
   const payload: Record<string, unknown> = {
     roles,
     sessionType,
-    ...(drepId ? { drepId } : {}),
+    ...(registeredDrepId ? { registeredDrepId } : {}),
   };
 
   const token = await new SignJWT(payload)
@@ -305,10 +316,21 @@ export async function verifyJWT(token: string): Promise<JWTPayload> {
   const secret = await getJwtSecret();
   const { payload } = await jwtVerify(token, secret);
 
+  // Backward-compatibility shim: tokens issued before 2026-05-27 carry
+  // the registered-DRep id under the legacy field name `drepId`; tokens
+  // issued on or after carry it under `registeredDrepId`. We accept
+  // either during the 7-day rotation window — the new field wins when
+  // both are present. This branch can be removed after 2026-06-03
+  // (one normal-session TTL after the rename ships); by then every
+  // legacy token will have expired naturally. `remember_me` sessions
+  // (30 days) are not a concern: they don't survive a code redeploy
+  // unscathed if we tighten validation, and the legacy fallback is
+  // free to keep — but the comment above is the deletion trigger.
   const josePayload = payload as JoseJWTPayload & {
     roles: UserRole[];
     sessionType: SessionType;
-    drepId?: string;
+    registeredDrepId?: string;
+    drepId?: string; // legacy — remove after 2026-06-03
   };
 
   if (!josePayload.sub) {
@@ -321,11 +343,14 @@ export async function verifyJWT(token: string): Promise<JWTPayload> {
     throw new Error('JWT payload missing sessionType claim');
   }
 
+  // Prefer the new field; fall back to legacy for in-flight tokens.
+  const registeredDrepId = josePayload.registeredDrepId ?? josePayload.drepId;
+
   return {
     sub: josePayload.sub,
     roles: josePayload.roles,
     sessionType: josePayload.sessionType,
-    drepId: josePayload.drepId,
+    registeredDrepId,
     iat: josePayload.iat ?? 0,
     exp: josePayload.exp ?? 0,
   };
