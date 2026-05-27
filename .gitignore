@@ -15,6 +15,9 @@ cdk.out/
 
 # AWS CDK
 cdk.out/
+# Per-stack cdk output dirs written by scripts/deploy.sh to avoid the
+# shared-cdk.out race that bit us on 2026-05-26 (see scripts/README.md).
+cdk.out.*/
 *.d.ts
 *.js
 !jest.config.js
