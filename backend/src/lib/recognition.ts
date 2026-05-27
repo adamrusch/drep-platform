@@ -22,6 +22,7 @@
  */
 import { getAccountInfo } from './blockfrost';
 import { fetchAccountInfo, KoiosError } from './koios';
+import { batchGetItems, tableNames } from './dynamodb';
 
 export interface RecognitionInfo {
   /** Pre-formatted ADA stake string ("5.2M ₳") or undefined when the
@@ -332,5 +333,252 @@ function cacheStake(key: string, fetchedAt: number, result: StakeLookupResult): 
   if (_stakeCache.size > STAKE_MAX_ENTRIES) {
     const oldest = _stakeCache.keys().next().value;
     if (oldest !== undefined) _stakeCache.delete(oldest);
+  }
+}
+
+// ---- Pool name lookup (Votes-tab SPO display) ----
+//
+// SPO voter rows on the per-action Votes tab show the pool's registered
+// ticker + name when available, falling back to truncated bech32. The
+// data lives in the `pool_metadata` DDB cache, refreshed daily by
+// `sync/pool-metadata.ts`. We cache lookups in-Lambda for 60s so a
+// burst of requests for the same action's votes shares one DDB read.
+
+/** Subset of `PoolMetadataItem` the read path needs. */
+export interface PoolNameResult {
+  ticker?: string;
+  name?: string;
+}
+
+interface PoolNameCacheEntry {
+  fetchedAt: number;
+  result: PoolNameResult;
+}
+
+/** 60-second in-Lambda cache, mirroring the existing
+ *  `_currentDrepCache` pattern. The daily pool-metadata sync is the
+ *  canonical source; a 60s LRU absorbs hot-path bursts without
+ *  serving meaningfully stale data. */
+const POOL_NAME_TTL_MS = 60_000;
+const POOL_NAME_MAX_ENTRIES = 1000;
+const _poolNameCache = new Map<string, PoolNameCacheEntry>();
+
+/** Test-only escape hatch. */
+export function _resetPoolNameCache(): void {
+  _poolNameCache.clear();
+}
+
+/**
+ * Resolve human-readable identifiers for one pool. Returns an empty
+ * object when the pool isn't in the cache (read failure or pool with
+ * no registered metadata). Caller is responsible for rendering a
+ * sensible fallback (truncated bech32).
+ *
+ * Cached for 60s per (Lambda container, poolId) — a burst of votes
+ * tab loads for the same action shares one DDB read.
+ */
+export async function getPoolName(poolId: string): Promise<PoolNameResult> {
+  const now = Date.now();
+  const cached = _poolNameCache.get(poolId);
+  if (cached && now - cached.fetchedAt < POOL_NAME_TTL_MS) {
+    return cached.result;
+  }
+  try {
+    const items = await batchGetItems<{
+      poolId: string;
+      ticker?: string;
+      name?: string;
+    }>(tableNames.poolMetadata, [{ poolId }]);
+    const row = items[0];
+    const result: PoolNameResult = {};
+    if (row?.ticker) result.ticker = row.ticker;
+    if (row?.name) result.name = row.name;
+    cachePoolName(poolId, now, result);
+    return result;
+  } catch (err) {
+    console.warn(`getPoolName: cache lookup failed for ${poolId}:`, err);
+    // Do NOT cache the error case — let the next request retry rather
+    // than serve a stale empty result for 60s.
+    return {};
+  }
+}
+
+/**
+ * Bulk variant — resolve names for many pools in one BatchGet. Used by
+ * `lib/votes.ts` to enrich SPO vote rows in a single round-trip per
+ * page of votes. Returns a Map keyed by `poolId`; pools with no
+ * registered metadata land in the map with an empty value so callers
+ * can distinguish "missing from cache" from "cache lookup failed".
+ *
+ * Honors the 60s in-Lambda cache for already-seen pools — only the
+ * uncached subset hits DDB. The `batchGetItems` helper internally
+ * chunks at the 100-key BatchGet cap.
+ */
+export async function getPoolNamesBulk(
+  poolIds: readonly string[],
+): Promise<Map<string, PoolNameResult>> {
+  const out = new Map<string, PoolNameResult>();
+  if (poolIds.length === 0) return out;
+  const now = Date.now();
+  const toFetch: string[] = [];
+  for (const id of poolIds) {
+    const cached = _poolNameCache.get(id);
+    if (cached && now - cached.fetchedAt < POOL_NAME_TTL_MS) {
+      out.set(id, cached.result);
+    } else {
+      toFetch.push(id);
+    }
+  }
+  if (toFetch.length === 0) return out;
+  try {
+    const items = await batchGetItems<{
+      poolId: string;
+      ticker?: string;
+      name?: string;
+    }>(
+      tableNames.poolMetadata,
+      toFetch.map((poolId) => ({ poolId })),
+    );
+    const foundByPool = new Map<string, { ticker?: string; name?: string }>(
+      items.map((it) => [it.poolId, it]),
+    );
+    for (const id of toFetch) {
+      const row = foundByPool.get(id);
+      const result: PoolNameResult = {};
+      if (row?.ticker) result.ticker = row.ticker;
+      if (row?.name) result.name = row.name;
+      cachePoolName(id, now, result);
+      out.set(id, result);
+    }
+  } catch (err) {
+    console.warn('getPoolNamesBulk: cache lookup failed:', err);
+    // Pool IDs we didn't manage to fetch get an empty record so the
+    // caller's iteration order isn't disrupted.
+    for (const id of toFetch) {
+      if (!out.has(id)) out.set(id, {});
+    }
+  }
+  return out;
+}
+
+function cachePoolName(key: string, fetchedAt: number, result: PoolNameResult): void {
+  _poolNameCache.set(key, { fetchedAt, result });
+  if (_poolNameCache.size > POOL_NAME_MAX_ENTRIES) {
+    const oldest = _poolNameCache.keys().next().value;
+    if (oldest !== undefined) _poolNameCache.delete(oldest);
+  }
+}
+
+// ---- CC member name lookup (Votes-tab CC display) ----
+//
+// Constitutional Committee voters surface as bech32 `cc_hot...` strings.
+// The `cc_members` DDB cache (populated per-epoch by
+// `sync/cc-members.ts`) lets us join those to a display name when one
+// is registered. Today Koios doesn't surface CC names so this almost
+// always resolves to undefined — the frontend then falls back to
+// "CC Member ({hotCred truncated})". Schema is forward-compatible for
+// the future UpdateCommittee anchor walk.
+
+interface CCNameCacheEntry {
+  fetchedAt: number;
+  result: string | undefined;
+}
+
+/** 60s LRU, same as the pool cache. CC membership only changes at
+ *  epoch boundaries (~every 5 days on mainnet), so the in-Lambda
+ *  cache could be even longer, but 60s keeps the pattern uniform
+ *  with the rest of `recognition.ts`. */
+const CC_NAME_TTL_MS = 60_000;
+const CC_NAME_MAX_ENTRIES = 100;
+const _ccNameCache = new Map<string, CCNameCacheEntry>();
+
+/** Test-only escape hatch. */
+export function _resetCCNameCache(): void {
+  _ccNameCache.clear();
+}
+
+/**
+ * Resolve a CC member's display name. Returns `undefined` when the
+ * member isn't in the cache OR when they're in the cache but have no
+ * `ccName` (the normal case today — Koios `/committee_info` doesn't
+ * expose names). Caller renders "CC Member ({hotCred truncated})" as
+ * a fallback.
+ *
+ * The reserved cache PK `META` is filtered out — that row is the
+ * epoch-skip cursor, never a real CC member.
+ */
+export async function getCCMemberName(hotCred: string): Promise<string | undefined> {
+  if (hotCred === 'META') return undefined; // defensive: never look up the cursor row
+  const now = Date.now();
+  const cached = _ccNameCache.get(hotCred);
+  if (cached && now - cached.fetchedAt < CC_NAME_TTL_MS) {
+    return cached.result;
+  }
+  try {
+    const items = await batchGetItems<{ ccHotCred: string; ccName?: string }>(
+      tableNames.ccMembers,
+      [{ ccHotCred: hotCred }],
+    );
+    const row = items[0];
+    const name = row?.ccName && row.ccName.length > 0 ? row.ccName : undefined;
+    cacheCCName(hotCred, now, name);
+    return name;
+  } catch (err) {
+    console.warn(`getCCMemberName: cache lookup failed for ${hotCred}:`, err);
+    return undefined;
+  }
+}
+
+/**
+ * Bulk variant — resolve names for many CC members in one BatchGet.
+ * Returns a Map keyed by `ccHotCred` containing only entries that
+ * resolved to a non-empty name; absent entries mean "no name on file"
+ * which the caller treats as fallback-to-truncated-bech32.
+ *
+ * CC membership is tiny (~7 members on mainnet today) so this is one
+ * DDB call total. Honors the 60s in-Lambda cache.
+ */
+export async function getCCMemberNamesBulk(
+  hotCreds: readonly string[],
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (hotCreds.length === 0) return out;
+  const now = Date.now();
+  const toFetch: string[] = [];
+  for (const hc of hotCreds) {
+    if (hc === 'META') continue;
+    const cached = _ccNameCache.get(hc);
+    if (cached && now - cached.fetchedAt < CC_NAME_TTL_MS) {
+      if (cached.result) out.set(hc, cached.result);
+    } else {
+      toFetch.push(hc);
+    }
+  }
+  if (toFetch.length === 0) return out;
+  try {
+    const items = await batchGetItems<{ ccHotCred: string; ccName?: string }>(
+      tableNames.ccMembers,
+      toFetch.map((ccHotCred) => ({ ccHotCred })),
+    );
+    const found = new Map<string, string | undefined>(
+      items.map((it) => [it.ccHotCred, it.ccName]),
+    );
+    for (const hc of toFetch) {
+      const name = found.get(hc);
+      const resolved = name && name.length > 0 ? name : undefined;
+      cacheCCName(hc, now, resolved);
+      if (resolved) out.set(hc, resolved);
+    }
+  } catch (err) {
+    console.warn('getCCMemberNamesBulk: cache lookup failed:', err);
+  }
+  return out;
+}
+
+function cacheCCName(key: string, fetchedAt: number, result: string | undefined): void {
+  _ccNameCache.set(key, { fetchedAt, result });
+  if (_ccNameCache.size > CC_NAME_MAX_ENTRIES) {
+    const oldest = _ccNameCache.keys().next().value;
+    if (oldest !== undefined) _ccNameCache.delete(oldest);
   }
 }
