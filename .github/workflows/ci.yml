@@ -80,7 +80,14 @@ jobs:
       # but cheap, and keeps the log structure parallel to the backend
       # job. Vite build is the meaningful guard: it catches missing
       # imports + bundler-time failures the typecheck alone misses.
+      #
+      # NODE_OPTIONS=--max-old-space-size=6144 bumps the Node heap to 6GB
+      # so Vite + the SWC native plugin can bundle the Mesh/Cardano libs
+      # (WalletButton chunk is ~6.5MB pre-gzip — heavy enough to OOM the
+      # default 7GB GitHub runner with Node's ~4GB default heap).
       - run: npm run build
+        env:
+          NODE_OPTIONS: '--max-old-space-size=6144'
 
   infra:
     name: infra
