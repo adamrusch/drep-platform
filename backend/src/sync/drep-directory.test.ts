@@ -25,6 +25,7 @@ vi.mock('../lib/koios', () => ({
   listAllDReps: vi.fn(),
   fetchDRepInfoBatch: vi.fn(),
   fetchDRepMetadata: vi.fn(),
+  fetchPredefinedDRepDelegatorCount: vi.fn(),
   listAllVotes: vi.fn(),
   KoiosError: class KoiosError extends Error {
     public readonly status: number | undefined;
@@ -66,6 +67,7 @@ import {
   listAllDReps,
   fetchDRepInfoBatch,
   fetchDRepMetadata,
+  fetchPredefinedDRepDelegatorCount,
   listAllVotes,
 } from '../lib/koios';
 import { putItem, batchGetItems } from '../lib/dynamodb';
@@ -78,6 +80,7 @@ import type { DRepDirectoryItem } from '../lib/types';
 const mockListAllDReps = vi.mocked(listAllDReps);
 const mockFetchDRepInfoBatch = vi.mocked(fetchDRepInfoBatch);
 const mockFetchDRepMetadata = vi.mocked(fetchDRepMetadata);
+const mockFetchPredefinedDRepDelegatorCount = vi.mocked(fetchPredefinedDRepDelegatorCount);
 const mockListAllVotes = vi.mocked(listAllVotes);
 const mockPutItem = vi.mocked(putItem);
 const mockBatchGetItems = vi.mocked(batchGetItems);
@@ -96,6 +99,9 @@ beforeEach(() => {
   mockListAllVotes.mockResolvedValue([]);
   mockBatchGetItems.mockResolvedValue([]);
   mockPutItem.mockResolvedValue(undefined);
+  // Default: delegator count walk returns null (treat as upstream failure).
+  // Tests override per case to exercise success / approx / preserve paths.
+  mockFetchPredefinedDRepDelegatorCount.mockResolvedValue(null);
 });
 
 describe('runDirectorySync — predefined DRep injection', () => {
@@ -304,6 +310,191 @@ describe('runDirectorySync — idempotency on predefined rows', () => {
     expect(mockPutItem).not.toHaveBeenCalled();
     expect(secondPassResult.skippedFresh).toBe(2);
     expect(secondPassResult.written).toBe(0);
+  });
+});
+
+// ============================================================
+// Predefined-DRep delegatorCount precompute (Batch F #10, 2026-05-27)
+// ============================================================
+
+describe('runDirectorySync — predefined DRep delegatorCount precompute', () => {
+  it('persists delegatorCount on the synthesized row when the fresh walk succeeds', async () => {
+    // drep_info populated for both predefined DReps; delegator walks
+    // succeed with realistic mainnet counts (Abstain ~60k, NoConf ~5k).
+    mockFetchDRepInfoBatch.mockResolvedValue([
+      {
+        drep_id: 'drep_always_abstain',
+        hex: null,
+        has_script: false,
+        drep_status: 'registered',
+        deposit: null,
+        active: true,
+        expires_epoch_no: null,
+        amount: ABSTAIN_POWER,
+        meta_url: null,
+        meta_hash: null,
+      },
+      {
+        drep_id: 'drep_always_no_confidence',
+        hex: null,
+        has_script: false,
+        drep_status: 'registered',
+        deposit: null,
+        active: true,
+        expires_epoch_no: null,
+        amount: NO_CONF_POWER,
+        meta_url: null,
+        meta_hash: null,
+      },
+    ]);
+    mockFetchPredefinedDRepDelegatorCount.mockImplementation(async (id) => {
+      if (id === 'drep_always_abstain') return { count: 61234, isApprox: false };
+      if (id === 'drep_always_no_confidence') return { count: 4567, isApprox: false };
+      return null;
+    });
+
+    await runDirectorySync();
+
+    const puts = mockPutItem.mock.calls.map(([, item]) => item) as DRepDirectoryItem[];
+    const abstainPut = puts.find((r) => r.drepId === 'drep_always_abstain');
+    const noConfPut = puts.find((r) => r.drepId === 'drep_always_no_confidence');
+
+    expect(abstainPut).toBeDefined();
+    expect(noConfPut).toBeDefined();
+    expect(abstainPut!.delegatorCount).toBe(61234);
+    expect(noConfPut!.delegatorCount).toBe(4567);
+    // Approx flag is NOT persisted on the directory row — the sync
+    // is the authoritative source for these DReps and the get-handler
+    // treats absence as "exact." See directory/get.ts for the contract.
+    expect(abstainPut!.delegatorCountIsApprox).toBeUndefined();
+  });
+
+  it('still persists approximate counts when the walk hit the 100-page cap', async () => {
+    mockFetchDRepInfoBatch.mockResolvedValue([
+      {
+        drep_id: 'drep_always_abstain',
+        hex: null,
+        has_script: false,
+        drep_status: 'registered',
+        deposit: null,
+        active: true,
+        expires_epoch_no: null,
+        amount: ABSTAIN_POWER,
+        meta_url: null,
+        meta_hash: null,
+      },
+    ]);
+    // Hit the 100-page cap — the walker stopped at 100k rows but the
+    // DRep actually has more. Still persist; an approximate "100000" is
+    // dramatically more useful than `undefined`.
+    mockFetchPredefinedDRepDelegatorCount.mockResolvedValue({ count: 100000, isApprox: true });
+
+    await runDirectorySync();
+
+    const puts = mockPutItem.mock.calls.map(([, item]) => item) as DRepDirectoryItem[];
+    const abstainPut = puts.find((r) => r.drepId === 'drep_always_abstain');
+    expect(abstainPut!.delegatorCount).toBe(100000);
+  });
+
+  it('preserves the previous cycle delegatorCount when the fresh walk returns null', async () => {
+    mockFetchDRepInfoBatch.mockResolvedValue([
+      {
+        drep_id: 'drep_always_abstain',
+        hex: null,
+        has_script: false,
+        drep_status: 'registered',
+        deposit: null,
+        active: true,
+        expires_epoch_no: null,
+        amount: ABSTAIN_POWER,
+        meta_url: null,
+        meta_hash: null,
+      },
+    ]);
+    // Previous cycle wrote a count of 59000; fresh walk fails (null).
+    // Compare-then-write should preserve the prior value rather than
+    // clobber the row with `undefined` (which would render as "—" in
+    // the UI for 30 minutes until the next sync).
+    mockBatchGetItems.mockResolvedValue([
+      {
+        drepId: 'drep_always_abstain',
+        SK: 'PROFILE',
+        entityType: 'DREP_PROFILE',
+        isActive: true,
+        isRetired: false,
+        isPredefined: true,
+        status: 'predefined',
+        deposit: null,
+        hex: null,
+        hasScript: false,
+        votingPower: ABSTAIN_POWER,
+        votingPowerPartition: 'ALL',
+        votingPowerSort: ABSTAIN_POWER.padStart(24, '0'),
+        expiresEpoch: null,
+        anchorUrl: null,
+        anchorHash: null,
+        anchorVerified: null,
+        voteCount: 0,
+        delegatorCount: 59000,
+        givenName: 'Always Abstain',
+        givenNameLower: 'always abstain',
+        lastSyncedAt: '2026-05-27T00:00:00.000Z',
+        enrichmentVersion: 4,
+      } as DRepDirectoryItem,
+    ]);
+    mockFetchPredefinedDRepDelegatorCount.mockResolvedValue(null);
+
+    await runDirectorySync();
+
+    const puts = mockPutItem.mock.calls.map(([, item]) => item) as DRepDirectoryItem[];
+    const abstainPut = puts.find((r) => r.drepId === 'drep_always_abstain');
+    // The compare-then-write idempotency path should detect that nothing
+    // changed (count preserved from existing row) and SKIP the Put. The
+    // assertion is: if it WAS written, the count must be preserved.
+    if (abstainPut) {
+      expect(abstainPut.delegatorCount).toBe(59000);
+    }
+  });
+
+  it('omits delegatorCount when the walk fails AND there is no prior cycle value', async () => {
+    mockFetchDRepInfoBatch.mockResolvedValue([
+      {
+        drep_id: 'drep_always_abstain',
+        hex: null,
+        has_script: false,
+        drep_status: 'registered',
+        deposit: null,
+        active: true,
+        expires_epoch_no: null,
+        amount: ABSTAIN_POWER,
+        meta_url: null,
+        meta_hash: null,
+      },
+    ]);
+    // No existing row, fresh walk fails. The synthesized row should
+    // simply omit `delegatorCount` rather than write `null` or `0`
+    // (either of which would lie about the population).
+    mockFetchPredefinedDRepDelegatorCount.mockResolvedValue(null);
+
+    await runDirectorySync();
+
+    const puts = mockPutItem.mock.calls.map(([, item]) => item) as DRepDirectoryItem[];
+    const abstainPut = puts.find((r) => r.drepId === 'drep_always_abstain');
+    expect(abstainPut!.delegatorCount).toBeUndefined();
+  });
+
+  it('calls the predefined walk exactly once per predefined DRep per sync cycle', async () => {
+    mockFetchDRepInfoBatch.mockResolvedValue([]);
+    mockFetchPredefinedDRepDelegatorCount.mockResolvedValue({ count: 100, isApprox: false });
+
+    await runDirectorySync();
+
+    // Two predefined DReps → two walks. Each is one walk per cycle —
+    // the cost story relies on this (~200 round-trips MAX per cycle in
+    // the worst case where both DReps hit their 100-page cap).
+    expect(mockFetchPredefinedDRepDelegatorCount).toHaveBeenCalledTimes(2);
+    expect(mockFetchPredefinedDRepDelegatorCount).toHaveBeenCalledWith('drep_always_abstain');
+    expect(mockFetchPredefinedDRepDelegatorCount).toHaveBeenCalledWith('drep_always_no_confidence');
   });
 });
 

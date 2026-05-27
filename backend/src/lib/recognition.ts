@@ -273,6 +273,44 @@ export function _resetStakeCache(): void {
 }
 
 /**
+ * Evict the in-Lambda LRU entries for `stakeAddress` from BOTH
+ * `lookupCurrentDrep` and `lookupStake`. Called from `/auth/verify`
+ * (on successful sign-in) and `/auth/session DELETE` (on logout) so a
+ * user who re-delegated immediately before authenticating doesn't see
+ * the OLD DRep's clubhouse routing for up to 60s (the cache TTL).
+ *
+ * # Per-container scope (NOT global)
+ *
+ * The caches are PER-LAMBDA-CONTAINER. This invalidation runs in
+ * whatever container served the auth request and clears its local LRU.
+ * Other containers serving the same stake address through their own
+ * concurrent handlers will keep the stale entry until their own 60s
+ * TTL expires — exactly the same staleness window as before this
+ * helper existed.
+ *
+ * # Why we accept the per-container limitation
+ *
+ * The fix here is "first hit after login routes to the right DRep,"
+ * not "all hits cluster-wide route correctly within 1 second." A
+ * cluster-wide invalidation would require a Redis-like distributed
+ * cache, which is overkill for a 60s consistency window — the
+ * pre-existing TTL already bounds the worst case at 60s, and this
+ * helper improves the typical case (single container, single user)
+ * to ~0s. The other containers' staleness was ALREADY part of the
+ * design contract.
+ *
+ * # Idempotency
+ *
+ * Safe to call when the cache is empty (Map.delete on a missing key
+ * is a no-op). Safe to call repeatedly. Returns nothing — the caller
+ * doesn't need to know whether an entry was evicted.
+ */
+export function _invalidateForStake(stakeAddress: string): void {
+  _currentDrepCache.delete(stakeAddress);
+  _stakeCache.delete(stakeAddress);
+}
+
+/**
  * Resolve the current lovelace stake controlled by this stake address.
  * Koios `/account_info_cached` `total_balance` is primary; Blockfrost
  * `/accounts/{stake_addr}` `controlled_amount` is the fallback.
