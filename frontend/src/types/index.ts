@@ -445,12 +445,22 @@ export interface Comment {
  *  `GET /comments/{actionId}/my-votes`. */
 export type MyCommentVotes = Record<string, 'up' | 'down'>;
 
-export type ClubhousePostType = 'discussion' | 'question' | 'poll';
+export type ClubhousePostType = 'discussion' | 'question' | 'poll' | 'auto_ga';
 
 export interface ClubhousePollOption {
   id: string;
   label: string;
   votes: number;
+}
+
+/** Provenance metadata for an `auto_ga` clubhouse post. Mirrors the
+ *  backend's `AutoPostSource` shape. `abstractFrozenAt` is the moment
+ *  this row's body was captured — the UI renders a small
+ *  "frozen at sync time" annotation referencing this timestamp. */
+export interface AutoPostSource {
+  kind: 'governance_action';
+  actionId: string;
+  abstractFrozenAt: string;
 }
 
 export interface ClubhousePost {
@@ -476,6 +486,20 @@ export interface ClubhousePost {
    *  best-effort by the backend. Mirrors the comment header pattern. */
   stakeAda?: string;
   drep?: string;
+  // ---- Batch B additions (2026-05-26): auto_ga rows. ----
+  /** Pinned-at-top flag. Auto-posts default to `true` on creation
+   *  and flip to `false` when the linked GA transitions to a
+   *  completed state. Frontend bubbles pinned posts above chronological
+   *  posts in the listing. Absent on non-auto rows. */
+  pinned?: boolean;
+  /** Present only when `type === 'auto_ga'`. Carries the linked
+   *  governance action's id + the `abstractFrozenAt` timestamp the UI
+   *  renders as "frozen at sync time." */
+  autoSource?: AutoPostSource;
+  /** Convenience denormalization of `autoSource.actionId` lifted to the
+   *  top-level field name used by the GSI partition key on the backend.
+   *  Frontend can use either field; both reference the same value. */
+  linkedActionId?: string;
 }
 
 export interface ClubhouseComment {
@@ -484,6 +508,11 @@ export interface ClubhouseComment {
   authorDisplayName?: string;
   body: string;
   createdAt: string;
+  /** Optional — when present, this comment is a reply to the named
+   *  comment. The Clubhouse surface allows 2 levels of nesting
+   *  (top-level → reply → sub-reply), one deeper than the Public
+   *  Comments surface. */
+  parentCommentId?: string;
 }
 
 export interface AuthState {

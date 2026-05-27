@@ -41,7 +41,14 @@ import {
   DREP_ALWAYS_NO_CONFIDENCE,
   type TallyLookups,
 } from '../lib/voteTally';
-import { getItem, putItem, putItemIfAbsent, tableNames } from '../lib/dynamodb';
+import { getItem, putItem, putItemIfAbsent, queryItems, tableNames } from '../lib/dynamodb';
+import {
+  activeDRepIds,
+  fanoutAutoPosts,
+  selectCompletionSweepCandidates,
+  unpinAutoPostsForAction,
+} from './clubhouseAutoPosts';
+import type { DRepDirectoryItem } from '../lib/types';
 import {
   findByAnchorUrl as findPillarByAnchorUrl,
   findByOnChainTxHash as findPillarByTxHash,
@@ -64,6 +71,19 @@ export interface IntakeResult {
   synced: number;
   skipped: number;
   errors: number;
+  /** Auto-post fan-out stats — number of newly-detected GAs that
+   *  triggered a fan-out, total post writes across all of them, and
+   *  the sweep counts for any GAs that completed this cycle.
+   *  Optional on the result shape so existing callers don't need a
+   *  matching update. */
+  autoPosts?: {
+    fannedOutForActions: number;
+    postsWritten: number;
+    postsSkipped: number;
+    postsErrored: number;
+    completionSweepActions: number;
+    completionSweepUnpinned: number;
+  };
 }
 
 /**
@@ -252,6 +272,21 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
   const result: IntakeResult = { synced: 0, skipped: 0, errors: 0 };
   _tallyMismatchLoggedThisCycle = false;
 
+  // ---- Auto-post bookkeeping ----
+  //
+  // For Batch B (GA auto-post feature, 2026-05-26) we need to:
+  //   - detect newly-INSERTED GA rows (no existing row before this cycle)
+  //     and fan out one `auto_ga` clubhouse post per currently-active DRep
+  //   - detect GA rows that TRANSITIONED into a completed status (`expired`
+  //     / `enacted` / `dropped`) this cycle and unpin all their linked
+  //     auto-posts
+  //
+  // We collect (previous, next) pairs during the per-action loop and
+  // process them once after the loop completes — keeping the per-action
+  // path side-effect-free with respect to the clubhouse_posts table.
+  const newGAItems: GovernanceActionItem[] = [];
+  const transitionPairs: { actionId: string; previous: GovernanceActionItem | undefined; next: GovernanceActionItem }[] = [];
+
   // Circuit breaker: if Blockfrost rate-limited us recently, skip the run
   // entirely. Hammering Blockfrost during a quota outage adds rejected calls
   // to the rolling window, preventing recovery. Marker auto-expires via
@@ -435,12 +470,35 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
   }
   return finishIntake();
 
-  function finishIntake(): IntakeResult {
+  async function finishIntakeAsync(): Promise<IntakeResult> {
+    // Process auto-post fan-out + completion sweep before logging the
+    // summary. Failures here are non-fatal and are surfaced on the
+    // `result.autoPosts` block.
+    try {
+      await processAutoPostFanout(result, newGAItems, transitionPairs);
+    } catch (err) {
+      console.warn('Governance intake: auto-post fan-out threw (non-fatal):', err);
+    }
     console.log(
       `Governance intake complete: written=${result.synced}, enrichmentSkipped=${result.skipped}, errors=${result.errors}; ` +
-        `lookups: drep=${lookupBundle.lookups.drepPower?.size ?? 0}/${lookupBundle.totals.totalDrepCount} pools=${lookupBundle.lookups.poolStake?.size ?? 0}/${lookupBundle.totals.totalPoolCount} cc=${lookupBundle.totals.totalCcCount}`,
+        `lookups: drep=${lookupBundle.lookups.drepPower?.size ?? 0}/${lookupBundle.totals.totalDrepCount} pools=${lookupBundle.lookups.poolStake?.size ?? 0}/${lookupBundle.totals.totalPoolCount} cc=${lookupBundle.totals.totalCcCount}` +
+        (result.autoPosts
+          ? `; autoPosts: fannedOutForActions=${result.autoPosts.fannedOutForActions} ` +
+            `postsWritten=${result.autoPosts.postsWritten} ` +
+            `postsSkipped=${result.autoPosts.postsSkipped} ` +
+            `postsErrored=${result.autoPosts.postsErrored} ` +
+            `completionSweepActions=${result.autoPosts.completionSweepActions} ` +
+            `completionSweepUnpinned=${result.autoPosts.completionSweepUnpinned}`
+          : ''),
     );
     return result;
+  }
+
+  // Keep the legacy sync-shaped `finishIntake` for the two return
+  // points above (page loop, fast path). They both early-return out of
+  // the closure, so we forward through an `await` here.
+  function finishIntake(): Promise<IntakeResult> {
+    return finishIntakeAsync();
   }
 
   async function processActions(rawActions: BlockfrostProposal[]): Promise<void> {
@@ -535,9 +593,24 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
           // path resets the timestamp the next time it runs anyway.
           if (governanceItemsEqualIgnoringSync(existing as GovernanceActionItem, updated)) {
             result.skipped++;
+            // Record the transition pair even on no-op cycles — if the
+            // GA was already completed last cycle the sweep filter will
+            // ignore it, but if it JUST completed (rare on the hot path
+            // since the status field changing forces a Put) we still
+            // want the unpin sweep to run.
+            transitionPairs.push({
+              actionId,
+              previous: existing as GovernanceActionItem,
+              next: updated,
+            });
             return;
           }
           await putItem(tableNames.governanceActions, updated);
+          transitionPairs.push({
+            actionId,
+            previous: existing as GovernanceActionItem,
+            next: updated,
+          });
           // Bug fix: the hot path used to increment `skipped` even when
           // it issued a Put, which made the cycle log line read
           // `written=0` indefinitely even though DynamoDB was logging
@@ -903,12 +976,164 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
 
         await putItem(tableNames.governanceActions, item);
         result.synced++;
+        // Track this write for the post-loop auto-post fan-out.
+        // - "new GA" = no existing row before this cycle. These trigger
+        //   the per-active-DRep fan-out (one auto_ga row per drepId).
+        // - All cold-path writes are also transition candidates: the
+        //   cold path re-runs on a row that JUST transitioned into a
+        //   completed state (status changed since last successful
+        //   sync). The completion-sweep filter only fires the unpin
+        //   sweep when the transition is INTO a completed state, so
+        //   recording the pair unconditionally is safe.
+        if (!existing) {
+          newGAItems.push(item);
+        }
+        transitionPairs.push({
+          actionId,
+          previous: existing,
+          next: item,
+        });
       } catch (err) {
         console.error(`Failed to sync governance action ${actionId}:`, err);
         result.errors++;
       }
     });
   }
+}
+
+/**
+ * Read the currently-active DRep IDs from the directory. Used by the
+ * auto-post fan-out path — we only fan out into clubhouses for DReps
+ * that are currently active.
+ *
+ * Uses the sparse `entityType-votingPower-index` GSI added in PR #2,
+ * which returns every PROFILE row in 2-3 Query round-trips. Falls back
+ * to an empty list on Query failure — the next cycle will retry. We
+ * deliberately do NOT fall through to a Scan: the table contains ~100k
+ * POWER history rows and a Scan-with-filter would be expensive.
+ *
+ * Excludes retired DReps. Includes the two predefined DReps
+ * (`drep_always_abstain`, `drep_always_no_confidence`) since those
+ * have `isActive=true` and are real participants in the governance
+ * landscape — their delegators should see auto-posts too.
+ */
+async function loadActiveDRepIds(): Promise<string[]> {
+  const out: string[] = [];
+  let lastKey: Record<string, unknown> | undefined;
+  try {
+    do {
+      const queryRes = await queryItems<DRepDirectoryItem>(
+        tableNames.drepDirectory,
+        {
+          indexName: 'entityType-votingPower-index',
+          keyConditionExpression: '#et = :v',
+          expressionAttributeNames: { '#et': 'entityType' },
+          expressionAttributeValues: { ':v': 'DREP_PROFILE' },
+          ...(lastKey ? { exclusiveStartKey: lastKey } : {}),
+        },
+      );
+      for (const r of queryRes.items) {
+        // Skip inactive / retired. Predefined DReps have `isActive=true`
+        // already so they're included naturally.
+        if (r.isActive === true) out.push(r.drepId);
+      }
+      lastKey = queryRes.lastEvaluatedKey;
+    } while (lastKey);
+  } catch (err) {
+    console.warn('loadActiveDRepIds: query failed; skipping auto-post fan-out this cycle:', err);
+    return [];
+  }
+  return out;
+}
+
+/**
+ * After the per-action sync loop completes, fan out auto-posts for any
+ * newly-inserted GA rows and run the completion sweep for any GAs
+ * that transitioned into a completed status this cycle.
+ *
+ * Errors are logged and reported on the result; they do NOT throw —
+ * a failure to write an auto-post must not poison the governance-
+ * action sync.
+ */
+async function processAutoPostFanout(
+  result: IntakeResult,
+  newGAItems: readonly GovernanceActionItem[],
+  transitionPairs: readonly { actionId: string; previous: GovernanceActionItem | undefined; next: GovernanceActionItem }[],
+): Promise<void> {
+  if (newGAItems.length === 0 && transitionPairs.length === 0) return;
+
+  const stats = {
+    fannedOutForActions: 0,
+    postsWritten: 0,
+    postsSkipped: 0,
+    postsErrored: 0,
+    completionSweepActions: 0,
+    completionSweepUnpinned: 0,
+  };
+
+  // Fan-out for newly-detected GAs. Only load the DRep list when there
+  // ARE new GAs — on quiet cycles (the common case) we skip the GSI
+  // query entirely.
+  if (newGAItems.length > 0) {
+    const drepIds = await loadActiveDRepIds();
+    if (drepIds.length === 0) {
+      console.warn(
+        `auto-post fan-out: 0 active DReps loaded; skipping fan-out for ${newGAItems.length} new GA(s)`,
+      );
+    } else {
+      console.log(
+        `auto-post fan-out: ${newGAItems.length} new GA(s) × ${drepIds.length} active DReps`,
+      );
+      for (const ga of newGAItems) {
+        try {
+          // The `now` we pass here is what gets stamped on every row's
+          // `abstractFrozenAt` AND `createdAt`. Using a single timestamp
+          // per fan-out call makes the "all rows for this GA were created
+          // at the same moment" invariant explicit.
+          const now = new Date().toISOString();
+          const fanRes = await fanoutAutoPosts({ action: ga, drepIds, now });
+          stats.fannedOutForActions++;
+          stats.postsWritten += fanRes.written;
+          stats.postsSkipped += fanRes.skipped;
+          stats.postsErrored += fanRes.errored;
+        } catch (err) {
+          console.warn(`auto-post fan-out failed for action ${ga.actionId}:`, err);
+          // Don't increment result.errors — the GA sync succeeded; only
+          // the auto-post side-effect failed. Surface it on the auto-
+          // post stats so it's visible in CloudWatch.
+          stats.postsErrored++;
+        }
+      }
+    }
+  }
+
+  // Completion sweep — find GAs that transitioned INTO a completed
+  // status this cycle and unpin their auto-posts.
+  const sweepCandidates = selectCompletionSweepCandidates(transitionPairs);
+  if (sweepCandidates.length > 0) {
+    console.log(
+      `auto-post completion sweep: ${sweepCandidates.length} GA(s) transitioned to completed state`,
+    );
+    for (const c of sweepCandidates) {
+      try {
+        const sweepRes = await unpinAutoPostsForAction(c.actionId);
+        stats.completionSweepActions++;
+        stats.completionSweepUnpinned += sweepRes.unpinned;
+        if (sweepRes.errored > 0) {
+          stats.postsErrored += sweepRes.errored;
+        }
+        console.log(
+          `auto-post sweep ${c.actionId}: prevStatus=${c.previousStatus ?? '(none)'} ` +
+            `→ ${c.nextStatus}, unpinned=${sweepRes.unpinned}, errored=${sweepRes.errored}`,
+        );
+      } catch (err) {
+        console.warn(`auto-post sweep failed for action ${c.actionId}:`, err);
+        stats.postsErrored++;
+      }
+    }
+  }
+
+  result.autoPosts = stats;
 }
 
 // ---- Voter lookup bundle ----

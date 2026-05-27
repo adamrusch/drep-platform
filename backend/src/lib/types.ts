@@ -386,6 +386,10 @@ export interface ClubhousePost {
   comments: ClubhouseComment[];
   createdAt: string;
   updatedAt: string;
+  type?: ClubhousePostType;
+  pinned?: boolean;
+  autoSource?: AutoPostSource;
+  linkedActionId?: string;
 }
 
 export interface ClubhouseComment {
@@ -394,6 +398,8 @@ export interface ClubhouseComment {
   authorDisplayName?: string;
   body: string;
   createdAt: string;
+  /** See `ClubhouseCommentItem.parentCommentId`. */
+  parentCommentId?: string;
 }
 
 export interface JWTPayload {
@@ -804,8 +810,26 @@ export interface CommentVoteItem {
 }
 
 /** A clubhouse post may be a free-form discussion, an explicit question,
- *  or a poll. Polls carry the option list + the multi-choice flag. */
-export type ClubhousePostType = 'discussion' | 'question' | 'poll';
+ *  a poll, or an auto-generated governance-action feed post. `auto_ga` is
+ *  written by the `governance-intake` sync — one per active DRep per
+ *  active GA — so every clubhouse surfaces every live action with a
+ *  predictable layout (pinned at top, "drep.tools governance feed" author
+ *  label, link to the GA, body frozen at first-sync time). */
+export type ClubhousePostType = 'discussion' | 'question' | 'poll' | 'auto_ga';
+
+/** Provenance + frozen-at metadata for an `auto_ga` clubhouse post. The
+ *  `abstractFrozenAt` timestamp marks when this specific row captured its
+ *  body — by design that's "first sync into THIS clubhouse" (not "first
+ *  time the GA was ever seen by the platform"). A DRep that becomes
+ *  active a week after a GA goes live gets a post whose abstract reflects
+ *  what was current at THEIR activation; subsequent GA-metadata changes
+ *  do not update the post. See `governance-intake.ts` /
+ *  `drep-directory.ts` for the write paths. */
+export interface AutoPostSource {
+  kind: 'governance_action';
+  actionId: string;
+  abstractFrozenAt: string;
+}
 
 export interface ClubhousePollOption {
   /** Stable identifier for the option ("a", "b", …). Used as the
@@ -841,15 +865,47 @@ export interface ClubhousePostItem {
    *  comment header pill stack. Populated best-effort at create time. */
   stakeAda?: string;
   drep?: string;
+  /** ---- auto_ga additions (Batch B, 2026-05-26) ---- */
+  /** Pinned-at-top flag. Auto-posts default to `true` on creation and
+   *  flip to `false` when the linked GA transitions to `executed` /
+   *  `expired` (the daily completion sweep does the flip). Frontend
+   *  reads this to bubble pinned posts above chronological ones. Absent
+   *  on non-auto rows; treat absence as `false`. */
+  pinned?: boolean;
+  /** Provenance for auto-generated posts. Present only when
+   *  `type === 'auto_ga'`. `abstractFrozenAt` is the ISO timestamp that
+   *  this row's body was captured at — used by the UI to render the
+   *  "frozen at sync time" annotation. Subsequent GA-anchor metadata
+   *  changes do NOT update the body. */
+  autoSource?: AutoPostSource;
+  /** Convenience denormalization of `autoSource.actionId` lifted to the
+   *  top level so DynamoDB GSIs can partition on it. Used as the GSI
+   *  partition key on `linkedActionId-index` (see database-stack.ts).
+   *  Present only when `type === 'auto_ga'`. */
+  linkedActionId?: string;
   [key: string]: unknown;
 }
 
+/** A clubhouse comment can be top-level OR a reply to a top-level
+ *  comment OR a reply to a reply (Clubhouse rules: 2 levels deep — one
+ *  deeper than the Public Comments surface, which is 1-level). The
+ *  `parentCommentId` field marks the immediate parent in the thread.
+ *  Top-level comments have no `parentCommentId`. The depth guard in
+ *  `clubhouse/createComment.ts` enforces the 2-level rule by
+ *  rejecting any reply whose parent is itself a reply AND whose
+ *  parent's parent is also a reply (i.e. depth would become 3). */
 export interface ClubhouseCommentItem {
   commentId: string;
   authorWallet: string;
   authorDisplayName?: string;
   body: string;
   createdAt: string;
+  /** Optional — when present, this comment is a reply to the named
+   *  comment. The Clubhouse surface allows 2 levels of nesting
+   *  (top-level → reply → sub-reply), so a reply may itself have a
+   *  parent that is also a reply. 3-deep is rejected at the API
+   *  layer. */
+  parentCommentId?: string;
 }
 
 export interface AuditLogItem {
