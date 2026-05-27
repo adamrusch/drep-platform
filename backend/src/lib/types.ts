@@ -399,7 +399,17 @@ export interface ClubhouseComment {
 export interface JWTPayload {
   sub: string;
   roles: UserRole[];
-  drepId?: string;
+  /** The wallet's REGISTERED-DRep id — set when this wallet ran the
+   *  `/drep/register` flow and became a DRep themselves. NOT the DRep
+   *  this wallet delegates to (that's a separate concept; see
+   *  `lookupCurrentDrep` and `/auth/me`'s `delegatedToDrepId`). Used
+   *  by handler code for role gating ("is the caller the lead DRep of
+   *  their own committee").
+   *
+   *  Renamed from `drepId` on 2026-05-27. Old tokens still in
+   *  circulation carry the legacy `drepId` field; `verifyJWT` accepts
+   *  both during the 7-day rotation window. */
+  registeredDrepId?: string;
   sessionType: SessionType;
   iat: number;
   exp: number;
@@ -601,13 +611,18 @@ export interface DRepDetail extends DRepDirectoryEntry {
   recentVotes?: DRepRecentVote[];
   /** Total count of stake addresses delegating to this DRep. Populated
    *  from `/drep_delegators` pagination walk at request time; undefined
-   *  if Koios was unreachable. May be capped at 5000 (see truncated flag). */
+   *  if Koios was unreachable. May be capped at `MAX_DELEGATORS_WALK`
+   *  (default 1000, env-overridable) — see `delegatorCountIsApprox`. */
   delegatorCountLive?: number;
-  /** True when the live count walk hit `DREP_DELEGATORS_MAX_PAGES`
-   *  (5000 rows today). UI should render "{delegatorCountLive}+" rather
-   *  than the exact number when this is true. Absent / false means the
-   *  count is exhaustive. */
-  delegatorCountTruncated?: boolean;
+  /** True when the live count walk hit the `MAX_DELEGATORS_WALK` cap
+   *  (default 1000, env-overridable) or returned a partial result from
+   *  a mid-walk failure. The exact total is `>= delegatorCountLive`.
+   *  UI should render "{delegatorCountLive}+" when this is true. Absent
+   *  / false means the count is exact.
+   *
+   *  Renamed from `delegatorCountTruncated` on 2026-05-27 — "approx"
+   *  better describes the contract ("≥ count") than "truncated" did. */
+  delegatorCountIsApprox?: boolean;
   /** Per-epoch voting-power history, oldest-first. Populated by the
    *  daily `drep-voting-power-history` sync; undefined on rows that
    *  have not yet been captured (typically the first 24h after a new
