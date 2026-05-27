@@ -75,11 +75,13 @@ export const PREDEFINED_DREP_DISPLAY_NAMES: Record<string, string> = {
   drep_always_abstain: 'Always Abstain',
   drep_always_no_confidence: 'Always No-Confidence',
 };
-import { putItem, batchGetItems, tableNames } from '../lib/dynamodb';
+import { putItem, batchGetItems, queryItems, tableNames } from '../lib/dynamodb';
+import { fanoutAutoPosts } from './clubhouseAutoPosts';
 import type {
   DRepDirectoryItem,
   DRepReference,
   DRepReferenceKind,
+  GovernanceActionItem,
 } from '../lib/types';
 
 export interface DirectorySyncResult {
@@ -94,6 +96,18 @@ export interface DirectorySyncResult {
   withImage: number;
   withLastVoted: number;
   errors: number;
+  /** Set when one or more DReps transitioned from inactive (or absent)
+   *  to active this cycle and the directory sync triggered the auto-
+   *  post backfill into their newly-opened clubhouses. Counts the
+   *  newly-active DReps and the per-DRep post writes (aggregated
+   *  across all currently-active GAs). Optional so existing callers
+   *  don't need a matching update. */
+  autoPostBackfill?: {
+    newlyActiveDReps: number;
+    postsWritten: number;
+    postsSkipped: number;
+    postsErrored: number;
+  };
 }
 
 /** 1 hour. The sync is idempotent and writes are cheap; we just don't
@@ -605,6 +619,10 @@ export async function runDirectorySync(): Promise<DirectorySyncResult> {
   // Step 6: build candidate rows, compare against existing (ignoring
   // `lastSyncedAt`), Put only when something genuinely differs.
   const now = new Date().toISOString();
+  // Track DReps that transitioned from inactive (or absent) to active
+  // this cycle — they get an auto-post backfill into their newly-opened
+  // clubhouses after the main loop completes. See `processAutoPostBackfill`.
+  const newlyActiveDRepIds: string[] = [];
   for (const id of drepIds) {
     try {
       const listingEntry = listingByDRep.get(id);
@@ -627,6 +645,16 @@ export async function runDirectorySync(): Promise<DirectorySyncResult> {
       if (candidate.givenName) result.withGivenName++;
       if (candidate.image) result.withImage++;
       if (candidate.lastVotedAt) result.withLastVoted++;
+
+      // Newly-active detection: this DRep is now active AND either
+      // didn't exist last cycle OR existed but was not active. We
+      // record the ID BEFORE the equality check below so we don't miss
+      // a transition that happens to have an otherwise-equal row
+      // (impossible in practice, but the order is robust to that).
+      const wasActive = existing?.isActive === true;
+      if (candidate.isActive && !wasActive) {
+        newlyActiveDRepIds.push(id);
+      }
 
       if (existing && itemsEqualIgnoringSync(existing, candidate)) {
         // Nothing changed. Skip the Put — do NOT write just to bump
@@ -669,15 +697,143 @@ export async function runDirectorySync(): Promise<DirectorySyncResult> {
     }
   }
 
+  // Step 8: newly-active DRep auto-post backfill. For each DRep that
+  // transitioned to active this cycle, fan out auto_ga posts for every
+  // currently-active GA into that DRep's clubhouse.
+  //
+  // Failures here are non-fatal — they're logged on the result block
+  // but do not increment `result.errors` (the directory sync itself
+  // succeeded; the side-effect of opening the clubhouse failed). The
+  // next cycle's newly-active detection will not re-fire (the DRep is
+  // active in both cycles by then), so the per-DRep auto-post backfill
+  // script is the recovery path for a partial failure here.
+  try {
+    await processAutoPostBackfill(result, newlyActiveDRepIds);
+  } catch (err) {
+    console.warn('Directory sync: auto-post backfill threw (non-fatal):', err);
+  }
+
   console.log(
     `Directory sync complete: total=${result.total} active=${result.active} ` +
       `inactive=${result.inactive} retired=${result.retired} written=${result.written} ` +
       `skippedFresh=${result.skippedFresh} ` +
       `withMetadata=${result.withMetadata} withGivenName=${result.withGivenName} ` +
       `withImage=${result.withImage} withLastVoted=${result.withLastVoted} ` +
-      `errors=${result.errors}`,
+      `errors=${result.errors}` +
+      (result.autoPostBackfill
+        ? ` autoPostBackfill: newlyActiveDReps=${result.autoPostBackfill.newlyActiveDReps} ` +
+          `postsWritten=${result.autoPostBackfill.postsWritten} ` +
+          `postsSkipped=${result.autoPostBackfill.postsSkipped} ` +
+          `postsErrored=${result.autoPostBackfill.postsErrored}`
+        : ''),
   );
   return result;
+}
+
+/**
+ * For each newly-active DRep, fan out one auto_ga post per currently-
+ * active GA into that DRep's clubhouse. Idempotent via the conditional
+ * Put on the auto-post id — a DRep that was already given an auto-post
+ * for a GA (e.g. by an earlier cycle that did the initial backfill)
+ * will skip rather than duplicate.
+ *
+ * The "frozen at sync time" semantic for these rows: each one is stamped
+ * with `abstractFrozenAt = now`, which is the moment THIS DRep's row
+ * was created in THIS clubhouse. A DRep activating a week after a GA
+ * went live will see the abstract as it was at THEIR activation moment,
+ * not the original-on-chain-submission abstract. See the
+ * `clubhouseAutoPosts.ts` module header for the rationale.
+ */
+async function processAutoPostBackfill(
+  result: DirectorySyncResult,
+  newlyActiveDRepIds: readonly string[],
+): Promise<void> {
+  if (newlyActiveDRepIds.length === 0) return;
+
+  console.log(
+    `Directory sync: ${newlyActiveDRepIds.length} newly-active DRep(s); ` +
+      `loading currently-active GAs for auto-post backfill`,
+  );
+
+  // Load all currently-active GA rows. Today the table holds ~109 rows
+  // on mainnet and a Query against the `status-submittedAt-index` GSI
+  // returns all `active` rows in 1-2 round-trips. Each fan-out call
+  // writes ~newlyActiveDRepIds rows (one per DRep), so total writes
+  // per cycle = ~50 active GAs × ~newlyActive (typically 1-3) DReps.
+  let activeGAs: GovernanceActionItem[] = [];
+  let lastKey: Record<string, unknown> | undefined;
+  try {
+    do {
+      const queryRes = await queryItems<GovernanceActionItem>(
+        tableNames.governanceActions,
+        {
+          indexName: 'status-submittedAt-index',
+          keyConditionExpression: '#s = :v',
+          expressionAttributeNames: { '#s': 'status' },
+          expressionAttributeValues: { ':v': 'active' },
+          ...(lastKey ? { exclusiveStartKey: lastKey } : {}),
+        },
+      );
+      activeGAs = activeGAs.concat(queryRes.items);
+      lastKey = queryRes.lastEvaluatedKey;
+    } while (lastKey);
+  } catch (err) {
+    console.warn(
+      'Directory sync: failed to load currently-active GAs for auto-post backfill:',
+      err,
+    );
+    result.autoPostBackfill = {
+      newlyActiveDReps: newlyActiveDRepIds.length,
+      postsWritten: 0,
+      postsSkipped: 0,
+      postsErrored: newlyActiveDRepIds.length, // best signal we can give
+    };
+    return;
+  }
+
+  if (activeGAs.length === 0) {
+    console.log('Directory sync: no currently-active GAs; auto-post backfill is a no-op');
+    result.autoPostBackfill = {
+      newlyActiveDReps: newlyActiveDRepIds.length,
+      postsWritten: 0,
+      postsSkipped: 0,
+      postsErrored: 0,
+    };
+    return;
+  }
+
+  const stats = {
+    newlyActiveDReps: newlyActiveDRepIds.length,
+    postsWritten: 0,
+    postsSkipped: 0,
+    postsErrored: 0,
+  };
+
+  // Per-GA fan-out into just the newly-active DRep clubhouses. Each call
+  // uses the same `now` so all rows for a given GA's backfill share a
+  // timestamp — which makes log lines coherent and lets the reader
+  // identify "this batch came from this directory sync cycle."
+  for (const ga of activeGAs) {
+    try {
+      const nowIso = new Date().toISOString();
+      const fanRes = await fanoutAutoPosts({
+        action: ga,
+        drepIds: newlyActiveDRepIds,
+        now: nowIso,
+      });
+      stats.postsWritten += fanRes.written;
+      stats.postsSkipped += fanRes.skipped;
+      stats.postsErrored += fanRes.errored;
+    } catch (err) {
+      console.warn(
+        `Directory sync: auto-post backfill failed for action ${ga.actionId}:`,
+        err,
+      );
+      stats.postsErrored++;
+    }
+  }
+
+  result.autoPostBackfill = stats;
 }
 
 /**

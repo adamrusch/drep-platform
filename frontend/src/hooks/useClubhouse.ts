@@ -47,16 +47,21 @@ interface CreateCommentParams {
   drepId: string;
   postId: string;
   body: string;
+  /** Optional — when present, this comment is a reply to the named
+   *  comment. The Clubhouse surface allows 2 levels of nesting
+   *  (top-level → reply → sub-reply); 3-deep is rejected at the API
+   *  layer with 400. */
+  parentCommentId?: string;
 }
 
 export function useCreateClubhouseComment() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: ({ drepId, postId, body }: CreateCommentParams) =>
+    mutationFn: ({ drepId, postId, body, parentCommentId }: CreateCommentParams) =>
       post<ClubhouseComment>(
         `/clubhouse/${encodeURIComponent(drepId)}/post/${encodeURIComponent(postId)}/comment`,
-        { body },
+        { body, ...(parentCommentId ? { parentCommentId } : {}) },
       ),
     onSuccess: (_data, variables) => {
       void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.posts(variables.drepId) });
