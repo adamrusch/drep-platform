@@ -301,6 +301,36 @@ export class DatabaseStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
+    // GSI: query every auto-generated `type='auto_ga'` post for a given
+    // governance action. Used by the completion sweep in
+    // `governance-intake.ts` — when a GA transitions to `executed` or
+    // `expired`, the sweep needs to find every clubhouse's auto-post for
+    // that action and flip `pinned=false` on it.
+    //
+    // **Why a GSI vs a Scan with FilterExpression:** the alternative is
+    // a `Scan(clubhouse_posts, FilterExpression='linkedActionId=:x')`
+    // that pays for reading every post in the table to filter out the
+    // ones we want. At ~368 active DReps × ~50 active GAs = ~18k auto-
+    // posts steady-state PLUS organic posts (discussion/question/poll),
+    // every sweep would scan tens of thousands of rows just to find the
+    // ~368 we care about. The sparse GSI is partitioned on
+    // `linkedActionId` which is set ONLY on auto-posts (organic posts
+    // omit the attribute), so DynamoDB excludes the ~10x organic
+    // volume from the index automatically and the Query touches only
+    // the ~368 rows we need to update. Cost: ~$0.25/GB-month × ~5MB
+    // index storage = pennies.
+    //
+    // **Sort key:** `drepId` so the unpinning sweep can issue one
+    // Update per row by (drepId, postId) without a follow-up read. The
+    // GSI projection is ALL because the sweep also needs `postId` (the
+    // primary table sort key) to construct the Update target.
+    this.clubhousePostsTable.addGlobalSecondaryIndex({
+      indexName: 'linkedActionId-index',
+      partitionKey: { name: 'linkedActionId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'drepId', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
     // ---- audit_log ----
     this.auditLogTable = new dynamodb.Table(this, 'AuditLogTable', {
       tableName: `${this.tablePrefix}audit_log`,

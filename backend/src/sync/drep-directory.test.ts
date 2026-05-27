@@ -41,6 +41,13 @@ vi.mock('../lib/koios', () => ({
 vi.mock('../lib/dynamodb', () => ({
   putItem: vi.fn(),
   batchGetItems: vi.fn(),
+  queryItems: vi.fn(),
+  putItemIfAbsent: vi.fn(),
+  // The auto-post helpers import `docClient` directly for the
+  // UpdateCommand path (completion sweep). Stub it minimally —
+  // tests that exercise that path mock the helper at a higher
+  // layer (see `clubhouseAutoPosts.test.ts`).
+  docClient: { send: vi.fn() },
   tableNames: {
     users: 'test-users',
     drepCommittees: 'test-drep_committees',
@@ -297,5 +304,246 @@ describe('runDirectorySync — idempotency on predefined rows', () => {
     expect(mockPutItem).not.toHaveBeenCalled();
     expect(secondPassResult.skippedFresh).toBe(2);
     expect(secondPassResult.written).toBe(0);
+  });
+});
+
+// ============================================================
+// Newly-active DRep → auto-post backfill (Batch B, 2026-05-26)
+// ============================================================
+
+import { queryItems, putItemIfAbsent } from '../lib/dynamodb';
+
+const mockQueryItems = vi.mocked(queryItems);
+const mockPutItemIfAbsent = vi.mocked(putItemIfAbsent);
+
+describe('runDirectorySync — newly-active DRep auto-post backfill', () => {
+  beforeEach(() => {
+    // Defaults: no active GAs, no auto-post writes. Tests override.
+    mockQueryItems.mockResolvedValue({ items: [], count: 0 });
+    mockPutItemIfAbsent.mockResolvedValue({ outcome: 'written' });
+  });
+
+  it('triggers the auto-post fan-out when a DRep transitions from inactive to active', async () => {
+    // Setup: one DRep registered, currently inactive in DDB (existing
+    // row has isActive=false). Koios drep_info reports it as ACTIVE
+    // this cycle — transition detected. We expect the auto-post
+    // backfill to query active GAs and fan-out to this DRep.
+    mockListAllDReps.mockResolvedValue([
+      { drep_id: 'drep1transitioning', registered: true, has_script: false, hex: '' },
+    ]);
+    mockFetchDRepInfoBatch.mockImplementation(async (ids) => {
+      if (ids.includes('drep_always_abstain')) return []; // predefined call
+      return [
+        {
+          drep_id: 'drep1transitioning',
+          hex: null,
+          has_script: false,
+          drep_status: 'registered',
+          deposit: '500000000',
+          active: true, // NOW active
+          expires_epoch_no: 600,
+          amount: '1000000000',
+          meta_url: null,
+          meta_hash: null,
+        },
+      ];
+    });
+
+    // Existing row in DDB — same DRep but isActive=false. This is the
+    // pre-transition state.
+    mockBatchGetItems.mockResolvedValue([
+      {
+        drepId: 'drep1transitioning',
+        SK: 'PROFILE',
+        entityType: 'DREP_PROFILE',
+        hex: null,
+        isActive: false, // was inactive last cycle
+        isRetired: false,
+        status: 'registered',
+        deposit: '500000000',
+        hasScript: false,
+        votingPower: '900000000',
+        votingPowerPartition: 'ALL',
+        votingPowerSort: '000000000000000900000000',
+        expiresEpoch: 600,
+        anchorUrl: null,
+        anchorHash: null,
+        anchorVerified: null,
+        voteCount: 0,
+        lastSyncedAt: '2026-05-25T00:00:00.000Z',
+        enrichmentVersion: 4,
+      } as unknown as DRepDirectoryItem,
+    ]);
+
+    // Mock the active-GA query (the auto-post backfill calls this).
+    mockQueryItems.mockResolvedValue({
+      items: [
+        {
+          actionId: 'ga1#0',
+          SK: 'ACTION',
+          actionType: 'InfoAction',
+          status: 'active',
+          title: 'Action 1',
+          summary: 'sum1',
+          abstract: 'abs1',
+        } as never,
+        {
+          actionId: 'ga2#0',
+          SK: 'ACTION',
+          actionType: 'InfoAction',
+          status: 'active',
+          title: 'Action 2',
+          summary: 'sum2',
+          abstract: 'abs2',
+        } as never,
+      ],
+      count: 2,
+    });
+
+    const result = await runDirectorySync();
+
+    // The backfill block must have populated the result.
+    expect(result.autoPostBackfill).toBeDefined();
+    expect(result.autoPostBackfill!.newlyActiveDReps).toBe(1);
+    // 2 active GAs × 1 newly-active DRep = 2 expected fanout calls.
+    expect(result.autoPostBackfill!.postsWritten).toBe(2);
+    expect(result.autoPostBackfill!.postsErrored).toBe(0);
+
+    // putItemIfAbsent should have been called for each (GA × DRep) pair.
+    expect(mockPutItemIfAbsent).toHaveBeenCalledTimes(2);
+    const writtenItems = mockPutItemIfAbsent.mock.calls.map(
+      (c) => c[1] as Record<string, unknown>,
+    );
+    const drepIds = writtenItems.map((it) => it['drepId']);
+    expect(drepIds).toEqual(['drep1transitioning', 'drep1transitioning']);
+    const actionIds = writtenItems.map(
+      (it) => (it['autoSource'] as Record<string, unknown>)['actionId'],
+    );
+    expect(actionIds.sort()).toEqual(['ga1#0', 'ga2#0']);
+
+    // All rows MUST be auto_ga type, pinned, with autoSource present.
+    for (const it of writtenItems) {
+      expect(it['type']).toBe('auto_ga');
+      expect(it['pinned']).toBe(true);
+      expect(it['linkedActionId']).toBeDefined();
+      expect(it['autoSource']).toBeDefined();
+    }
+  });
+
+  it('does NOT trigger the backfill when DReps remain in their previous state', async () => {
+    // Setup: one DRep that was active last cycle and is STILL active
+    // this cycle. No transition → no backfill should fire.
+    mockListAllDReps.mockResolvedValue([
+      { drep_id: 'drep1stable', registered: true, has_script: false, hex: '' },
+    ]);
+    mockFetchDRepInfoBatch.mockImplementation(async (ids) => {
+      if (ids.includes('drep_always_abstain')) return [];
+      return [
+        {
+          drep_id: 'drep1stable',
+          hex: null,
+          has_script: false,
+          drep_status: 'registered',
+          deposit: '500000000',
+          active: true,
+          expires_epoch_no: 600,
+          amount: '1000000000',
+          meta_url: null,
+          meta_hash: null,
+        },
+      ];
+    });
+    mockBatchGetItems.mockResolvedValue([
+      {
+        drepId: 'drep1stable',
+        SK: 'PROFILE',
+        entityType: 'DREP_PROFILE',
+        hex: null,
+        isActive: true, // was ALREADY active last cycle
+        isRetired: false,
+        status: 'registered',
+        deposit: '500000000',
+        hasScript: false,
+        votingPower: '1000000000',
+        votingPowerPartition: 'ALL',
+        votingPowerSort: '000000000000000001000000000',
+        expiresEpoch: 600,
+        anchorUrl: null,
+        anchorHash: null,
+        anchorVerified: null,
+        voteCount: 0,
+        lastSyncedAt: '2026-05-25T00:00:00.000Z',
+        enrichmentVersion: 4,
+      } as unknown as DRepDirectoryItem,
+    ]);
+
+    const result = await runDirectorySync();
+
+    // Backfill should be either undefined (no newly-active DReps to
+    // process) or populated with newlyActiveDReps=0. Either is OK — the
+    // contract is "no fan-out calls happened."
+    expect(mockPutItemIfAbsent).not.toHaveBeenCalled();
+    if (result.autoPostBackfill) {
+      expect(result.autoPostBackfill.newlyActiveDReps).toBe(0);
+    }
+  });
+
+  it('handles a newly-active DRep with zero currently-active GAs gracefully', async () => {
+    // DRep transitions from inactive to active, but there are no
+    // active GAs to fan out. The backfill block should still record
+    // the newly-active count but write nothing.
+    mockListAllDReps.mockResolvedValue([
+      { drep_id: 'drep1transitioning', registered: true, has_script: false, hex: '' },
+    ]);
+    mockFetchDRepInfoBatch.mockImplementation(async (ids) => {
+      if (ids.includes('drep_always_abstain')) return [];
+      return [
+        {
+          drep_id: 'drep1transitioning',
+          hex: null,
+          has_script: false,
+          drep_status: 'registered',
+          deposit: '500000000',
+          active: true,
+          expires_epoch_no: 600,
+          amount: '1000000000',
+          meta_url: null,
+          meta_hash: null,
+        },
+      ];
+    });
+    mockBatchGetItems.mockResolvedValue([
+      {
+        drepId: 'drep1transitioning',
+        SK: 'PROFILE',
+        entityType: 'DREP_PROFILE',
+        hex: null,
+        isActive: false,
+        isRetired: false,
+        status: 'registered',
+        deposit: '500000000',
+        hasScript: false,
+        votingPower: '900000000',
+        votingPowerPartition: 'ALL',
+        votingPowerSort: '000000000000000900000000',
+        expiresEpoch: 600,
+        anchorUrl: null,
+        anchorHash: null,
+        anchorVerified: null,
+        voteCount: 0,
+        lastSyncedAt: '2026-05-25T00:00:00.000Z',
+        enrichmentVersion: 4,
+      } as unknown as DRepDirectoryItem,
+    ]);
+    // No active GAs.
+    mockQueryItems.mockResolvedValue({ items: [], count: 0 });
+    mockPutItemIfAbsent.mockResolvedValue({ outcome: 'written' });
+
+    const result = await runDirectorySync();
+
+    expect(result.autoPostBackfill).toBeDefined();
+    expect(result.autoPostBackfill!.newlyActiveDReps).toBe(1);
+    expect(result.autoPostBackfill!.postsWritten).toBe(0);
+    expect(mockPutItemIfAbsent).not.toHaveBeenCalled();
   });
 });
