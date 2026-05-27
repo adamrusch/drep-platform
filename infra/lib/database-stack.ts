@@ -15,6 +15,8 @@ export class DatabaseStack extends cdk.Stack {
   public readonly commentsTable: dynamodb.Table;
   public readonly commentVotesTable: dynamodb.Table;
   public readonly clubhousePostsTable: dynamodb.Table;
+  public readonly poolMetadataTable: dynamodb.Table;
+  public readonly ccMembersTable: dynamodb.Table;
   public readonly auditLogTable: dynamodb.Table;
   public readonly authNoncesTable: dynamodb.Table;
 
@@ -331,6 +333,47 @@ export class DatabaseStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
+    // ---- pool_metadata ----
+    // SPO ticker / name / homepage cache populated daily by
+    // `backend/src/sync/pool-metadata.ts` from Koios `/pool_list` +
+    // `/pool_metadata`. Read on the per-action Votes tab to render
+    // human-readable SPO voter identifiers instead of bech32 hashes.
+    //
+    // PK=`poolId` (bech32 `pool1...`). No SK (one row per pool).
+    //
+    // Expected size: ~6500 pools on mainnet today × ~250B/row =
+    // ~1.6MB total. Steady-state growth tracks pool registration rate
+    // (~dozens/day). Idempotent sync (compare-then-write) keeps
+    // WCU near-zero on quiet cycles.
+    this.poolMetadataTable = new dynamodb.Table(this, 'PoolMetadataTable', {
+      tableName: `${this.tablePrefix}pool_metadata`,
+      partitionKey: { name: 'poolId', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: props.stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
+    // ---- cc_members ----
+    // Constitutional Committee member roster populated by
+    // `backend/src/sync/cc-members.ts` from Koios `/committee_info`.
+    // Refresh fires hourly but the sync skips the actual Koios call
+    // when the current chain epoch matches the meta-row's
+    // `lastSyncedEpoch` — membership only changes at epoch
+    // boundaries (~5 days on mainnet).
+    //
+    // PK=`ccHotCred` (bech32 `cc_hot...`). No SK. A reserved row
+    // `ccHotCred='META'` carries the `lastSyncedEpoch` cursor for
+    // epoch-skip behavior; no collision with real bech32 IDs.
+    //
+    // Expected size: ~7 active members + 1 META row = 8 rows. Tiny.
+    this.ccMembersTable = new dynamodb.Table(this, 'CCMembersTable', {
+      tableName: `${this.tablePrefix}cc_members`,
+      partitionKey: { name: 'ccHotCred', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: props.stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
     // ---- audit_log ----
     this.auditLogTable = new dynamodb.Table(this, 'AuditLogTable', {
       tableName: `${this.tablePrefix}audit_log`,
@@ -370,6 +413,8 @@ export class DatabaseStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'CommentsTableName', { value: this.commentsTable.tableName, exportName: `${props.stage}-CommentsTableName` });
     new cdk.CfnOutput(this, 'CommentVotesTableName', { value: this.commentVotesTable.tableName, exportName: `${props.stage}-CommentVotesTableName` });
     new cdk.CfnOutput(this, 'ClubhousePostsTableName', { value: this.clubhousePostsTable.tableName, exportName: `${props.stage}-ClubhousePostsTableName` });
+    new cdk.CfnOutput(this, 'PoolMetadataTableName', { value: this.poolMetadataTable.tableName, exportName: `${props.stage}-PoolMetadataTableName` });
+    new cdk.CfnOutput(this, 'CCMembersTableName', { value: this.ccMembersTable.tableName, exportName: `${props.stage}-CCMembersTableName` });
     new cdk.CfnOutput(this, 'AuditLogTableName', { value: this.auditLogTable.tableName, exportName: `${props.stage}-AuditLogTableName` });
     new cdk.CfnOutput(this, 'AuthNoncesTableName', { value: this.authNoncesTable.tableName, exportName: `${props.stage}-AuthNoncesTableName` });
   }
