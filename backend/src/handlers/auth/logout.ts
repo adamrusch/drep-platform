@@ -15,6 +15,7 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { buildClearCookieHeader } from '../../lib/auth';
 import { updateItem, tableNames } from '../../lib/dynamodb';
+import { _invalidateForStake } from '../../lib/recognition';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { ok, internalError } from '../_response';
 
@@ -39,6 +40,16 @@ export const handler = async (
         ':now': new Date().toISOString(),
       },
     );
+
+    // Bust the recognition LRU for this stake so a subsequent sign-in
+    // from the same container with a NEW delegation isn't served from
+    // the prior cached entry. Per-container scope — see
+    // `_invalidateForStake` for the full contract. Best-effort.
+    try {
+      _invalidateForStake(authCtx.walletAddress);
+    } catch (err) {
+      console.warn('logout: recognition cache eviction failed (non-fatal):', err);
+    }
 
     const clearCookie = buildClearCookieHeader();
 
