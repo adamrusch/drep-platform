@@ -1,10 +1,14 @@
 import * as cdk from 'aws-cdk-lib';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as sns from 'aws-cdk-lib/aws-sns';
+import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import { Construct } from 'constructs';
 import * as path from 'path';
 import type { DatabaseStack } from './database-stack';
@@ -373,5 +377,92 @@ export class SchedulerStack extends cdk.Stack {
       value: this.ccMembersSyncFn.functionArn,
       exportName: `${stage}-CCMembersSyncFnArn`,
     });
+
+    // ---- CloudWatch alarms on sync Lambda errors (Batch F #20, 2026-05-27) ----
+    //
+    // One alarm per sync Lambda. Today if `governance-intake` or
+    // `drep-directory` fails for 24 hours, the only signal is a user
+    // reporting it — by which point the directory is hours stale or
+    // votes are missing from the per-action page. The alarm fires when
+    // the Lambda's auto-emitted `Errors` metric exceeds 0 for 5
+    // consecutive 1-minute periods, which is tight enough to catch a
+    // stuck failure mode but loose enough that a single 500 doesn't
+    // page (governance-intake runs every 1 min on mainnet; one
+    // transient Koios 5xx is normal noise).
+    //
+    // # Why on the SchedulerStack and not a new alarms-stack
+    //
+    // The alarms reference the Lambda functions defined in this stack.
+    // Putting them here keeps the related infra colocated and avoids a
+    // cross-stack dependency on the function ARN exports. A future
+    // "platform observability" stack could absorb them if/when the
+    // alarm count grows past ~20.
+    //
+    // # First deploy
+    //
+    // The SNS subscription requires email confirmation. After the
+    // first deploy, AWS sends a "Confirm subscription" email to the
+    // target address; the operator must click the link before any
+    // alarm notifications will actually reach them. This is a one-time
+    // step per subscriber address.
+
+    const alarmTopic = new sns.Topic(this, 'SyncFailureAlarmTopic', {
+      topicName: `drep-platform-${stage}-sync-failures`,
+      displayName: `drep.tools ${stage} sync failures`,
+    });
+
+    // Subscribe the operator's email. The first deploy will send a
+    // confirmation email that must be clicked through; subsequent
+    // deploys reuse the confirmed subscription.
+    alarmTopic.addSubscription(
+      new snsSubscriptions.EmailSubscription('bugreport@rusch.me'),
+    );
+
+    new cdk.CfnOutput(this, 'SyncFailureAlarmTopicArn', {
+      value: alarmTopic.topicArn,
+      exportName: `${stage}-SyncFailureAlarmTopicArn`,
+    });
+
+    /**
+     * Build one alarm against the given Lambda's `Errors` metric.
+     * Threshold > 0 means "any error count above zero." Evaluation
+     * over 5 consecutive 1-minute periods means a single failure
+     * within a 5-min window does not page, but a sustained error
+     * (e.g. broken sync code, upstream outage, IAM denial) does.
+     *
+     * `treatMissingData: NOT_BREACHING` is critical for the daily
+     * Lambdas (`pool-metadata-sync`, `drep-power-history-sync`) which
+     * don't emit any metric outside their once-per-day window —
+     * without this flag, the alarm would page every 5 minutes for the
+     * other 23h59m of the day. NOT_BREACHING explicitly says "no data
+     * is OK, only emit when there's a real positive `Errors` count."
+     */
+    const buildErrorsAlarm = (
+      id: string,
+      fn: lambdaNodejs.NodejsFunction,
+      friendlyName: string,
+    ): cloudwatch.Alarm => {
+      const alarm = new cloudwatch.Alarm(this, id, {
+        alarmName: `drep-platform-${stage}-${friendlyName}-errors`,
+        alarmDescription: `${friendlyName} Lambda emitted >0 errors for 5 consecutive minutes`,
+        metric: fn.metricErrors({
+          period: cdk.Duration.minutes(1),
+          statistic: cloudwatch.Stats.SUM,
+        }),
+        threshold: 0,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+        evaluationPeriods: 5,
+        datapointsToAlarm: 5,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      });
+      alarm.addAlarmAction(new cloudwatchActions.SnsAction(alarmTopic));
+      return alarm;
+    };
+
+    buildErrorsAlarm('GovernanceSyncErrorsAlarm', this.governanceSyncFn, 'governance-intake');
+    buildErrorsAlarm('DirectorySyncErrorsAlarm', this.directorySyncFn, 'drep-directory');
+    buildErrorsAlarm('PowerHistorySyncErrorsAlarm', this.powerHistorySyncFn, 'drep-power-history');
+    buildErrorsAlarm('PoolMetadataSyncErrorsAlarm', this.poolMetadataSyncFn, 'pool-metadata');
+    buildErrorsAlarm('CCMembersSyncErrorsAlarm', this.ccMembersSyncFn, 'cc-members');
   }
 }

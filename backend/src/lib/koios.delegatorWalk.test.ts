@@ -26,7 +26,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { fetchDRepDelegatorCount } from './koios';
+import { fetchDRepDelegatorCount, fetchPredefinedDRepDelegatorCount } from './koios';
 
 const DREP = 'drep1testfixture';
 
@@ -127,6 +127,115 @@ describe('fetchDRepDelegatorCount — walk cap', () => {
     mockKoiosPages([1000, 1000, 200]);
 
     const result = await fetchDRepDelegatorCount(DREP);
+
+    expect(result).toEqual({ count: 1000, isApprox: true });
+  });
+});
+
+// ============================================================
+// Predefined-DRep delegator walk (Batch F #10, 2026-05-27)
+// ============================================================
+//
+// The predefined DReps (Always Abstain, Always No Confidence) hold most
+// of mainnet's voting power and have correspondingly large delegator
+// pools — Abstain alone is in the ~60k range. The per-request walk
+// (1000-row cap above) would always return "1000+" which is useless,
+// so the directory sync owns a separate walk path with a 100-page cap
+// (~100k rows). Same result shape as the per-request walk; the higher
+// cap is the only material difference.
+
+describe('fetchPredefinedDRepDelegatorCount — sync-time walk', () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('returns the exact count when the upstream has fewer than 100k delegators', async () => {
+    // 5500 rows total — 5 full pages + a short page. Walk completes
+    // naturally; isApprox=false because we saw the short-page signal.
+    mockKoiosPages([1000, 1000, 1000, 1000, 1000, 500]);
+
+    const result = await fetchPredefinedDRepDelegatorCount('drep_always_abstain');
+
+    expect(result).toEqual({ count: 5500, isApprox: false });
+    // Six pages consumed (5 full + 1 short).
+    expect((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(6);
+  });
+
+  it('returns isApprox=true at the 100-page hard cap', async () => {
+    // 100 full pages — never sees a short page. Walk stops at the cap.
+    // This is the "Abstain has > 100k delegators" path.
+    mockKoiosPages(Array.from({ length: 100 }, () => 1000));
+
+    const result = await fetchPredefinedDRepDelegatorCount('drep_always_abstain');
+
+    expect(result).toEqual({ count: 100000, isApprox: true });
+    expect((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(100);
+  });
+
+  it('returns null when the very first page fails entirely (preserve prior cycle)', async () => {
+    // First-page total failure — caller treats null as "preserve the
+    // previous cycle's count" rather than clobbering with undefined.
+    globalThis.fetch = vi.fn(async () =>
+      new Response('Service Unavailable', {
+        status: 503,
+        statusText: 'Service Unavailable',
+      }),
+    ) as unknown as typeof fetch;
+
+    const result = await fetchPredefinedDRepDelegatorCount('drep_always_abstain');
+
+    expect(result).toBeNull();
+  });
+
+  it('returns the partial count with isApprox=true when a mid-walk page fails', async () => {
+    // First 3 pages succeed (3000 rows), then a 503 on page 4. The
+    // caller still gets useful data — "at least 3000" is better than
+    // pretending the walk never started.
+    let call = 0;
+    globalThis.fetch = vi.fn(async () => {
+      call += 1;
+      if (call <= 3) {
+        const rows = Array.from({ length: 1000 }, () => ({
+          stake_address: 'stake1xxx',
+          amount: '1',
+        }));
+        return new Response(JSON.stringify(rows), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response('Internal Server Error', { status: 500 });
+    }) as unknown as typeof fetch;
+
+    const result = await fetchPredefinedDRepDelegatorCount('drep_always_abstain');
+
+    expect(result).toEqual({ count: 3000, isApprox: true });
+  });
+
+  it('returns isApprox=true on a malformed mid-walk response (parse failure)', async () => {
+    let call = 0;
+    globalThis.fetch = vi.fn(async () => {
+      call += 1;
+      if (call === 1) {
+        const rows = Array.from({ length: 1000 }, () => ({
+          stake_address: 'stake1xxx',
+          amount: '1',
+        }));
+        return new Response(JSON.stringify(rows), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      // Second page: malformed JSON.
+      return new Response('not-json', {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const result = await fetchPredefinedDRepDelegatorCount('drep_always_abstain');
 
     expect(result).toEqual({ count: 1000, isApprox: true });
   });
