@@ -64,6 +64,7 @@ import {
   listAllDReps,
   fetchDRepInfoBatch,
   fetchDRepMetadata,
+  fetchPredefinedDRepDelegatorCount,
   listAllVotes,
   KoiosError,
   type KoiosDRepInfo,
@@ -424,10 +425,22 @@ function buildDirectoryItem(
  * So `lastVotedAt` / `voteCount` are absent — the row sits at the top
  * of "voting power" sort and at the bottom of "recent activity" sort,
  * which is the right UX.
+ *
+ * `delegatorCount` is precomputed at sync time by walking
+ * `/drep_delegators` with a 100-page cap (see
+ * `fetchPredefinedDRepDelegatorCount`). The detail handler can't walk
+ * the predefined DReps on-demand (Abstain has ~9B ADA across millions
+ * of delegators; the walk would dwarf the per-request 30s Lambda
+ * timeout), so the sync owns it. When the upstream walk fails we
+ * preserve the previous cycle's count rather than clobbering with
+ * `undefined` — see the call site in `runDirectorySync`. The count is
+ * stored alongside the rest of the row in the directory table so
+ * `directory/get.ts` can pass it straight through.
  */
 function buildPredefinedDirectoryItem(
   drepId: string,
   info: KoiosDRepInfo | undefined,
+  delegatorCount: number | undefined,
   now: string,
 ): DRepDirectoryItem {
   const displayName = PREDEFINED_DREP_DISPLAY_NAMES[drepId] ?? drepId;
@@ -465,6 +478,15 @@ function buildPredefinedDirectoryItem(
     lastSyncedAt: now,
     enrichmentVersion: ENRICHMENT_VERSION,
   };
+  // Precomputed delegator count. Persisted on the PROFILE row so the
+  // detail handler can short-circuit the on-demand Koios walk (which
+  // would never finish in the per-request budget for these DReps). Only
+  // set when the sync walk succeeded for this row; on failure we leave
+  // the field absent so the compare-then-write loop keeps the prior
+  // cycle's value rather than clobbering it. See `runDirectorySync`.
+  if (delegatorCount !== undefined) {
+    item.delegatorCount = delegatorCount;
+  }
   return item;
 }
 
@@ -592,6 +614,41 @@ export async function runDirectorySync(): Promise<DirectorySyncResult> {
     );
   }
 
+  // Step 4c: precompute the delegator count for each predefined DRep.
+  // We walk `/drep_delegators` with a 100-page cap (see
+  // `fetchPredefinedDRepDelegatorCount`) — too expensive to do
+  // per-detail-request but well within the directory sync's 5-min
+  // Lambda budget (worst case: 2 DReps × 100 pages × ~500ms = ~100s).
+  //
+  // Failure semantics: `null` → keep the previous cycle's count (don't
+  // clobber). Partial results (`isApprox: true`) are still persisted —
+  // 100k+ is dramatically more informative than a missing field. The
+  // `delegatorCountIsApprox` flag from the per-request handler is
+  // intentionally NOT propagated here because we know the predefined
+  // walk is fundamentally approximate (a real registry-of-delegators
+  // count would need an indexer-level COUNT(*) we don't have access to).
+  const predefinedDelegatorCounts = new Map<string, number>();
+  for (const id of PREDEFINED_DREP_IDS) {
+    try {
+      const res = await fetchPredefinedDRepDelegatorCount(id);
+      if (res !== null) {
+        predefinedDelegatorCounts.set(id, res.count);
+        console.log(
+          `Directory sync: predefined ${id} delegatorCount=${res.count} isApprox=${res.isApprox}`,
+        );
+      } else {
+        console.warn(
+          `Directory sync: predefined ${id} delegator walk returned null; preserving prior delegatorCount`,
+        );
+      }
+    } catch (err) {
+      console.warn(
+        `Directory sync: predefined ${id} delegator walk threw (preserving prior count):`,
+        err,
+      );
+    }
+  }
+
   // Step 5: read existing rows in bulk so we can compare-then-write.
   // Previous behavior was to Put every row every cycle; on mainnet that
   // burned ~38k WCU/hour on the directory table for ~zero changes.
@@ -677,11 +734,22 @@ export async function runDirectorySync(): Promise<DirectorySyncResult> {
   // compare-then-write path. Counted separately so the active/inactive/
   // retired stats stay tied to the on-chain registered population — these
   // pseudo-DReps don't fit any of those buckets cleanly.
+  //
+  // `delegatorCount` resolution: prefer the fresh walk result for THIS
+  // cycle; on walk failure preserve the previous cycle's value from
+  // `existing.delegatorCount` so a transient Koios outage doesn't blank
+  // the count in the UI for 30 minutes. Worst case: count drifts ~30 min
+  // behind the chain, which matches the rest of the directory sync's
+  // staleness budget.
   for (const id of PREDEFINED_DREP_IDS) {
     try {
       const info = predefinedInfoByDRep.get(id);
-      const candidate = buildPredefinedDirectoryItem(id, info, now);
       const existing = existingByDRep.get(id);
+      const freshCount = predefinedDelegatorCounts.get(id);
+      const priorCount =
+        typeof existing?.delegatorCount === 'number' ? existing.delegatorCount : undefined;
+      const delegatorCount = freshCount ?? priorCount;
+      const candidate = buildPredefinedDirectoryItem(id, info, delegatorCount, now);
       result.total++;
       result.active++; // Predefined DReps are always active by definition.
       if (candidate.givenName) result.withGivenName++;

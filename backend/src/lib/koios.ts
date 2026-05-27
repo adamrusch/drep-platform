@@ -1285,6 +1285,106 @@ export async function fetchDRepDelegatorCount(
   return { count, isApprox: true };
 }
 
+/** Hard page cap used by `fetchPredefinedDRepDelegatorCount`. Predefined
+ *  DReps (Always Abstain, Always No Confidence) can have millions of
+ *  delegators on mainnet, so the regular per-detail-request cap (1000 rows)
+ *  would be uselessly approximate. The sync runs in the directory Lambda
+ *  with a 5-min timeout, so we can afford a much deeper walk. 100 pages ×
+ *  1000 rows = 100k rows is enough headroom for the predefined accounts
+ *  today (Abstain ≈ 60k delegators) while still bounded against a runaway
+ *  walk. At Koios's anonymous-tier latency (~200-500ms/page), 100 pages
+ *  is ~30-50s wall-clock — well within the directory sync's budget. */
+const PREDEFINED_DREP_DELEGATORS_MAX_PAGES = 100;
+
+/**
+ * Walk Koios `/drep_delegators` to count the stake accounts delegating to
+ * one of the two predefined DReps (`drep_always_abstain` /
+ * `drep_always_no_confidence`). Same on-the-wire shape as
+ * `fetchDRepDelegatorCount` but a much higher page cap (100 vs the
+ * normal 10). This is called once per predefined DRep per directory-sync
+ * cycle (30 min), so the worst-case Koios round-trip count per cycle is
+ * 2 DReps × 100 pages = 200 round-trips — comfortably under our anonymous-
+ * tier RPS budget for the directory sync window.
+ *
+ * Returns the same `{count, isApprox}` shape:
+ *   - `isApprox: false` only when we saw a short page (the walk completed).
+ *   - `isApprox: true` when we hit the 100-page cap or any mid-walk
+ *     failure. Caller persists the count regardless — even an approximate
+ *     `100k+` value is dramatically more informative than `undefined`.
+ *
+ * Returns `null` only when the first page fails entirely (no rows
+ * accumulated). Caller should NOT clobber the previous cycle's
+ * `delegatorCount` on `null` — it's a "this cycle failed; keep the old
+ * value" signal.
+ */
+export async function fetchPredefinedDRepDelegatorCount(
+  drepId: string,
+): Promise<DRepDelegatorCountResult | null> {
+  const body = JSON.stringify({ _drep_id: drepId });
+  let count = 0;
+  for (let page = 0; page < PREDEFINED_DREP_DELEGATORS_MAX_PAGES; page++) {
+    let res: Response;
+    try {
+      res = await koiosFetch('/drep_delegators', {
+        method: 'POST',
+        body,
+        offset: page * PAGE_SIZE,
+        limit: PAGE_SIZE,
+        timeoutMs: 8_000,
+      });
+    } catch (err) {
+      if (page === 0) {
+        console.warn(
+          `[Koios /drep_delegators predefined] fetch failed for ${drepId}:`,
+          err,
+        );
+        return null;
+      }
+      console.warn(
+        `[Koios /drep_delegators predefined] page ${page} failed for ${drepId}, returning partial:`,
+        err,
+      );
+      return { count, isApprox: true };
+    }
+    if (!res.ok) {
+      if (page === 0) {
+        console.warn(
+          `[Koios /drep_delegators predefined] HTTP ${res.status} for ${drepId}`,
+        );
+        return null;
+      }
+      console.warn(
+        `[Koios /drep_delegators predefined] page ${page} returned HTTP ${res.status}, returning partial`,
+      );
+      return { count, isApprox: true };
+    }
+    let parsed: unknown;
+    try {
+      parsed = await readJsonCapped(res, '/drep_delegators');
+    } catch (err) {
+      if (page === 0) {
+        console.warn(
+          `[Koios /drep_delegators predefined] body parse failed for ${drepId}:`,
+          err,
+        );
+        return null;
+      }
+      return { count, isApprox: true };
+    }
+    if (!Array.isArray(parsed)) {
+      if (page === 0) return null;
+      return { count, isApprox: true };
+    }
+    const rows = parsed as KoiosDRepDelegator[];
+    count += rows.length;
+    if (rows.length < PAGE_SIZE) {
+      return { count, isApprox: false };
+    }
+  }
+  // Hit the 100-page hard cap without a short page. Surface as approximate.
+  return { count, isApprox: true };
+}
+
 /**
  * @deprecated Use `fetchDRepDelegatorCount` instead. Kept temporarily to
  * give callers a soft migration; this function still exists but now

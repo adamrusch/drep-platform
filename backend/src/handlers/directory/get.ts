@@ -170,13 +170,26 @@ export const handler = async (
     //     not recorded as a vote event. Asking would return [] at best
     //     and waste a 6-8s round-trip; at worst it errors.
     //   - `drep_delegators`: Abstain has millions of delegators on
-    //     mainnet; walking 5 pages × 1000 rows = paginated walk that
-    //     dwarfs the 30s Lambda budget. The cached `delegatorCount` (if
-    //     populated by a future sync pass) is the authoritative source
-    //     for predefined DReps.
+    //     mainnet; the per-request walk (1000-row cap) would always
+    //     return "1000+" which is useless. The directory sync owns the
+    //     authoritative count via `fetchPredefinedDRepDelegatorCount`
+    //     (100-page cap, ~100k rows) and persists it on the PROFILE row.
+    //     We expose it through the existing `delegatorCountLive` channel
+    //     so the frontend's preference order (`delegatorCountLive ??
+    //     delegatorCount`) picks it up automatically. `isApprox: false`
+    //     because the sync-time count is the authoritative answer for
+    //     these accounts (we cannot do better than a 100-page walk
+    //     without a different upstream).
     let enrichment: EnrichmentCacheEntry;
     if (cached.isPredefined) {
       enrichment = { fetchedAt: Date.now() };
+      if (typeof cached.delegatorCount === 'number') {
+        enrichment.delegatorCountLive = cached.delegatorCount;
+        // Intentionally NOT setting `delegatorCountIsApprox` — absence
+        // signals "exact" to the frontend. Per the locked decision in
+        // the Batch F plan, the sync-time precomputed count is treated
+        // as the authoritative figure for predefined DReps.
+      }
     } else {
       try {
         enrichment = await fetchEnrichment(drepId);
