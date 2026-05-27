@@ -76,6 +76,11 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run typecheck
+      # Unit tests (vitest + RTL canaries — Batch F #18). Runs ahead of
+      # the build so a failing test doesn't waste the 5-min Vite bundle
+      # step. New tests are co-located as `*.test.{ts,tsx}` next to the
+      # component under test.
+      - run: npm test
       # `npm run build` runs `tsc && vite build` — typecheck is redundant
       # but cheap, and keeps the log structure parallel to the backend
       # job. Vite build is the meaningful guard: it catches missing
