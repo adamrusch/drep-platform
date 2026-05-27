@@ -1382,6 +1382,90 @@ export async function listActivePools(): Promise<KoiosActivePool[]> {
 }
 
 /**
+ * One row of the `/pool_metadata` response. Returned only for pools that
+ * have registered metadata (a `meta_url` on the pool registration cert);
+ * pools without metadata are absent from the response. The `meta_json`
+ * field is the parsed off-chain CIP-0017 body — typically carries
+ * `name`, `ticker`, `homepage`, and `description`.
+ *
+ * Caller should NOT assume `meta_json` is non-null — Koios returns null
+ * when the off-chain metadata is unreachable, returns 404, or fails to
+ * parse / validate.
+ */
+export interface KoiosPoolMetadata {
+  pool_id_bech32: string;
+  meta_url: string | null;
+  meta_hash: string | null;
+  /** Parsed off-chain metadata body. Null on fetch/parse failure. */
+  meta_json: {
+    name?: string;
+    ticker?: string;
+    homepage?: string;
+    description?: string;
+    [key: string]: unknown;
+  } | null;
+}
+
+/**
+ * Fetch off-chain metadata for one or more registered pools via
+ * `/pool_metadata`. Returns the raw rows; the caller is responsible for
+ * extracting whichever body fields it needs. Pools that have no
+ * registered metadata (no `meta_url` on their cert) are simply absent
+ * from the response — that's a normal answer, not an error.
+ *
+ * Batched at 50 IDs per request to match the `/drep_info` payload size
+ * sweet spot. Per-batch failures log and continue; the caller
+ * accumulates whatever succeeded.
+ */
+export async function fetchPoolMetadata(
+  poolIds: readonly string[],
+): Promise<KoiosPoolMetadata[]> {
+  if (poolIds.length === 0) return [];
+  const all: KoiosPoolMetadata[] = [];
+  // Use the same batch size as drep_info — well under Koios's empirical
+  // payload cap (200 IDs returned 413 in our probe of drep_info; play it
+  // safe on pool_metadata too).
+  for (let i = 0; i < poolIds.length; i += DREP_INFO_BATCH_SIZE) {
+    const batch = poolIds.slice(i, i + DREP_INFO_BATCH_SIZE);
+    try {
+      const res = await koiosFetch('/pool_metadata', {
+        method: 'POST',
+        body: JSON.stringify({ _pool_bech32_ids: batch }),
+        timeoutMs: 8_000,
+      });
+      if (!res.ok) {
+        console.warn(
+          `[Koios /pool_metadata] HTTP ${res.status} ${res.statusText} on batch ${i}-${i + batch.length}; skipping`,
+        );
+        continue;
+      }
+      const parsed = (await readJsonCapped(res, '/pool_metadata')) as unknown;
+      if (!Array.isArray(parsed)) {
+        console.warn('[Koios /pool_metadata] non-array response; skipping batch');
+        continue;
+      }
+      all.push(...(parsed as KoiosPoolMetadata[]));
+    } catch (err) {
+      console.warn(`[Koios /pool_metadata] batch ${i} failed:`, err);
+    }
+  }
+  return all;
+}
+
+/**
+ * Fetch the full mainnet `pool_list` (registered + retired). Returns the
+ * raw rows — the caller decides how to filter. Used by the pool-metadata
+ * sync to enumerate every pool ID before bulk-fetching metadata.
+ *
+ * Same paginated walk as `listActivePools` but without the active-only
+ * filter. Throws `KoiosError` on failure so the sync can abort the
+ * cycle cleanly.
+ */
+export async function listAllPools(): Promise<KoiosPool[]> {
+  return fetchAllPaged<KoiosPool>('/pool_list', '{}', POOL_MAX_PAGES);
+}
+
+/**
  * Fetch the current Constitutional Committee. Filter to `status ===
  * 'authorized'` — resigned or expired members cannot vote.
  *
