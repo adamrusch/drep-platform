@@ -78,12 +78,21 @@ export class DatabaseStack extends cdk.Stack {
     // PK=`drepId`, SK=`'PROFILE'` (room for future per-DRep sub-records
     // — vote-history snapshots, delegator caches — under different SKs
     // without colliding on the partition).
+    // SPARSE TTL on the `ttl` attribute — only rows that carry the
+    // attribute auto-expire. As of 2026-05-27 only POWER#NNNNNN rows
+    // (written by `drep-voting-power-history` sync) set `ttl` (365 days
+    // future). PROFILE rows MUST NOT carry `ttl` — they're the
+    // canonical DRep directory entries; expiring them would silently
+    // delete DReps from the listing. See
+    // `backend/src/sync/drep-voting-power-history.ts` for the contract
+    // and the "Sparse TTL" comment in its header.
     this.drepDirectoryTable = new dynamodb.Table(this, 'DRepDirectoryTable', {
       tableName: `${this.tablePrefix}drep_directory`,
       partitionKey: { name: 'drepId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'SK', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      timeToLiveAttribute: 'ttl',
       removalPolicy: props.stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 

@@ -54,6 +54,32 @@
  * | `epochNo`      | N    | Epoch this snapshot represents                       |
  * | `amount`       | S    | Voting power in lovelace, stringified BigInt         |
  * | `capturedAt`   | S    | ISO-8601 of the sync run that wrote this row         |
+ * | `ttl`          | N    | Unix epoch seconds, ~365 days from `capturedAt`      |
+ *
+ * # Sparse TTL (read this before adding `ttl` anywhere else)
+ *
+ * DynamoDB TTL is enabled on the table at the `ttl` attribute (see
+ * `infra/lib/database-stack.ts`). It is a SPARSE TTL — DynamoDB only
+ * acts on rows that carry the `ttl` attribute; rows without it are
+ * never auto-expired.
+ *
+ *   - POWER rows: carry `ttl`, expire ~365 days after capture. The
+ *     sparkline only renders ~1 year of history, so older snapshots
+ *     have no UX value and we save the storage + scan-class cost.
+ *   - PROFILE rows: MUST NOT carry `ttl`. They are the canonical DRep
+ *     directory entries. Setting `ttl` on a PROFILE row would silently
+ *     delete the DRep from the directory after the TTL elapses. This
+ *     comment exists so a future reviewer notices before adding `ttl`
+ *     to any non-POWER write path.
+ *
+ * No backfill: existing POWER rows written before 2026-05-27 lack the
+ * `ttl` attribute and therefore never expire. They will be replaced
+ * organically as the daily sync writes a row for the same
+ * (drepId, epoch) — the conditional Put on `attribute_not_exists(SK)`
+ * means it's the FIRST write that wins; existing rows survive without
+ * a `ttl`. That's fine: the rows we want to expire are the ones still
+ * being created daily, and within 365 days the entire pre-TTL backlog
+ * will have aged out of the "useful" window anyway.
  *
  * # Future work (documented as backlog, not in scope this sprint)
  *
@@ -84,6 +110,12 @@ export interface PowerHistorySyncResult {
  *  covers all of history past + the next ~1000 years of epochs. */
 const EPOCH_PAD = 6;
 
+/** Seconds in 365 days — POWER row TTL. Sparkline only shows ~1 year so
+ *  older snapshots have no UX value; deleting them keeps PITR backups
+ *  bounded and reduces scan-class operation cost as the table grows.
+ *  See file-header "Sparse TTL" section for the contract. */
+const POWER_ROW_TTL_SECONDS = 365 * 24 * 60 * 60;
+
 /** Concurrent in-flight Koios calls. Stays comfortably under the
  *  anonymous-tier ~10 RPS cap while still finishing ~1500 DReps in
  *  ~5 min of wall-clock (vs >10 min for a sequential walk).
@@ -103,6 +135,54 @@ const PREDEFINED_DREP_IDS = new Set<string>([
 function padEpoch(n: number): string {
   const s = String(n);
   return s.length >= EPOCH_PAD ? s : '0'.repeat(EPOCH_PAD - s.length) + s;
+}
+
+/** One persisted POWER row. Shape mirrors the table comment in this
+ *  file's header. `ttl` is Unix epoch seconds (NUMBER attribute) — the
+ *  format DynamoDB TTL expects.
+ *
+ *  Index signature is present so this satisfies the
+ *  `Record<string, unknown>` constraint on `putItemIfAbsent`. */
+export interface PowerRow {
+  drepId: string;
+  SK: string;
+  epochNo: number;
+  amount: string;
+  capturedAt: string;
+  ttl: number;
+  [key: string]: unknown;
+}
+
+/**
+ * Build a single POWER row for an (epoch, amount) snapshot.
+ *
+ * Pure / synchronous so the sync's main loop stays focused on Koios
+ * + Dynamo plumbing and so tests can lock in the exact shape (notably
+ * the `ttl` value).
+ *
+ * `nowMs` is injectable for testing — production callers pass
+ * `Date.now()`. We anchor the TTL on the sync's wall-clock rather than
+ * the epoch's actual end time because (a) we don't have a reliable
+ * epoch-end timestamp to hand here without an extra Koios call, and
+ * (b) the rows are written near-real-time to the epoch they represent,
+ * so the two timestamps differ by at most ~5 days — well inside the
+ * 365-day TTL's slack.
+ */
+export function buildPowerRow(args: {
+  drepId: string;
+  epochNo: number;
+  amount: string;
+  capturedAt: string;
+  nowMs: number;
+}): PowerRow {
+  return {
+    drepId: args.drepId,
+    SK: `POWER#${padEpoch(args.epochNo)}`,
+    epochNo: args.epochNo,
+    amount: args.amount,
+    capturedAt: args.capturedAt,
+    ttl: Math.floor(args.nowMs / 1000) + POWER_ROW_TTL_SECONDS,
+  };
 }
 
 export async function runPowerHistorySync(): Promise<PowerHistorySyncResult> {
@@ -142,7 +222,13 @@ export async function runPowerHistorySync(): Promise<PowerHistorySyncResult> {
   }
 
   console.log(`Power-history sync: fetching history for ${activeIds.length} DReps`);
-  const capturedAt = new Date().toISOString();
+  // Anchor both `capturedAt` (ISO) and the TTL math on a single
+  // wall-clock read at the start of the cycle. Rows written later in
+  // the cycle inherit the same TTL deadline — that's intentional and
+  // simpler than re-reading the clock per write. The cycle runs in
+  // ~5 minutes, well under the 365-day TTL granularity.
+  const cycleStartMs = Date.now();
+  const capturedAt = new Date(cycleStartMs).toISOString();
 
   // Concurrency-based pacing — five lanes each pulling DReps from a
   // shared cursor. Each lane completes one Koios call + a small
@@ -172,13 +258,13 @@ export async function runPowerHistorySync(): Promise<PowerHistorySyncResult> {
         } catch {
           continue;
         }
-        const item = {
+        const item = buildPowerRow({
           drepId,
-          SK: `POWER#${padEpoch(row.epoch_no)}`,
           epochNo: row.epoch_no,
           amount: row.amount,
           capturedAt,
-        };
+          nowMs: cycleStartMs,
+        });
         const putResult = await putItemIfAbsent(tableNames.drepDirectory, item, {
           partitionKey: 'drepId',
           sortKey: 'SK',
