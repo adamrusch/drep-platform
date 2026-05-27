@@ -1,23 +1,36 @@
 /**
- * Tests for the Clubhouse `createComment` handler depth-guard.
+ * Tests for the Clubhouse `createComment` handler.
  *
- * The Clubhouse surface allows 2 levels of nesting:
+ * # Depth guard (Clubhouse: 2 levels)
+ *
  *   - top-level comment (no parentCommentId)
  *   - reply (parentCommentId points at a top-level comment)
  *   - sub-reply (parentCommentId points at a reply)
  *
  * The 3rd level — a reply targeting a sub-reply — is rejected with 400.
+ * This is ONE LEVEL DEEPER than the Public Comments surface.
  *
- * This is ONE LEVEL DEEPER than the Public Comments surface (governed by
- * `handlers/comments/create.ts`), so we re-test the depth guard
- * explicitly here rather than reusing the comments tests.
+ * # Membership gate (added 2026-05-27, Batch E)
  *
- * Why this matters: the depth guard is the only thing keeping clubhouse
- * comments from arbitrarily deep nesting in the UI. A regression that
- * silently allowed 3+ depth would surface in the UI as ever-more-indented
- * comment threads that wouldn't fit on screen — visible damage, but the
- * server is the authoritative source of truth (UI hides the affordance
- * but must not be trusted alone).
+ * The handler now resolves the caller's membership in this clubhouse:
+ *   1. role-holder: lead DRep / committee_member / trusted_delegator
+ *      listed on the `DRepCommittee` row for `drepId`. Resolved by a
+ *      DDB Get.
+ *   2. current delegator: their stake currently delegates to THIS
+ *      DRep, resolved via Koios primary + Blockfrost fallback (the
+ *      same `lookupCurrentDrep` flow used by `/auth/me`).
+ *
+ * Cases:
+ *   - Either condition true → comment allowed.
+ *   - Both conditions false (definitive answer from upstream) → 403.
+ *   - Both upstreams failed → soft-allow (we don't 503 the entire
+ *     comment surface during a Koios outage; the role-holder branch
+ *     still works since it's a DDB lookup).
+ *
+ * The depth guard runs BEFORE the membership gate (a depth-3 comment
+ * is malformed regardless of who's submitting it), so the original
+ * 8 depth-guard tests still cover the depth logic. The new
+ * "membership" describe block below adds the gate coverage.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -43,15 +56,22 @@ vi.mock('../../lib/dynamodb', () => ({
   },
 }));
 
+vi.mock('../../lib/recognition', () => ({
+  lookupCurrentDrep: vi.fn(),
+}));
+
 import { getItem, putItem } from '../../lib/dynamodb';
+import { lookupCurrentDrep } from '../../lib/recognition';
 import { handler } from './createComment';
 
 const mockGet = vi.mocked(getItem);
 const mockPut = vi.mocked(putItem);
+const mockLookup = vi.mocked(lookupCurrentDrep);
 
 const DREP_ID = 'drep1ygqgayvx8yzsaj9hprja3l6jy3v4px9z3u8uvecuvm3f92ce7mckx';
 const POST_ID = 'auto-ga#abcd#0';
 const WALLET = 'stake1uyvjdz9rxsfsmv44rtk75k2rqyqskrga96dgdfrqjvjjpwsefcjnp';
+const OTHER_DREP_ID = 'drep1somebodyelse';
 
 function buildEvent(opts: {
   drepId: string;
@@ -107,18 +127,61 @@ function buildPostWithComments(
   };
 }
 
+/** Build a `DRepCommitteeItem` row. Defaults to a clubhouse owned by
+ *  someone OTHER than `WALLET`, so the caller is not a role-holder
+ *  unless overridden. */
+function buildCommittee(opts?: {
+  leadWallet?: string;
+  memberWallets?: string[];
+}): unknown {
+  return {
+    drepId: DREP_ID,
+    SK: 'COMMITTEE',
+    leadWallet: opts?.leadWallet ?? 'stake1someotherlead',
+    committeeName: 'test committee',
+    description: 'd',
+    members: (opts?.memberWallets ?? []).map((w) => ({
+      walletAddress: w,
+      joinedAt: '2026-01-01T00:00:00Z',
+      role: 'committee_member',
+    })),
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-05-01T00:00:00Z',
+  };
+}
+
+/**
+ * Wire the two getItem call shapes that `createComment` makes after the
+ * membership gate landed:
+ *   1. getItem(clubhousePosts, {drepId, postId})  → the post being commented on
+ *   2. getItem(drepCommittees, {drepId, SK:'COMMITTEE'})  → membership lookup
+ *
+ * The order isn't deterministic (they run in parallel via Promise.all),
+ * so we set up mocks by Implementation rather than by call-order.
+ */
+function wireDdbMocks(opts: {
+  post: unknown | undefined;
+  committee: unknown | undefined;
+}): void {
+  mockGet.mockImplementation(async (_tableName: string, key: Record<string, unknown>) => {
+    if (key['SK'] === 'COMMITTEE') return opts.committee as never;
+    if (key['postId']) return opts.post as never;
+    return undefined;
+  });
+}
+
 beforeEach(() => {
-  // resetAllMocks clears BOTH call history AND any queued mock
-  // implementations (mockResolvedValueOnce). clearAllMocks only
-  // clears history — which would let a leftover queued return from a
-  // previous test leak into this one.
   vi.resetAllMocks();
   mockPut.mockResolvedValue(undefined);
+  // Default to a wallet that IS delegated to this DRep — the easiest
+  // baseline that lets the depth-guard tests focus on depth semantics
+  // without re-asserting the membership gate.
+  mockLookup.mockResolvedValue({ drepId: DREP_ID, source: 'koios' });
 });
 
 describe('clubhouse/createComment — depth guard', () => {
   it('allows top-level comment (no parentCommentId)', async () => {
-    mockGet.mockResolvedValueOnce(buildPostWithComments([]) as never);
+    wireDdbMocks({ post: buildPostWithComments([]), committee: buildCommittee() });
 
     const res = (await handler(
       buildEvent({
@@ -136,9 +199,10 @@ describe('clubhouse/createComment — depth guard', () => {
   });
 
   it('allows reply to a top-level comment (depth 1)', async () => {
-    mockGet.mockResolvedValueOnce(
-      buildPostWithComments([{ commentId: 'top1' }]) as never,
-    );
+    wireDdbMocks({
+      post: buildPostWithComments([{ commentId: 'top1' }]),
+      committee: buildCommittee(),
+    });
 
     const res = (await handler(
       buildEvent({
@@ -161,12 +225,13 @@ describe('clubhouse/createComment — depth guard', () => {
   it('allows sub-reply: reply to a reply (depth 2, the Clubhouse cap)', async () => {
     // Post has: top1 (top-level) + reply1 (reply to top1).
     // New comment targets reply1, which would land at depth 2 — allowed.
-    mockGet.mockResolvedValueOnce(
-      buildPostWithComments([
+    wireDdbMocks({
+      post: buildPostWithComments([
         { commentId: 'top1' },
         { commentId: 'reply1', parentCommentId: 'top1' },
-      ]) as never,
-    );
+      ]),
+      committee: buildCommittee(),
+    });
 
     const res = (await handler(
       buildEvent({
@@ -185,13 +250,14 @@ describe('clubhouse/createComment — depth guard', () => {
     // Chain: top1 → reply1 → subreply1.
     // New comment targets subreply1 (depth 2 already), would land at
     // depth 3 — the Clubhouse cap is 2, so reject.
-    mockGet.mockResolvedValueOnce(
-      buildPostWithComments([
+    wireDdbMocks({
+      post: buildPostWithComments([
         { commentId: 'top1' },
         { commentId: 'reply1', parentCommentId: 'top1' },
         { commentId: 'subreply1', parentCommentId: 'reply1' },
-      ]) as never,
-    );
+      ]),
+      committee: buildCommittee(),
+    });
 
     const res = (await handler(
       buildEvent({
@@ -210,7 +276,10 @@ describe('clubhouse/createComment — depth guard', () => {
   });
 
   it('returns 404 when parentCommentId points at a comment not on this post', async () => {
-    mockGet.mockResolvedValueOnce(buildPostWithComments([{ commentId: 'top1' }]) as never);
+    wireDdbMocks({
+      post: buildPostWithComments([{ commentId: 'top1' }]),
+      committee: buildCommittee(),
+    });
 
     const res = (await handler(
       buildEvent({
@@ -226,7 +295,7 @@ describe('clubhouse/createComment — depth guard', () => {
   });
 
   it('rejects empty body', async () => {
-    mockGet.mockResolvedValueOnce(buildPostWithComments([]) as never);
+    wireDdbMocks({ post: buildPostWithComments([]), committee: buildCommittee() });
     const res = (await handler(
       buildEvent({
         drepId: DREP_ID,
@@ -240,7 +309,7 @@ describe('clubhouse/createComment — depth guard', () => {
   });
 
   it('rejects when post does not exist', async () => {
-    mockGet.mockResolvedValueOnce(undefined);
+    wireDdbMocks({ post: undefined, committee: buildCommittee() });
     const res = (await handler(
       buildEvent({
         drepId: DREP_ID,
@@ -254,7 +323,10 @@ describe('clubhouse/createComment — depth guard', () => {
   });
 
   it('rejects non-string parentCommentId with 400', async () => {
-    mockGet.mockResolvedValueOnce(buildPostWithComments([{ commentId: 'top1' }]) as never);
+    wireDdbMocks({
+      post: buildPostWithComments([{ commentId: 'top1' }]),
+      committee: buildCommittee(),
+    });
     const res = (await handler(
       buildEvent({
         drepId: DREP_ID,
@@ -264,6 +336,140 @@ describe('clubhouse/createComment — depth guard', () => {
       }),
     )) as APIGatewayProxyResultV2;
     expect(res).toMatchObject({ statusCode: 400 });
+    expect(mockPut).not.toHaveBeenCalled();
+  });
+});
+
+describe('clubhouse/createComment — membership gate', () => {
+  it('allows a delegator currently delegated to THIS DRep', async () => {
+    wireDdbMocks({ post: buildPostWithComments([]), committee: buildCommittee() });
+    mockLookup.mockResolvedValueOnce({ drepId: DREP_ID, source: 'koios' });
+
+    const res = (await handler(
+      buildEvent({
+        drepId: DREP_ID,
+        postId: POST_ID,
+        walletAddress: WALLET,
+        body: { body: 'hi from a delegator' },
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 200 });
+    expect(mockPut).toHaveBeenCalledTimes(1);
+  });
+
+  it('REJECTS with 403 a delegator delegated to a DIFFERENT DRep', async () => {
+    wireDdbMocks({ post: buildPostWithComments([]), committee: buildCommittee() });
+    mockLookup.mockResolvedValueOnce({ drepId: OTHER_DREP_ID, source: 'koios' });
+
+    const res = (await handler(
+      buildEvent({
+        drepId: DREP_ID,
+        postId: POST_ID,
+        walletAddress: WALLET,
+        body: { body: 'I should not be allowed here' },
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 403 });
+    expect(mockPut).not.toHaveBeenCalled();
+  });
+
+  it('REJECTS with 403 a wallet that is undelegated AND not a role-holder', async () => {
+    wireDdbMocks({ post: buildPostWithComments([]), committee: buildCommittee() });
+    mockLookup.mockResolvedValueOnce({ drepId: null, source: 'koios' });
+
+    const res = (await handler(
+      buildEvent({
+        drepId: DREP_ID,
+        postId: POST_ID,
+        walletAddress: WALLET,
+        body: { body: 'random stranger' },
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 403 });
+    expect(mockPut).not.toHaveBeenCalled();
+  });
+
+  it('allows the LEAD DRep of this committee even if delegated elsewhere', async () => {
+    wireDdbMocks({
+      post: buildPostWithComments([]),
+      committee: buildCommittee({ leadWallet: WALLET }),
+    });
+    // Lead is delegated to some other DRep (or undelegated) — doesn't
+    // matter, the role-holder branch wins.
+    mockLookup.mockResolvedValueOnce({ drepId: OTHER_DREP_ID, source: 'koios' });
+
+    const res = (await handler(
+      buildEvent({
+        drepId: DREP_ID,
+        postId: POST_ID,
+        walletAddress: WALLET,
+        body: { body: 'lead chime-in' },
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 200 });
+    expect(mockPut).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows a committee_member of this committee even if delegated elsewhere', async () => {
+    wireDdbMocks({
+      post: buildPostWithComments([]),
+      committee: buildCommittee({ memberWallets: [WALLET] }),
+    });
+    mockLookup.mockResolvedValueOnce({ drepId: null, source: 'koios' });
+
+    const res = (await handler(
+      buildEvent({
+        drepId: DREP_ID,
+        postId: POST_ID,
+        walletAddress: WALLET,
+        body: { body: 'committee member voice' },
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 200 });
+    expect(mockPut).toHaveBeenCalledTimes(1);
+  });
+
+  it('soft-allows when Koios+Blockfrost both fail (source: null)', async () => {
+    // Documented behavior: if we can't determine the caller's
+    // delegation, we don't 503 — we fall through to "allow" so the
+    // surface keeps working during a transient upstream outage.
+    wireDdbMocks({ post: buildPostWithComments([]), committee: buildCommittee() });
+    mockLookup.mockResolvedValueOnce({ drepId: null, source: null });
+
+    const res = (await handler(
+      buildEvent({
+        drepId: DREP_ID,
+        postId: POST_ID,
+        walletAddress: WALLET,
+        body: { body: 'koios is down' },
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 200 });
+    expect(mockPut).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a wallet that is delegated to a different DRep even when the committee row is missing', async () => {
+    // No committee row → no role-holder match available, but the
+    // wallet is definitively delegated to a different DRep, so reject.
+    wireDdbMocks({ post: buildPostWithComments([]), committee: undefined });
+    mockLookup.mockResolvedValueOnce({ drepId: OTHER_DREP_ID, source: 'koios' });
+
+    const res = (await handler(
+      buildEvent({
+        drepId: DREP_ID,
+        postId: POST_ID,
+        walletAddress: WALLET,
+        body: { body: 'no committee, wrong drep' },
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 403 });
     expect(mockPut).not.toHaveBeenCalled();
   });
 });
