@@ -33,16 +33,19 @@ const ENRICHMENT_CACHE_TTL_MS = 5 * 60 * 1000;
 
 /** Per-DRep on-demand cache contents.
  *
- *  `delegatorCountLive` is the resolved count; `delegatorCountTruncated`
- *  flags when Koios was paginated past `DREP_DELEGATORS_MAX_PAGES`
- *  (5000 rows today). The UI renders truncated counts as "{count}+".
- *  See `lib/koios.ts:fetchDRepDelegatorCount` for the pagination
- *  contract. */
+ *  `delegatorCountLive` is the resolved count; `delegatorCountIsApprox`
+ *  flags when the Koios walk hit the `MAX_DELEGATORS_WALK` cap (default
+ *  1000 rows; env-overridable). The UI renders approximate counts as
+ *  "{count}+". See `lib/koios.ts:fetchDRepDelegatorCount` for the
+ *  pagination contract.
+ *
+ *  Renamed from `delegatorCountTruncated` on 2026-05-27; the previous
+ *  shape's name implied data loss rather than "≥ count" semantics. */
 interface EnrichmentCacheEntry {
   fetchedAt: number;
   recentVotes?: DRepRecentVote[];
   delegatorCountLive?: number;
-  delegatorCountTruncated?: boolean;
+  delegatorCountIsApprox?: boolean;
 }
 
 const enrichmentCache = new Map<string, EnrichmentCacheEntry>();
@@ -112,8 +115,8 @@ async function fetchEnrichment(drepId: string): Promise<EnrichmentCacheEntry> {
   }
   if (delegatorCount) {
     entry.delegatorCountLive = delegatorCount.count;
-    if (delegatorCount.truncated) {
-      entry.delegatorCountTruncated = true;
+    if (delegatorCount.isApprox) {
+      entry.delegatorCountIsApprox = true;
     }
   }
   enrichmentCache.set(drepId, entry);
@@ -254,11 +257,11 @@ export const handler = async (
       ...(enrichment.delegatorCountLive !== undefined
         ? { delegatorCountLive: enrichment.delegatorCountLive }
         : {}),
-      // Truncation flag is only emitted when the underlying Koios walk
-      // hit the page cap; absence means the count is complete. The
+      // Approx flag is only emitted when the underlying Koios walk hit
+      // the configured cap; absence means the count is exact. The
       // frontend reads this to render "{n}+" instead of "{n}".
-      ...(enrichment.delegatorCountTruncated
-        ? { delegatorCountTruncated: true }
+      ...(enrichment.delegatorCountIsApprox
+        ? { delegatorCountIsApprox: true }
         : {}),
       ...(votingPowerHistory !== undefined
         ? { votingPowerHistory }

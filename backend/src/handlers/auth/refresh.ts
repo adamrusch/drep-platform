@@ -26,7 +26,7 @@ export const handler = async (
       authCtx.walletAddress,
       authCtx.roles,
       'normal',
-      authCtx.drepId,
+      authCtx.registeredDrepId,
     );
 
     const cookieHeader = buildSetCookieHeader(token, 'normal');

@@ -4,19 +4,30 @@ import type { UserRole } from '../lib/types';
 export interface AuthContext {
   walletAddress: string;
   roles: UserRole[];
-  drepId?: string;
+  /** The caller's REGISTERED-DRep id, if any (i.e. they completed
+   *  `/drep/register`). This is NOT the DRep they delegate to — for
+   *  that, see `lookupCurrentDrep` / `/auth/me`'s `delegatedToDrepId`.
+   *  Renamed from `drepId` on 2026-05-27 for semantic clarity. */
+  registeredDrepId?: string;
   sessionType?: string;
 }
 
 /**
  * Shape produced by our HTTP API v2 Lambda authorizer (simple response form).
  * Delivered to handlers at `event.requestContext.authorizer.lambda`.
+ *
+ * Both `registeredDrepId` (new) and `drepId` (legacy) are accepted on
+ * read — the authorizer Lambda may still be on the old code path during
+ * the rollout window where the authorizer Lambda and downstream handler
+ * Lambdas redeploy independently. New field wins. Legacy field can be
+ * removed from this shape after 2026-06-03 (one JWT TTL after rollout).
  */
 interface LambdaAuthorizerContext {
   walletAddress?: string;
   roles?: string;
   sessionType?: string;
-  drepId?: string;
+  registeredDrepId?: string;
+  drepId?: string; // legacy — remove after 2026-06-03
 }
 
 /**
@@ -56,10 +67,15 @@ export function extractAuthContext(
     }
   }
 
+  // Prefer the new field, fall back to legacy for in-flight authorizer
+  // payloads. See the `LambdaAuthorizerContext` shape for the deletion
+  // trigger date.
+  const registeredDrepId = ctx.registeredDrepId ?? ctx.drepId;
+
   return {
     walletAddress,
     roles,
-    drepId: ctx.drepId,
+    registeredDrepId,
     sessionType: ctx.sessionType,
   };
 }
