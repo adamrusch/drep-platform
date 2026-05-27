@@ -106,6 +106,13 @@ export class ApiStack extends cdk.Stack {
       databaseStack.commentsTable,
       databaseStack.commentVotesTable,
       databaseStack.clubhousePostsTable,
+      // Read-only-from-API in practice (the sync Lambdas own the
+      // writes), but granted RW here to match the rest of the loop's
+      // symmetry and unblock future ad-hoc admin tools without an
+      // infra change. The hot read path is `getPoolName` /
+      // `getCCMemberName` in `lib/recognition.ts`.
+      databaseStack.poolMetadataTable,
+      databaseStack.ccMembersTable,
       databaseStack.auditLogTable,
       databaseStack.authNoncesTable,
     ]) {

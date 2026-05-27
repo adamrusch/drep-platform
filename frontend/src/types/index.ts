@@ -124,15 +124,34 @@ export type VoteVoterRole = 'DRep' | 'SPO' | 'ConstitutionalCommittee';
  * the UI renders them with `line-through` styling so the full audit trail
  * is visible without misleading the reader about which vote is "live".
  *
- * `votingPowerLovelace` is the voter's CURRENT voting power, NOT power
- * at time of vote (the persisted row doesn't carry per-epoch power; see
- * the TODO in `backend/src/lib/votes.ts`).
+ * `votingPowerLovelace` is the voter's power AT THE TIME OF THE VOTE
+ * when the historical `POWER#{epoch}` snapshot is available in the
+ * `drep_directory` cache; otherwise it's their CURRENT power and
+ * `votingPowerIsApprox === true` flags that the row should render with
+ * an asterisk and a "historical snapshot unavailable" tooltip.
  */
 export interface ActionVoteRecord {
   voterRole: VoteVoterRole;
   voterId: string;
   voterDisplayName?: string;
   votingPowerLovelace?: string;
+  /** When true, `votingPowerLovelace` is the voter's CURRENT power
+   *  (the historical snapshot for the vote's epoch was unavailable).
+   *  Absent / undefined when the power is the genuine historical
+   *  snapshot. */
+  votingPowerIsApprox?: boolean;
+  /** SPO voter only — registered pool ticker (e.g. "ADA") from the
+   *  `pool_metadata` cache. The frontend renders
+   *  `${ticker} — ${name}` when both are present. */
+  poolTicker?: string;
+  /** SPO voter only — registered pool name from the `pool_metadata`
+   *  cache. */
+  poolName?: string;
+  /** Constitutional Committee voter only — display name from the
+   *  `cc_members` cache. When absent the frontend renders
+   *  `CC Member ({hotCred truncated})` so individuals stay
+   *  distinguishable. */
+  ccName?: string;
   vote: 'Yes' | 'No' | 'Abstain';
   votedAt: string;
   blockTime: number;
