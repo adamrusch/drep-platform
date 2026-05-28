@@ -800,20 +800,100 @@ export function groupVotesByProposal(
   return out;
 }
 
-// ---- Tip / current epoch ----
+// ---- Tip / current epoch + staleness check ----
 
-/** `/tip` returns one row with the current chain tip (epoch, slot, block). We
- *  only consume `.epoch_no` today. Cached briefly — the sync calls this once
- *  per cycle but the cache lets a future warm-Lambda re-invocation skip the
- *  redundant call. Throws `KoiosError` so the caller can fall back to
- *  Blockfrost's `epochsLatest`. */
+/** `/tip` returns one row with the current chain tip (epoch, slot, block,
+ *  block_time). We consume `epoch_no` and `block_time`; the latter feeds
+ *  the db-sync staleness check below. Cached briefly — syncs call this
+ *  once per cycle but the cache lets a future warm-Lambda re-invocation
+ *  skip the redundant call. Throws `KoiosError` so the caller can fall
+ *  back to Blockfrost's `epochsLatest`. */
 const TIP_CACHE_TTL_MS = 30_000;
-let _tipCache: CacheEntry<{ epoch_no: number }> | null = null;
 
-export async function getCurrentEpoch(): Promise<number> {
-  const now = Date.now();
-  if (_tipCache && now - _tipCache.fetchedAt < TIP_CACHE_TTL_MS) {
-    return _tipCache.value.epoch_no;
+/**
+ * Threshold beyond which Koios's db-sync is considered "lagging" — i.e.
+ * its returned data is materially staler than what's on-chain.
+ *
+ * Why 5 minutes: a healthy Koios node tracks the chain tip within
+ * ~20-60s (a block + a small db-sync ingest delay). Lag of 1-2 min
+ * happens routinely under load and is fine. Past 5 minutes the user is
+ * looking at delegation / vote / proposal data that may be missing
+ * activity from the last several blocks — which on a governance app
+ * like drep.tools is a correctness problem worth surfacing.
+ *
+ * Kept as a constant rather than env-overrideable for now — the
+ * threshold is a product decision, not a per-environment knob. The
+ * CloudWatch metric filter on `[Koios tip lag]` can be tuned at the
+ * alarm layer if 5 min ever turns out wrong.
+ */
+export const KOIOS_TIP_LAG_THRESHOLD_SEC = 5 * 60;
+
+/**
+ * Result of a `/tip` fetch with staleness information attached. Returned
+ * by `getCurrentTip` and consumed internally by `getCurrentEpoch`.
+ *
+ * `lagSec` is `Math.max(0, wallClock - blockTime)` in seconds. A
+ * negative computed value (clock skew between Lambda and Cardano nodes,
+ * or a tip block from "the future") clamps to 0 — we never report
+ * negative lag.
+ *
+ * `isStale` is `lagSec > KOIOS_TIP_LAG_THRESHOLD_SEC`. Callers can use
+ * this directly to decorate sync results without re-deriving the
+ * comparison.
+ */
+export interface KoiosTipInfo {
+  /** Current epoch number, mirroring `getCurrentEpoch`. */
+  epochNo: number;
+  /** Tip block's Unix-seconds timestamp from Koios. */
+  blockTime: number;
+  /** How many seconds behind wall-clock the tip block is. >=0. */
+  lagSec: number;
+  /** True when lagSec exceeds `KOIOS_TIP_LAG_THRESHOLD_SEC`. */
+  isStale: boolean;
+}
+
+let _tipCache: CacheEntry<KoiosTipInfo> | null = null;
+
+/**
+ * Compute the lag in seconds between a tip block's `block_time` (Unix
+ * seconds from Koios) and wall-clock `nowMs` (milliseconds from
+ * `Date.now()`). Clamps at zero — a "future" tip means clock skew or a
+ * test fixture, not negative lag.
+ *
+ * Exported for unit testing. The integration is exercised through
+ * `getCurrentTip` with a mocked fetch.
+ */
+export function computeTipLagSec(blockTime: number, nowMs: number): number {
+  if (!Number.isFinite(blockTime) || !Number.isFinite(nowMs)) return 0;
+  const lag = Math.floor(nowMs / 1000) - Math.floor(blockTime);
+  return lag > 0 ? lag : 0;
+}
+
+/**
+ * Fetch `/tip` and decorate with staleness info. Cached at module scope
+ * for `TIP_CACHE_TTL_MS`. On a stale tip (lag > threshold) the function
+ * `console.warn`s a structured `[Koios tip lag]` line — designed so a
+ * CloudWatch metric filter / alarm can flag db-sync stalls without
+ * needing a separate scheduled job. The log line is emitted once per
+ * cold-cache fetch — repeated warm-cache calls within the 30s TTL do
+ * NOT re-emit (the warning would be noise, and the underlying data
+ * hasn't changed).
+ *
+ * The returned `KoiosTipInfo.lagSec` lets callers (syncs) thread the
+ * value into their own result/log shapes so a sync's CloudWatch log
+ * line surfaces the lag inline with the per-cycle counters. The
+ * structured warn is the alarming hook; the per-sync logging is the
+ * forensic hook.
+ *
+ * Throws `KoiosError` on failure so the caller can fall back to
+ * Blockfrost's `epochsLatest` (which carries `start_time` / `end_time`
+ * and can also be used for a similar staleness signal, though we don't
+ * compute one for it today).
+ */
+export async function getCurrentTip(): Promise<KoiosTipInfo> {
+  const nowMs = Date.now();
+  if (_tipCache && nowMs - _tipCache.fetchedAt < TIP_CACHE_TTL_MS) {
+    return _tipCache.value;
   }
   const res = await koiosFetch('/tip', { method: 'GET', timeoutMs: 5_000 });
   if (!res.ok) {
@@ -822,13 +902,50 @@ export async function getCurrentEpoch(): Promise<number> {
   }
   const parsed = (await readJsonCapped(res, '/tip')) as unknown;
   const row = Array.isArray(parsed) ? parsed[0] : parsed;
-  if (!row || typeof row !== 'object' || typeof (row as { epoch_no?: unknown }).epoch_no !== 'number') {
+  if (!row || typeof row !== 'object') {
+    _tipCache = null;
+    throw new KoiosError('/tip', 'missing tip row');
+  }
+  const r = row as { epoch_no?: unknown; block_time?: unknown };
+  if (typeof r.epoch_no !== 'number') {
     _tipCache = null;
     throw new KoiosError('/tip', 'missing epoch_no');
   }
-  const epoch = (row as { epoch_no: number }).epoch_no;
-  _tipCache = { fetchedAt: now, value: { epoch_no: epoch } };
-  return epoch;
+  if (typeof r.block_time !== 'number') {
+    _tipCache = null;
+    throw new KoiosError('/tip', 'missing block_time');
+  }
+  const lagSec = computeTipLagSec(r.block_time, nowMs);
+  const isStale = lagSec > KOIOS_TIP_LAG_THRESHOLD_SEC;
+  const info: KoiosTipInfo = {
+    epochNo: r.epoch_no,
+    blockTime: r.block_time,
+    lagSec,
+    isStale,
+  };
+  if (isStale) {
+    // Structured single-line log for a CloudWatch metric filter / alarm.
+    // The literal `[Koios tip lag]` prefix is the filter pattern hook.
+    // Keep the key=value shape on one line so a metric filter can
+    // extract `lagSec` numerically.
+    console.warn(
+      `[Koios tip lag] lagSec=${lagSec} thresholdSec=${KOIOS_TIP_LAG_THRESHOLD_SEC} blockTime=${r.block_time} epochNo=${r.epoch_no}`,
+    );
+  }
+  _tipCache = { fetchedAt: nowMs, value: info };
+  return info;
+}
+
+/**
+ * Back-compat wrapper. Existing callers (cc-members, governance-intake,
+ * epoch handler) consume only the current epoch number, so we keep the
+ * narrow shape they already use. The staleness check fires inside
+ * `getCurrentTip` regardless — callers that DO want the lag value
+ * should switch to `getCurrentTip` directly.
+ */
+export async function getCurrentEpoch(): Promise<number> {
+  const info = await getCurrentTip();
+  return info.epochNo;
 }
 
 // ---- Account info (Phase C: replaces Blockfrost `accounts/{stake_address}`) ----
@@ -1285,104 +1402,119 @@ export async function fetchDRepDelegatorCount(
   return { count, isApprox: true };
 }
 
-/** Hard page cap used by `fetchPredefinedDRepDelegatorCount`. Predefined
- *  DReps (Always Abstain, Always No Confidence) can have millions of
- *  delegators on mainnet, so the regular per-detail-request cap (1000 rows)
- *  would be uselessly approximate. The sync runs in the directory Lambda
- *  with a 5-min timeout, so we can afford a much deeper walk. 100 pages ×
- *  1000 rows = 100k rows is enough headroom for the predefined accounts
- *  today (Abstain ≈ 60k delegators) while still bounded against a runaway
- *  walk. At Koios's anonymous-tier latency (~200-500ms/page), 100 pages
- *  is ~30-50s wall-clock — well within the directory sync's budget. */
-const PREDEFINED_DREP_DELEGATORS_MAX_PAGES = 100;
-
 /**
  * Walk Koios `/drep_delegators` to count the stake accounts delegating to
  * one of the two predefined DReps (`drep_always_abstain` /
- * `drep_always_no_confidence`). Same on-the-wire shape as
- * `fetchDRepDelegatorCount` but a much higher page cap (100 vs the
- * normal 10). This is called once per predefined DRep per directory-sync
- * cycle (30 min), so the worst-case Koios round-trip count per cycle is
- * 2 DReps × 100 pages = 200 round-trips — comfortably under our anonymous-
- * tier RPS budget for the directory sync window.
+ * `drep_always_no_confidence`).
  *
- * Returns the same `{count, isApprox}` shape:
- *   - `isApprox: false` only when we saw a short page (the walk completed).
- *   - `isApprox: true` when we hit the 100-page cap or any mid-walk
- *     failure. Caller persists the count regardless — even an approximate
- *     `100k+` value is dramatically more informative than `undefined`.
+ * # Why this is a single request, not a page walk
  *
- * Returns `null` only when the first page fails entirely (no rows
- * accumulated). Caller should NOT clobber the previous cycle's
- * `delegatorCount` on `null` — it's a "this cycle failed; keep the old
- * value" signal.
+ * The predefined accounts have hundreds of thousands of delegators on
+ * mainnet (Abstain alone was 181,308 on 2026-05-28). An earlier revision
+ * walked `/drep_delegators` 100 pages × 1000 rows = up to 100k rows per
+ * cycle — but Abstain genuinely has more than that, so the walk always
+ * hit the cap, persisted an underestimate, and (worse) routinely timed
+ * out the 5-min directory-sync Lambda. The on-record symptom was
+ * `delegatorCount: 5000` on production while Koios reported 181k.
+ *
+ * The fix uses PostgREST's exact-count header. Sending
+ * `Prefer: count=exact` on any `/drep_delegators` request makes Koios
+ * include `Content-Range: 0-{returned-1}/{total}` on the response. We
+ * issue one request with `Range: 0-0` (one row, minimal payload),
+ * discard the body, and parse `<TOTAL>` from `Content-Range`. One
+ * sub-second round-trip per cycle per predefined DRep — fully precise.
+ *
+ * # Failure modes
+ *
+ * - Transport / 4xx / 5xx failure: `null`. Caller treats `null` as
+ *   "preserve the previous cycle's count" rather than clobbering with
+ *   `undefined`.
+ * - Successful response but missing or malformed `Content-Range`
+ *   header: `null` (treat as a complete failure — better to keep the
+ *   prior cycle's value than synthesize a fake count).
+ *
+ * Returns `{ count, isApprox: false }` on success — the exact-count
+ * path is, by definition, exact. The `isApprox` field is kept in the
+ * shape for API parity with `fetchDRepDelegatorCount`, which still
+ * uses a walk-with-cap path for non-predefined DReps.
  */
 export async function fetchPredefinedDRepDelegatorCount(
   drepId: string,
 ): Promise<DRepDelegatorCountResult | null> {
-  const body = JSON.stringify({ _drep_id: drepId });
-  let count = 0;
-  for (let page = 0; page < PREDEFINED_DREP_DELEGATORS_MAX_PAGES; page++) {
-    let res: Response;
-    try {
-      res = await koiosFetch('/drep_delegators', {
-        method: 'POST',
-        body,
-        offset: page * PAGE_SIZE,
-        limit: PAGE_SIZE,
-        timeoutMs: 8_000,
-      });
-    } catch (err) {
-      if (page === 0) {
-        console.warn(
-          `[Koios /drep_delegators predefined] fetch failed for ${drepId}:`,
-          err,
-        );
-        return null;
-      }
-      console.warn(
-        `[Koios /drep_delegators predefined] page ${page} failed for ${drepId}, returning partial:`,
-        err,
-      );
-      return { count, isApprox: true };
-    }
-    if (!res.ok) {
-      if (page === 0) {
-        console.warn(
-          `[Koios /drep_delegators predefined] HTTP ${res.status} for ${drepId}`,
-        );
-        return null;
-      }
-      console.warn(
-        `[Koios /drep_delegators predefined] page ${page} returned HTTP ${res.status}, returning partial`,
-      );
-      return { count, isApprox: true };
-    }
-    let parsed: unknown;
-    try {
-      parsed = await readJsonCapped(res, '/drep_delegators');
-    } catch (err) {
-      if (page === 0) {
-        console.warn(
-          `[Koios /drep_delegators predefined] body parse failed for ${drepId}:`,
-          err,
-        );
-        return null;
-      }
-      return { count, isApprox: true };
-    }
-    if (!Array.isArray(parsed)) {
-      if (page === 0) return null;
-      return { count, isApprox: true };
-    }
-    const rows = parsed as KoiosDRepDelegator[];
-    count += rows.length;
-    if (rows.length < PAGE_SIZE) {
-      return { count, isApprox: false };
-    }
+  let res: Response;
+  try {
+    res = await koiosFetch('/drep_delegators', {
+      method: 'POST',
+      body: JSON.stringify({ _drep_id: drepId }),
+      // Range 0-0 means "give me at most 1 row." Combined with
+      // `Prefer: count=exact` Koios returns one delegator (which we
+      // discard) plus the full population total in the response header.
+      rangeFrom: 0,
+      rangeTo: 0,
+      headers: { Prefer: 'count=exact' },
+      timeoutMs: 8_000,
+    });
+  } catch (err) {
+    console.warn(
+      `[Koios /drep_delegators predefined count=exact] fetch failed for ${drepId}:`,
+      err,
+    );
+    return null;
   }
-  // Hit the 100-page hard cap without a short page. Surface as approximate.
-  return { count, isApprox: true };
+  // PostgREST returns 206 Partial Content (not 200) for any request that
+  // includes a Range header — the row(s) returned represent a partial
+  // slice. We accept both 200 and 206 as success.
+  if (!res.ok && res.status !== 206) {
+    console.warn(
+      `[Koios /drep_delegators predefined count=exact] HTTP ${res.status} ${res.statusText} for ${drepId}`,
+    );
+    return null;
+  }
+  // Body must be drained to release the connection back to the pool —
+  // even though we only care about the header, fetch leaves the socket
+  // open until the body is consumed or cancelled.
+  try {
+    await res.body?.cancel();
+  } catch {
+    // Best-effort drain; ignore any cancellation error.
+  }
+  const contentRange = res.headers.get('content-range');
+  const total = parseContentRangeTotal(contentRange);
+  if (total === null) {
+    console.warn(
+      `[Koios /drep_delegators predefined count=exact] missing/unparseable Content-Range for ${drepId}: ${contentRange ?? '<absent>'}`,
+    );
+    return null;
+  }
+  return { count: total, isApprox: false };
+}
+
+/**
+ * Parse the total row count out of a PostgREST `Content-Range` header.
+ *
+ * The header shape is `<from>-<to>/<total>` (e.g. `0-0/181308`) when
+ * `Prefer: count=exact` is sent. The total can also be `*` when the
+ * server declines to count (it won't for us — `count=exact` forces a
+ * number) so we treat `*` as failure rather than coerce to NaN.
+ *
+ * Returns the parsed total, or `null` on any malformed input.
+ *
+ * Exported for direct testing — the round-trip integration is exercised
+ * via `fetchPredefinedDRepDelegatorCount` with a mocked Response, but
+ * the parser itself is easier to lock down with a focused unit test.
+ */
+export function parseContentRangeTotal(header: string | null | undefined): number | null {
+  if (!header) return null;
+  const slash = header.lastIndexOf('/');
+  if (slash < 0) return null;
+  const totalStr = header.slice(slash + 1).trim();
+  if (totalStr.length === 0 || totalStr === '*') return null;
+  // Reject "0.5" / "1e5" style values that parseInt would silently
+  // truncate. Insist on an all-digits string for safety.
+  if (!/^\d+$/.test(totalStr)) return null;
+  const total = Number.parseInt(totalStr, 10);
+  if (!Number.isFinite(total) || total < 0) return null;
+  return total;
 }
 
 /**
