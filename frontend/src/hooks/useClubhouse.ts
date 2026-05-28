@@ -9,6 +9,12 @@ import type {
 
 const QUERY_KEYS = {
   posts: (drepId: string) => ['clubhouse', drepId] as const,
+  /** P0-3 migration (2026-05-28) — per-post lazy comment fetch.
+   *  Cache by (drepId, postId) so each post's comments share the
+   *  same key across collapsing/re-expanding the panel within the
+   *  TanStack staleTime window. */
+  comments: (drepId: string, postId: string) =>
+    ['clubhouse', drepId, 'post', postId, 'comments'] as const,
 };
 
 export function useClubhousePosts(drepId: string) {
@@ -17,6 +23,33 @@ export function useClubhousePosts(drepId: string) {
     queryFn: () =>
       get<PaginatedResponse<ClubhousePost>>(`/clubhouse/${encodeURIComponent(drepId)}`),
     enabled: Boolean(drepId),
+    staleTime: 30_000,
+  });
+}
+
+/**
+ * Lazy-load per-post comments from the new `clubhouse_comments` table.
+ * Only fires when the caller passes `enabled: true` — the consumer
+ * (the PostCard expand toggle) opens the panel.
+ *
+ * Returns the same shape the FE has always consumed: a list of
+ * `ClubhouseComment` rows. The backend handler strips the partition-
+ * key bookkeeping (`postKey`, `drepId`, `postId`, `depth`) before
+ * returning so the wire shape is interchangeable with the inline
+ * `post.comments[]` array.
+ */
+export function useClubhouseComments(
+  drepId: string,
+  postId: string,
+  options: { enabled?: boolean } = {},
+) {
+  return useQuery({
+    queryKey: QUERY_KEYS.comments(drepId, postId),
+    queryFn: () =>
+      get<{ items: ClubhouseComment[] }>(
+        `/clubhouse/${encodeURIComponent(drepId)}/post/${encodeURIComponent(postId)}/comments`,
+      ),
+    enabled: Boolean(drepId && postId && (options.enabled ?? false)),
     staleTime: 30_000,
   });
 }
@@ -64,7 +97,16 @@ export function useCreateClubhouseComment() {
         { body, ...(parentCommentId ? { parentCommentId } : {}) },
       ),
     onSuccess: (_data, variables) => {
+      // Invalidate the post list so the denormalized `commentCount` /
+      // `lastReplyAt` counters re-render on the collapsed badge.
       void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.posts(variables.drepId) });
+      // Also invalidate the per-post comments cache so the expanded
+      // thread shows the new comment without a manual reload. The key
+      // is the same one `useClubhouseComments` uses; if no consumer is
+      // mounted the invalidation is a cheap no-op.
+      void queryClient.invalidateQueries({
+        queryKey: QUERY_KEYS.comments(variables.drepId, variables.postId),
+      });
     },
   });
 }
