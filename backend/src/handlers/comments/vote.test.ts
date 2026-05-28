@@ -36,6 +36,12 @@ import type {
 vi.mock('../../lib/dynamodb', () => ({
   getItem: vi.fn(),
   transactWrite: vi.fn(),
+  // P0-2 (2026-05-28): the vote handler may now invoke `updateItem`
+  // BEFORE the transactWrite when it detects a legacy `S`-typed
+  // `supportLovelace` row and needs to convert it to `N` so the
+  // subsequent `ADD :delta` doesn't throw. Stub it here so tests that
+  // pass a `string` supportLovelace don't 500 on the unmocked call.
+  updateItem: vi.fn(),
   tableNames: {
     users: 'test-users',
     drepCommittees: 'test-drep_committees',
@@ -54,12 +60,13 @@ vi.mock('../../lib/recognition', () => ({
   lookupStake: vi.fn(),
 }));
 
-import { getItem, transactWrite } from '../../lib/dynamodb';
+import { getItem, transactWrite, updateItem } from '../../lib/dynamodb';
 import { lookupStake } from '../../lib/recognition';
 import { handler } from './vote';
 
 const mockGet = vi.mocked(getItem);
 const mockTransact = vi.mocked(transactWrite);
+const mockUpdate = vi.mocked(updateItem);
 const mockStake = vi.mocked(lookupStake);
 
 const ACTION_ID = 'aaaaaaaa#0';
@@ -119,6 +126,10 @@ describe('comments/vote', () => {
     mockGet.mockReset();
     mockTransact.mockReset();
     mockTransact.mockResolvedValue(undefined);
+    mockUpdate.mockReset();
+    // Default: the lazy-migration UpdateItem succeeds. Tests that want
+    // to assert the migration happened can inspect `mockUpdate.mock.calls`.
+    mockUpdate.mockResolvedValue(undefined);
     mockStake.mockReset();
     mockStake.mockResolvedValue({ lovelace: VOTER_LOVELACE, source: 'koios' });
   });
@@ -208,8 +219,12 @@ describe('comments/vote', () => {
     // Counter delta on the comment row.
     const update = t[2]!.Update!;
     expect(update.TableName).toBe('test-comments');
-    // Positive delta for an upvote (new contribution +VOTER_LOVELACE, no prior).
-    expect(update.ExpressionAttributeValues[':delta']).toBe(VOTER_LOVELACE);
+    // Positive delta for an upvote (new contribution +VOTER_LOVELACE,
+    // no prior). P0-2 fix: `:delta` is now a `bigint` (so the doc
+    // client marshals it to DDB `N`); previously it was a string and
+    // landed as `S`, throwing ValidationException on the `ADD`.
+    expect(update.ExpressionAttributeValues[':delta']).toBe(BigInt(VOTER_LOVELACE));
+    expect(typeof update.ExpressionAttributeValues[':delta']).toBe('bigint');
     expect(update.ExpressionAttributeValues[':upD']).toBe(1);
     expect(update.ExpressionAttributeValues[':downD']).toBe(0);
   });
@@ -275,14 +290,14 @@ describe('comments/vote', () => {
 
     // Counter delta: `new - prior` = `-VOTER_LOVELACE_AFTER_RECAST - VOTER_LOVELACE`
     // (the upvote was +prior, the new downvote is -new, so we go from
-    // +prior to -new, a net change of -(prior + new)).
+    // +prior to -new, a net change of -(prior + new)). P0-2: bigint.
     const update = t[2]!.Update!;
-    const expectedDelta = (
+    const expectedDelta =
       BigInt(0) -
       BigInt(VOTER_LOVELACE_AFTER_RECAST) -
-      BigInt(VOTER_LOVELACE)
-    ).toString();
+      BigInt(VOTER_LOVELACE);
     expect(update.ExpressionAttributeValues[':delta']).toBe(expectedDelta);
+    expect(typeof update.ExpressionAttributeValues[':delta']).toBe('bigint');
     // Headcount: -1 up, +1 down.
     expect(update.ExpressionAttributeValues[':upD']).toBe(-1);
     expect(update.ExpressionAttributeValues[':downD']).toBe(1);
@@ -373,10 +388,10 @@ describe('comments/vote', () => {
     // Order: ConditionCheck, Delete, Update.
     expect(t[1]!.Delete!.TableName).toBe('test-comment_votes');
     // Removing an upvote → counter goes DOWN by the prior lovelace.
+    // P0-2: `:delta` is a `bigint`.
     const update = t[2]!.Update!;
-    expect(update.ExpressionAttributeValues[':delta']).toBe(
-      (-BigInt(VOTER_LOVELACE)).toString(),
-    );
+    expect(update.ExpressionAttributeValues[':delta']).toBe(-BigInt(VOTER_LOVELACE));
+    expect(typeof update.ExpressionAttributeValues[':delta']).toBe('bigint');
     expect(update.ExpressionAttributeValues[':upD']).toBe(-1);
     expect(update.ExpressionAttributeValues[':downD']).toBe(0);
   });
@@ -395,5 +410,120 @@ describe('comments/vote', () => {
 
     expect(res).toMatchObject({ statusCode: 400 });
     expect(mockTransact).not.toHaveBeenCalled();
+  });
+
+  // ---- P0-2 (2026-05-28) regression tests ----
+
+  it('P0-2: triggers the legacy-S → N migration UpdateItem before the transactWrite when supportLovelace is a string', async () => {
+    // The bug: comments created before the P0-2 fix have
+    // `supportLovelace` stored as DDB `S`. The new vote handler
+    // detects this and runs an UpdateItem with
+    // `attribute_type(#supportLov, :sType)` to flip the type to `N`
+    // BEFORE the transactWrite tries `ADD :delta`. Without this
+    // migration the `ADD` would throw ValidationException — exactly
+    // the production bug we're fixing.
+    mockGet.mockResolvedValueOnce(buildComment(AUTHOR, '5000000000000') as never); // S-typed
+    mockGet.mockResolvedValueOnce(undefined); // no prior vote
+    mockGet.mockResolvedValueOnce(buildComment(AUTHOR, '7000000000000') as never);
+
+    await handler(
+      buildEvent({
+        walletAddress: VOTER,
+        roles: ['delegator'],
+        actionId: ACTION_ID,
+        commentId: COMMENT_ID,
+        body: { vote: 'up' },
+      }),
+    );
+
+    // UpdateItem call shape: (tableName, key, expr, names, values, condition)
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+    const [tableName, key, expr, names, values, condition] =
+      mockUpdate.mock.calls[0]!;
+    expect(tableName).toBe('test-comments');
+    expect(key).toEqual({ actionId: ACTION_ID, commentId: COMMENT_ID });
+    expect(expr).toBe('SET #supportLov = :n');
+    expect(names).toEqual({ '#supportLov': 'supportLovelace' });
+    // :n is the migrated value as a real bigint; :sType gates the
+    // ConditionExpression so a concurrent voter doesn't get clobbered.
+    expect(values).toEqual({ ':n': BigInt('5000000000000'), ':sType': 'S' });
+    expect(condition).toBe('attribute_type(#supportLov, :sType)');
+  });
+
+  it('P0-2: does NOT migrate when supportLovelace is already a bigint (new-row shape)', async () => {
+    // After this PR ships, fresh comments are written with
+    // `supportLovelace: bigint` (DDB `N`). The vote handler should
+    // skip the migration call.
+    const newShapeComment = {
+      ...((buildComment(AUTHOR, '0') as unknown) as Record<string, unknown>),
+      supportLovelace: BigInt('5000000000000'),
+    };
+    mockGet.mockResolvedValueOnce(newShapeComment as never);
+    mockGet.mockResolvedValueOnce(undefined);
+    mockGet.mockResolvedValueOnce(newShapeComment as never);
+
+    await handler(
+      buildEvent({
+        walletAddress: VOTER,
+        roles: ['delegator'],
+        actionId: ACTION_ID,
+        commentId: COMMENT_ID,
+        body: { vote: 'up' },
+      }),
+    );
+
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it('P0-2: does NOT migrate when supportLovelace is already a number (new-row shape, small value)', async () => {
+    // Smart-unwrap returns `number` for values ≤ MAX_SAFE_INTEGER, so
+    // small counters arrive as plain JS numbers. Still no migration.
+    const newShapeComment = {
+      ...((buildComment(AUTHOR, '0') as unknown) as Record<string, unknown>),
+      supportLovelace: 5_000_000_000_000, // number
+    };
+    mockGet.mockResolvedValueOnce(newShapeComment as never);
+    mockGet.mockResolvedValueOnce(undefined);
+    mockGet.mockResolvedValueOnce(newShapeComment as never);
+
+    await handler(
+      buildEvent({
+        walletAddress: VOTER,
+        roles: ['delegator'],
+        actionId: ACTION_ID,
+        commentId: COMMENT_ID,
+        body: { vote: 'up' },
+      }),
+    );
+
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it('P0-2: tolerates a concurrent-migration race (ConditionalCheckFailed on the migration UpdateItem)', async () => {
+    // Two voters race on a legacy `S` row. The first one's UpdateItem
+    // succeeds and flips the type. The second one's UpdateItem hits
+    // `ConditionalCheckFailedException` because attribute_type is no
+    // longer `S`. That MUST be swallowed (the field is already `N`
+    // when we ADD against it).
+    mockGet.mockResolvedValueOnce(buildComment(AUTHOR, '5000000000000') as never);
+    mockGet.mockResolvedValueOnce(undefined);
+    mockGet.mockResolvedValueOnce(buildComment(AUTHOR, '7000000000000') as never);
+    const condFail = new Error('already migrated');
+    condFail.name = 'ConditionalCheckFailedException';
+    mockUpdate.mockRejectedValueOnce(condFail);
+
+    const res = (await handler(
+      buildEvent({
+        walletAddress: VOTER,
+        roles: ['delegator'],
+        actionId: ACTION_ID,
+        commentId: COMMENT_ID,
+        body: { vote: 'up' },
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 200 });
+    // The transactWrite still runs — the migration race is benign.
+    expect(mockTransact).toHaveBeenCalledTimes(1);
   });
 });

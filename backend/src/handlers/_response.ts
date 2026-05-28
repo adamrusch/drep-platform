@@ -42,6 +42,24 @@ export const corsHeaders: Record<string, string> = {
   'Vary': 'Origin',
 };
 
+/**
+ * `JSON.stringify` doesn't know how to serialise `bigint` — it throws
+ * `TypeError: Do not know how to serialize a BigInt`. After the 2026-05-28
+ * P0-2 fix, DDB Number fields whose values exceed `Number.MAX_SAFE_INTEGER`
+ * arrive in handlers as `bigint` (e.g. `comments.supportLovelace`). We
+ * convert to string at the response boundary — the same format Cardano
+ * tooling already uses for lovelace amounts everywhere else on the wire,
+ * so the frontend doesn't need to change. Lossless, since BigInt → string
+ * preserves every digit.
+ */
+function bigintReplacer(_key: string, value: unknown): unknown {
+  return typeof value === 'bigint' ? value.toString() : value;
+}
+
+function safeStringify(value: unknown): string {
+  return JSON.stringify(value, bigintReplacer);
+}
+
 export function ok<T>(
   data: T,
   extraHeadersOrCookies?: Record<string, string> | string[],
@@ -55,7 +73,7 @@ export function ok<T>(
   const response: APIGatewayProxyResultV2 = {
     statusCode: 200,
     headers: extraHeaders ? { ...corsHeaders, ...extraHeaders } : corsHeaders,
-    body: JSON.stringify({ data }),
+    body: safeStringify({ data }),
   };
   if (cookies?.length) {
     (response as Record<string, unknown>)['cookies'] = cookies;
@@ -67,7 +85,7 @@ export function created<T>(data: T): APIGatewayProxyResultV2 {
   return {
     statusCode: 201,
     headers: corsHeaders,
-    body: JSON.stringify({ data }),
+    body: safeStringify({ data }),
   };
 }
 

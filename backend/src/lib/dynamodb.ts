@@ -25,13 +25,61 @@ const rawClient = new DynamoDBClient({
   region: process.env['AWS_REGION'] ?? 'us-east-1',
 });
 
+/**
+ * DDB number unmarshaller — returns `bigint` for any DynamoDB `N` value
+ * whose magnitude exceeds `Number.MAX_SAFE_INTEGER`, otherwise `number`.
+ *
+ * # Why this is non-default
+ *
+ * The lib-dynamodb default (`wrapNumbers: false`) parses every `N` as a
+ * native JS `number`, silently losing precision for values past 2^53
+ * (≈ 9.0×10^15). On Cardano mainnet, lovelace accumulators like
+ * `comments.supportLovelace` can grow past that ceiling (total ADA
+ * supply ≈ 4.5×10^16 lovelace), so a popular comment's running support
+ * total would drift after enough votes. The 2026-05-28 P0-2 fix flipped
+ * `supportLovelace` from `S` to `N` so that DDB's atomic `ADD` could
+ * be used; this complementary unmarshaller keeps the read side honest.
+ *
+ * # Why `bigint` only past the safe-int threshold
+ *
+ * Returning `bigint` for EVERY `N` would change the runtime type of
+ * many existing numeric fields (`upvoteCount`, `enrichmentVersion`,
+ * `epochNo`, …) which are typed as `number` everywhere and would
+ * silently break arithmetic (`bigint + number` throws TypeError). The
+ * threshold means: small counters keep their existing `number` type;
+ * only the handful of fields that can grow past 2^53 (today only
+ * `supportLovelace`) start arriving as `bigint`. Consumers of those
+ * fields already pass through `safeBigInt` or `BigInt(…)` which accept
+ * both `number` and `bigint`.
+ */
+function smartUnwrapNumber(value: string): number | bigint {
+  // Floating-point-shaped values (decimals, scientific notation) can't be
+  // BigInt; let them through as JS numbers. DDB rarely stores non-integer
+  // numerics in this codebase but the guard is cheap.
+  if (value.includes('.') || value.includes('e') || value.includes('E')) {
+    return Number(value);
+  }
+  try {
+    const asBig = BigInt(value);
+    if (
+      asBig <= BigInt(Number.MAX_SAFE_INTEGER) &&
+      asBig >= BigInt(Number.MIN_SAFE_INTEGER)
+    ) {
+      return Number(value);
+    }
+    return asBig;
+  } catch {
+    return Number(value);
+  }
+}
+
 export const docClient = DynamoDBDocumentClient.from(rawClient, {
   marshallOptions: {
     removeUndefinedValues: true,
     convertEmptyValues: false,
   },
   unmarshallOptions: {
-    wrapNumbers: false,
+    wrapNumbers: smartUnwrapNumber,
   },
 });
 

@@ -1,5 +1,5 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer } from 'aws-lambda';
-import type { UserRole } from '../lib/types';
+import type { CommitteeMemberItem, UserRole } from '../lib/types';
 
 export interface AuthContext {
   walletAddress: string;
@@ -100,6 +100,18 @@ export function requireRole(
 /**
  * Checks that the caller's walletAddress matches the target wallet,
  * OR that the caller has at least one of the override roles.
+ *
+ * ⚠ Note: this honors a role globally — a caller who holds e.g.
+ * `lead_drep` ANYWHERE passes the check. That's almost never what
+ * you want for resource-scoped permissions: use
+ * `requireOwnerOrCommitteeLead` instead when the resource belongs to
+ * a SPECIFIC committee, so the lead-DRep override only fires when
+ * the caller actually leads THAT committee.
+ *
+ * The 2026-05-28 P0-4 audit retired both prior callers of this helper
+ * because they were both DRep-scoped resources (clubhouse posts and
+ * action comments). The helper is kept for future use cases where a
+ * truly platform-wide role override IS the intended semantic.
  */
 export function requireOwnerOrRole(
   authCtx: AuthContext,
@@ -109,6 +121,83 @@ export function requireOwnerOrRole(
   if (authCtx.walletAddress === targetWallet) return;
   const hasOverride = overrideRoles.some((r) => authCtx.roles.includes(r));
   if (!hasOverride) {
+    throw new AuthorizationError('You can only modify your own resources', 403);
+  }
+}
+
+/**
+ * Checks that the caller can act on a resource owned by `targetWallet`
+ * within a SPECIFIC DRep committee:
+ *
+ *   - the caller IS the owner, OR
+ *   - the caller is the lead DRep of `committee` (i.e. its
+ *     `leadWallet`), OR
+ *   - the caller is listed as a `lead_drep` in `committee.members`.
+ *
+ * Throws `AuthorizationError` otherwise.
+ *
+ * # Why this exists (P0-4, 2026-05-28 audit)
+ *
+ * The platform previously used `requireOwnerOrRole(authCtx, owner,
+ * 'lead_drep')` for clubhouse post deletion, which honors the role
+ * GLOBALLY: any wallet that ever registered a committee (and thus
+ * holds `lead_drep` in its JWT claims) could delete posts in EVERY
+ * clubhouse — including auto-posts owned by the governance feed.
+ * Scoping the override to the committee being acted on closes the
+ * privilege-escalation path.
+ *
+ * `committee` may be `undefined` when no committee row exists for the
+ * resource's DRep (e.g. an auto-posted GA in a clubhouse whose lead
+ * never registered). In that case there is no one with a lead-DRep
+ * override and the owner-only branch applies.
+ */
+export function requireOwnerOrCommitteeLead(
+  authCtx: AuthContext,
+  targetWallet: string,
+  committee: {
+    leadWallet: string;
+    members?: ReadonlyArray<CommitteeMemberItem>;
+  } | undefined,
+): void {
+  if (authCtx.walletAddress === targetWallet) return;
+  if (committee) {
+    if (committee.leadWallet === authCtx.walletAddress) return;
+    if (Array.isArray(committee.members)) {
+      // A `lead_drep`-role member of this specific committee also
+      // counts as a lead for moderation purposes. `committee_member`
+      // and `trusted_delegator` do NOT — they have posting rights,
+      // not moderation rights.
+      const isLeadMember = committee.members.some(
+        (m) => m.walletAddress === authCtx.walletAddress && m.role === 'lead_drep',
+      );
+      if (isLeadMember) return;
+    }
+  }
+  throw new AuthorizationError(
+    'You can only modify your own resources, or resources in committees you lead',
+    403,
+  );
+}
+
+/**
+ * Strict owner-only check — no role override at all. Use this for
+ * resources that have no meaningful "platform moderator" concept:
+ * the only person who can delete is the author.
+ *
+ * # Why this exists (P0-4, 2026-05-28 audit)
+ *
+ * Action comments (`comments` table) are scoped to a governance
+ * action, not a DRep, so there's no natural moderator. The previous
+ * code used `requireOwnerOrRole(...,'lead_drep')` which let any
+ * wallet holding a committee-lead role anywhere delete any comment on
+ * any action. We chose option (a) from the audit brief — author-only
+ * deletion, no global platform moderator — because the platform has
+ * no product UX for action-scoped moderation and any future override
+ * should be opt-in per resource, not piggy-backed on an existing
+ * unrelated role.
+ */
+export function requireOwner(authCtx: AuthContext, targetWallet: string): void {
+  if (authCtx.walletAddress !== targetWallet) {
     throw new AuthorizationError('You can only modify your own resources', 403);
   }
 }
