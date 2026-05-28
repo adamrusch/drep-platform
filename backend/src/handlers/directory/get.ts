@@ -185,10 +185,17 @@ export const handler = async (
       enrichment = { fetchedAt: Date.now() };
       if (typeof cached.delegatorCount === 'number') {
         enrichment.delegatorCountLive = cached.delegatorCount;
-        // Intentionally NOT setting `delegatorCountIsApprox` — absence
-        // signals "exact" to the frontend. Per the locked decision in
-        // the Batch F plan, the sync-time precomputed count is treated
-        // as the authoritative figure for predefined DReps.
+        // Surface the persisted approximate-flag straight through to
+        // the response. The sync now writes this explicitly: `false`
+        // when the count came from the `Prefer: count=exact` path
+        // (always exact), `true` from a fallback walk that hit a cap.
+        // Absence on the row → treat as exact (the conservative legacy
+        // semantic — preserves the prior behavior for rows written
+        // before this field existed). The frontend renders "{n}"
+        // unless `delegatorCountIsApprox === true`, then "{n}+".
+        if (cached.delegatorCountIsApprox === true) {
+          enrichment.delegatorCountIsApprox = true;
+        }
       }
     } else {
       try {
