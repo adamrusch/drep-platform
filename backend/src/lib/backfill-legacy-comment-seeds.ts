@@ -9,7 +9,7 @@
  * suite can exercise the idempotency + upstream-failure paths.
  */
 
-import { scanItems, tableNames, transactWrite } from './dynamodb';
+import { scanItems, tableNames, transactWrite, updateItem } from './dynamodb';
 import { lookupStake } from './recognition';
 import type { CommentItem, CommentVoteItem } from './types';
 
@@ -66,6 +66,43 @@ export async function processComment(
     return;
   }
   const seedLovelace = stake.lovelace ?? '0';
+  // Bigint mirror for the counter ADD (DDB Number type — see
+  // `handlers/comments/vote.ts` and the type docblock on
+  // `CommentItem.supportLovelace` for why N, not S, since 2026-05-28).
+  let seedLovelaceBig: bigint;
+  try {
+    seedLovelaceBig = BigInt(seedLovelace);
+  } catch {
+    seedLovelaceBig = 0n;
+  }
+
+  // First: if the existing comment row's `supportLovelace` is a legacy
+  // `S` (string), convert it to `N` (number) BEFORE issuing the `ADD`.
+  // Same UpdateItem pattern as `migrateLegacySupportLovelace` in
+  // `vote.ts`, so the two paths stay aligned. The conditional swallow
+  // covers a concurrent voter who already migrated the row.
+  if (typeof comment.supportLovelace === 'string') {
+    let existing: bigint;
+    try {
+      existing = BigInt(comment.supportLovelace);
+    } catch {
+      existing = 0n;
+    }
+    try {
+      await updateItem(
+        tableNames.comments,
+        { actionId: comment.actionId, commentId: comment.commentId },
+        'SET #supportLov = :n',
+        { '#supportLov': 'supportLovelace' },
+        { ':n': existing, ':sType': 'S' },
+        'attribute_type(#supportLov, :sType)',
+      );
+    } catch (err) {
+      if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') {
+        throw err;
+      }
+    }
+  }
 
   const seedVote: CommentVoteItem = {
     commentId: comment.commentId,
@@ -92,8 +129,9 @@ export async function processComment(
       {
         // Counter mutation mirrors `buildCommentCounterUpdate` in
         // `handlers/comments/vote.ts`, using `ADD` for the BigInt
-        // string + headcount. `:delta` is the seed weight as a
-        // positive value (an upvote adds lovelace and 1 upvote).
+        // + headcount. `:delta` is the seed weight as a positive value
+        // (an upvote adds lovelace and 1 upvote) — as a JS `bigint` so
+        // the doc client marshals it to DDB `N` with full precision.
         Update: {
           TableName: tableNames.comments,
           Key: { actionId: comment.actionId, commentId: comment.commentId },
@@ -105,7 +143,7 @@ export async function processComment(
             '#updatedAt': 'updatedAt',
           },
           ExpressionAttributeValues: {
-            ':delta': seedLovelace,
+            ':delta': seedLovelaceBig,
             ':upD': 1,
             ':now': new Date().toISOString(),
           },
