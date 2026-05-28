@@ -363,13 +363,16 @@ describe('runDirectorySync — predefined DRep delegatorCount precompute', () =>
     expect(noConfPut).toBeDefined();
     expect(abstainPut!.delegatorCount).toBe(61234);
     expect(noConfPut!.delegatorCount).toBe(4567);
-    // Approx flag is NOT persisted on the directory row — the sync
-    // is the authoritative source for these DReps and the get-handler
-    // treats absence as "exact." See directory/get.ts for the contract.
-    expect(abstainPut!.delegatorCountIsApprox).toBeUndefined();
+    // Approx flag IS now persisted on the directory row — the sync
+    // explicitly writes `false` when the `count=exact` request returned
+    // the precise total (the only success case for the predefined
+    // walk path as of 2026-05-28). Absence on the row → handler treats
+    // as exact (legacy default); presence → handler propagates.
+    expect(abstainPut!.delegatorCountIsApprox).toBe(false);
+    expect(noConfPut!.delegatorCountIsApprox).toBe(false);
   });
 
-  it('still persists approximate counts when the walk hit the 100-page cap', async () => {
+  it('still persists approximate counts when the fetcher reports isApprox=true', async () => {
     mockFetchDRepInfoBatch.mockResolvedValue([
       {
         drep_id: 'drep_always_abstain',
@@ -384,9 +387,12 @@ describe('runDirectorySync — predefined DRep delegatorCount precompute', () =>
         meta_hash: null,
       },
     ]);
-    // Hit the 100-page cap — the walker stopped at 100k rows but the
-    // DRep actually has more. Still persist; an approximate "100000" is
-    // dramatically more useful than `undefined`.
+    // The current `count=exact` path always returns `isApprox: false`,
+    // but the API surface still accepts approximate results for forward
+    // compatibility (e.g. a future fallback path that walks pages if
+    // PostgREST's count=exact ever stops working). When the fetcher
+    // does report approximate, the sync persists both fields together
+    // so the API response can render "{n}+" appropriately.
     mockFetchPredefinedDRepDelegatorCount.mockResolvedValue({ count: 100000, isApprox: true });
 
     await runDirectorySync();
@@ -394,6 +400,7 @@ describe('runDirectorySync — predefined DRep delegatorCount precompute', () =>
     const puts = mockPutItem.mock.calls.map(([, item]) => item) as DRepDirectoryItem[];
     const abstainPut = puts.find((r) => r.drepId === 'drep_always_abstain');
     expect(abstainPut!.delegatorCount).toBe(100000);
+    expect(abstainPut!.delegatorCountIsApprox).toBe(true);
   });
 
   it('preserves the previous cycle delegatorCount when the fresh walk returns null', async () => {
