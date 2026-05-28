@@ -99,20 +99,7 @@ export class DatabaseStack extends cdk.Stack {
       removalPolicy: props.stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
-    // GSI: globally sort all DReps by voting power. Every row carries
-    // `votingPowerPartition: 'ALL'` so a Query against this index with
-    // a fixed partition key returns every DRep, sorted by the lexico-
-    // graphically-comparable zero-padded `votingPowerSort` field.
-    // Hot-partition risk: at ~2000 rows on PAY_PER_REQUEST with adaptive
-    // capacity this is fine; revisit if the directory grows past ~10k.
-    this.drepDirectoryTable.addGlobalSecondaryIndex({
-      indexName: 'votingPower-index',
-      partitionKey: { name: 'votingPowerPartition', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'votingPowerSort', type: dynamodb.AttributeType.STRING },
-      projectionType: dynamodb.ProjectionType.ALL,
-    });
-
-    // GSI: list every DRep profile in one Query.
+    // GSI: list every DRep profile in one Query, pre-sorted by voting power.
     //
     // **Why this exists (2026-05-26):** the table is shared with the daily
     // `drep-voting-power-history` sync, which writes `SK='POWER#NNNNNN'`
@@ -133,18 +120,33 @@ export class DatabaseStack extends cdk.Stack {
     // PROFILE rows in 2-3 Query round-trips (1MB pages × full ALL
     // projection), independent of how many POWER rows exist.
     //
-    // **Sort key:** `votingPowerSort` (already populated on PROFILE rows
-    // for the `votingPower-index` GSI). With `ScanIndexForward: false`
-    // the read path gets rows pre-sorted by voting power desc — which is
-    // the default sort the UI shows. Other sorts (name, recent,
+    // **Sort key:** `votingPowerSort` is a zero-padded numeric string set
+    // on every PROFILE row by `drep-directory.ts`. With `ScanIndexForward:
+    // false` the read path gets rows pre-sorted by voting power desc —
+    // which is the default sort the UI shows. Other sorts (name, recent,
     // delegators) still do in-memory sort on the full PROFILE set, same
     // pattern as before.
     //
-    // **Backfill required:** existing 1623 PROFILE rows must have
-    // `entityType: 'DREP_PROFILE'` set on them before this index becomes
-    // usable. The backfill script is `backend/scripts/backfill-entity-type.ts`
-    // — run it AFTER `cdk deploy DatabaseStack` (GSI is built) but BEFORE
-    // deploying the new API code that reads from this GSI.
+    // **History (2026-05-28):** a previous `votingPower-index` GSI
+    // (PK=`votingPowerPartition='ALL'`, SK=`votingPowerSort`) was dropped
+    // as part of the perf/cost batch — it was functionally equivalent to
+    // this sparse one (same single-partition + same `votingPowerSort`
+    // sort key) and had zero callers in any handler, sync, or script.
+    // Removing it eliminates ~half of the GSI write amplification on the
+    // `drep-directory` sync (was 5 GSIs, now 4). The `votingPowerPartition`
+    // attribute is still WRITTEN by the sync on PROFILE rows — left in
+    // place for the moment as harmless orphan data; cleanup is out-of-
+    // scope for the perf PR (it touches sync code reserved to a parallel
+    // PR). When that PR ships, the attribute can be removed from
+    // `buildPowerRow` / `buildDirectoryRow` and a one-shot REMOVE pass
+    // can prune the historical values.
+    //
+    // **Backfill required (historical, 2026-05-26):** existing 1623
+    // PROFILE rows must have `entityType: 'DREP_PROFILE'` set on them
+    // before this index becomes usable. The backfill script is
+    // `backend/scripts/backfill-entity-type.ts` — run it AFTER
+    // `cdk deploy DatabaseStack` (GSI is built) but BEFORE deploying the
+    // new API code that reads from this GSI.
     this.drepDirectoryTable.addGlobalSecondaryIndex({
       indexName: 'entityType-votingPower-index',
       partitionKey: { name: 'entityType', type: dynamodb.AttributeType.STRING },
@@ -153,8 +155,10 @@ export class DatabaseStack extends cdk.Stack {
     });
 
     // GSI: globally sort by delegator count. Same single-partition
-    // pattern as votingPower-index. The detail handler updates this
-    // sort key on-demand when it computes the live delegator count.
+    // pattern as the historical `votingPower-index` (now removed —
+    // see the surviving `entityType-votingPower-index` above). The
+    // detail handler updates this sort key on-demand when it computes
+    // the live delegator count.
     this.drepDirectoryTable.addGlobalSecondaryIndex({
       indexName: 'delegatorCount-index',
       partitionKey: { name: 'delegatorCountPartition', type: dynamodb.AttributeType.STRING },
