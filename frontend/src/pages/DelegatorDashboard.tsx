@@ -30,8 +30,34 @@ export function DelegatorDashboard(): React.ReactElement {
 
   const allActions = data?.pages.flatMap((p) => p.items) ?? [];
   const activeCount = allActions.filter((a) => a.status === 'active').length;
-  const currentDrep =
+
+  // Resolve "Currently delegated to" with the same priority order as
+  // ClubhouseLanding.tsx (PR #1):
+  //   1. `profile.delegatedToDrepId` — live answer from /auth/me, which
+  //      asks Koios (then Blockfrost) directly. Three states:
+  //        - string         → confirmed delegated to that DRep
+  //        - null           → confirmed undelegated (real "Not delegated")
+  //        - undefined      → unknown (upstreams down OR payment-address auth)
+  //   2. `delegationHistory[-1]` — sync-snapshotted history. Used as a
+  //      fallback only when the live lookup is undefined (unknown), AND
+  //      as the source for the DRep display name + epoch metadata that
+  //      the live field doesn't carry.
+  //
+  // The previous implementation read ONLY from `delegationHistory[-1]`,
+  // which silently showed "Not delegated" whenever the directory sync
+  // hadn't yet captured the wallet's current delegation — even when
+  // ClubhouseLanding (which uses the live field) showed it correctly.
+  const liveDrepId = profile?.delegatedToDrepId;
+  const historyEntry =
     profile?.delegationHistory?.[(profile.delegationHistory.length ?? 1) - 1];
+  const currentDrep: { drepId: string; drepName?: string; epochStart?: number } | undefined =
+    typeof liveDrepId === 'string'
+      ? historyEntry?.drepId === liveDrepId
+        ? historyEntry // name + epoch from history when it agrees with the live ID
+        : { drepId: liveDrepId } // live truth wins; show truncated bech32 until history catches up
+      : liveDrepId === null
+        ? undefined // confirmed undelegated — DO NOT fall back to stale history
+        : historyEntry; // unknown live state — best-effort history fallback
 
   const hotActions = [...allActions]
     .filter((a) => a.status === 'active')
