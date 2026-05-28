@@ -26,7 +26,7 @@ import {
   listAllVotes,
   groupVotesByProposal,
   getCommitteeMembers,
-  getCurrentEpoch,
+  getCurrentTip,
   getPredefinedDRepPower,
   KoiosError,
   type KoiosProposal,
@@ -84,6 +84,14 @@ export interface IntakeResult {
     completionSweepActions: number;
     completionSweepUnpinned: number;
   };
+  /** Koios db-sync lag this cycle, in seconds (`Math.max(0, wallClock -
+   *  tip.block_time)`). Set when the cycle was able to read `/tip`
+   *  successfully; absent when we fell back to Blockfrost or the
+   *  `/tip` call failed entirely. The structured `[Koios tip lag]`
+   *  warning is emitted inside `getCurrentTip` itself when the lag
+   *  exceeds the threshold; this field gives forensic visibility into
+   *  the same value from the sync's per-cycle log. */
+  koiosTipLagSec?: number;
 }
 
 /**
@@ -305,9 +313,18 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
   // on the fallback still trip the circuit breaker; a Koios `/tip` failure
   // simply degrades to Blockfrost (and if Blockfrost is also out, we surface
   // the error to the caller as before).
+  //
+  // The Koios `/tip` call also feeds the db-sync staleness check — when it
+  // succeeds we thread `lagSec` onto the result so the per-cycle log
+  // surfaces it inline, and `getCurrentTip` itself emits a structured
+  // `[Koios tip lag]` warning when the lag exceeds the threshold. On
+  // Blockfrost fallback we leave `koiosTipLagSec` absent (we have no
+  // analogous staleness signal for Blockfrost).
   let currentEpoch: number;
   try {
-    currentEpoch = await getCurrentEpoch();
+    const tip = await getCurrentTip();
+    currentEpoch = tip.epochNo;
+    result.koiosTipLagSec = tip.lagSec;
   } catch (koiosErr) {
     console.warn('Governance intake: Koios /tip unavailable, falling back to Blockfrost:', koiosErr);
     let epochInfo;
@@ -482,6 +499,9 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
     console.log(
       `Governance intake complete: written=${result.synced}, enrichmentSkipped=${result.skipped}, errors=${result.errors}; ` +
         `lookups: drep=${lookupBundle.lookups.drepPower?.size ?? 0}/${lookupBundle.totals.totalDrepCount} pools=${lookupBundle.lookups.poolStake?.size ?? 0}/${lookupBundle.totals.totalPoolCount} cc=${lookupBundle.totals.totalCcCount}` +
+        (result.koiosTipLagSec !== undefined
+          ? `; koiosTipLagSec=${result.koiosTipLagSec}`
+          : '') +
         (result.autoPosts
           ? `; autoPosts: fannedOutForActions=${result.autoPosts.fannedOutForActions} ` +
             `postsWritten=${result.autoPosts.postsWritten} ` +

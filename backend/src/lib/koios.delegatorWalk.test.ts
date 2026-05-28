@@ -133,110 +133,158 @@ describe('fetchDRepDelegatorCount — walk cap', () => {
 });
 
 // ============================================================
-// Predefined-DRep delegator walk (Batch F #10, 2026-05-27)
+// Predefined-DRep delegator count via PostgREST count=exact
+// (Item DATA-1, 2026-05-28)
 // ============================================================
 //
 // The predefined DReps (Always Abstain, Always No Confidence) hold most
 // of mainnet's voting power and have correspondingly large delegator
-// pools — Abstain alone is in the ~60k range. The per-request walk
-// (1000-row cap above) would always return "1000+" which is useless,
-// so the directory sync owns a separate walk path with a 100-page cap
-// (~100k rows). Same result shape as the per-request walk; the higher
-// cap is the only material difference.
+// pools — Abstain was 181,308 on 2026-05-28 (still growing). An earlier
+// revision walked `/drep_delegators` 100 pages × 1000 rows = up to 100k
+// rows per cycle, which (a) underestimated by ~80k, and (b) routinely
+// timed out the 5-min directory-sync Lambda. The new path issues ONE
+// request with `Prefer: count=exact` + `Range: 0-0` and reads the
+// exact total off the `Content-Range` response header. Sub-second,
+// always precise — no walk, no cap.
 
-describe('fetchPredefinedDRepDelegatorCount — sync-time walk', () => {
+import { parseContentRangeTotal } from './koios';
+
+/** Build a single Response with the given `content-range` header and an
+ *  empty (or trivially short) row body. Returns a fetch-mock that always
+ *  responds with this single response, no matter the request URL. */
+function mockCountExactResponse(opts: {
+  status?: number;
+  contentRange?: string | null;
+  body?: string;
+}): void {
+  const status = opts.status ?? 206;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (opts.contentRange != null) headers['Content-Range'] = opts.contentRange;
+  globalThis.fetch = vi.fn(
+    async () => new Response(opts.body ?? '[]', { status, headers }),
+  ) as unknown as typeof fetch;
+}
+
+describe('fetchPredefinedDRepDelegatorCount — count=exact path', () => {
   const originalFetch = globalThis.fetch;
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
   });
 
-  it('returns the exact count when the upstream has fewer than 100k delegators', async () => {
-    // 5500 rows total — 5 full pages + a short page. Walk completes
-    // naturally; isApprox=false because we saw the short-page signal.
-    mockKoiosPages([1000, 1000, 1000, 1000, 1000, 500]);
+  it('returns the exact total parsed from Content-Range and isApprox=false', async () => {
+    // Mainnet shape on 2026-05-28: drep_always_abstain reports
+    // "content-range: 0-0/181308" to a single Range:0-0 request with
+    // Prefer: count=exact.
+    mockCountExactResponse({ contentRange: '0-0/181308' });
 
     const result = await fetchPredefinedDRepDelegatorCount('drep_always_abstain');
 
-    expect(result).toEqual({ count: 5500, isApprox: false });
-    // Six pages consumed (5 full + 1 short).
-    expect((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(6);
+    expect(result).toEqual({ count: 181308, isApprox: false });
+    // Exactly ONE Koios round-trip. The whole point of this path is
+    // replacing the 100-page walk with a single header read.
+    expect((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1);
   });
 
-  it('returns isApprox=true at the 100-page hard cap', async () => {
-    // 100 full pages — never sees a short page. Walk stops at the cap.
-    // This is the "Abstain has > 100k delegators" path.
-    mockKoiosPages(Array.from({ length: 100 }, () => 1000));
+  it('forwards Prefer: count=exact and Range: 0-0 on the request', async () => {
+    mockCountExactResponse({ contentRange: '0-0/6915' });
+
+    await fetchPredefinedDRepDelegatorCount('drep_always_no_confidence');
+
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = new Headers(init.headers);
+    expect(headers.get('Prefer')).toBe('count=exact');
+    expect(headers.get('Range')).toBe('0-0');
+    expect(init.method).toBe('POST');
+    expect(typeof init.body).toBe('string');
+    expect(JSON.parse(init.body as string)).toEqual({ _drep_id: 'drep_always_no_confidence' });
+  });
+
+  it('handles a count=exact reply with zero delegators', async () => {
+    mockCountExactResponse({ contentRange: '*/0' });
 
     const result = await fetchPredefinedDRepDelegatorCount('drep_always_abstain');
 
-    expect(result).toEqual({ count: 100000, isApprox: true });
-    expect((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(100);
+    expect(result).toEqual({ count: 0, isApprox: false });
   });
 
-  it('returns null when the very first page fails entirely (preserve prior cycle)', async () => {
-    // First-page total failure — caller treats null as "preserve the
-    // previous cycle's count" rather than clobbering with undefined.
-    globalThis.fetch = vi.fn(async () =>
-      new Response('Service Unavailable', {
-        status: 503,
-        statusText: 'Service Unavailable',
-      }),
-    ) as unknown as typeof fetch;
+  it('returns null on a 5xx upstream failure (preserve prior cycle)', async () => {
+    // 5xx → caller treats null as "preserve the previous cycle's
+    // count" rather than clobbering with undefined.
+    mockCountExactResponse({ status: 503, contentRange: null, body: 'Service Unavailable' });
 
     const result = await fetchPredefinedDRepDelegatorCount('drep_always_abstain');
 
     expect(result).toBeNull();
   });
 
-  it('returns the partial count with isApprox=true when a mid-walk page fails', async () => {
-    // First 3 pages succeed (3000 rows), then a 503 on page 4. The
-    // caller still gets useful data — "at least 3000" is better than
-    // pretending the walk never started.
-    let call = 0;
+  it('returns null on a network failure (transport error)', async () => {
     globalThis.fetch = vi.fn(async () => {
-      call += 1;
-      if (call <= 3) {
-        const rows = Array.from({ length: 1000 }, () => ({
-          stake_address: 'stake1xxx',
-          amount: '1',
-        }));
-        return new Response(JSON.stringify(rows), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-      return new Response('Internal Server Error', { status: 500 });
+      throw new Error('ECONNRESET');
     }) as unknown as typeof fetch;
 
     const result = await fetchPredefinedDRepDelegatorCount('drep_always_abstain');
 
-    expect(result).toEqual({ count: 3000, isApprox: true });
+    expect(result).toBeNull();
   });
 
-  it('returns isApprox=true on a malformed mid-walk response (parse failure)', async () => {
-    let call = 0;
-    globalThis.fetch = vi.fn(async () => {
-      call += 1;
-      if (call === 1) {
-        const rows = Array.from({ length: 1000 }, () => ({
-          stake_address: 'stake1xxx',
-          amount: '1',
-        }));
-        return new Response(JSON.stringify(rows), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-      // Second page: malformed JSON.
-      return new Response('not-json', {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }) as unknown as typeof fetch;
+  it('returns null when Content-Range is missing entirely', async () => {
+    // Some upstream proxies strip non-standard headers. We refuse to
+    // synthesize a fake count from `0` rows — better to preserve the
+    // prior cycle than persist a misleading zero.
+    mockCountExactResponse({ contentRange: null });
 
     const result = await fetchPredefinedDRepDelegatorCount('drep_always_abstain');
 
-    expect(result).toEqual({ count: 1000, isApprox: true });
+    expect(result).toBeNull();
+  });
+
+  it('returns null when Content-Range total is unparseable', async () => {
+    mockCountExactResponse({ contentRange: '0-0/not-a-number' });
+
+    const result = await fetchPredefinedDRepDelegatorCount('drep_always_abstain');
+
+    expect(result).toBeNull();
+  });
+});
+
+describe('parseContentRangeTotal — header parser', () => {
+  it('parses the standard 0-0/<n> format', () => {
+    expect(parseContentRangeTotal('0-0/181308')).toBe(181308);
+  });
+
+  it('parses 0-999/<n> (a full first page)', () => {
+    expect(parseContentRangeTotal('0-999/1234567')).toBe(1234567);
+  });
+
+  it('parses */0 (PostgREST "no rows" shape)', () => {
+    expect(parseContentRangeTotal('*/0')).toBe(0);
+  });
+
+  it('returns null for null/undefined/empty input', () => {
+    expect(parseContentRangeTotal(null)).toBeNull();
+    expect(parseContentRangeTotal(undefined)).toBeNull();
+    expect(parseContentRangeTotal('')).toBeNull();
+  });
+
+  it('returns null when the total slot is `*` (server declined to count)', () => {
+    expect(parseContentRangeTotal('0-99/*')).toBeNull();
+  });
+
+  it('returns null for malformed totals (non-digit characters)', () => {
+    expect(parseContentRangeTotal('0-0/abc')).toBeNull();
+    expect(parseContentRangeTotal('0-0/12.5')).toBeNull();
+    expect(parseContentRangeTotal('0-0/1e5')).toBeNull();
+    expect(parseContentRangeTotal('0-0/ ')).toBeNull();
+  });
+
+  it('returns null when the `/` separator is absent', () => {
+    expect(parseContentRangeTotal('0-99')).toBeNull();
+  });
+
+  it('returns null for negative totals (defensive — should never happen)', () => {
+    expect(parseContentRangeTotal('0-0/-5')).toBeNull();
   });
 });

@@ -566,6 +566,21 @@ export interface DRepDirectoryItem {
   votingPowerSort: string;
   expiresEpoch: number | null;
   delegatorCount?: number;
+  /** When `delegatorCount` was resolved via the `Prefer: count=exact`
+   *  PostgREST path (predefined DReps as of 2026-05-28), this is set
+   *  to `false` to positively signal "the count is precise." Absence
+   *  means "we don't know" (legacy rows, or rows whose count was
+   *  resolved via a walk-with-cap path that hit the cap). The detail
+   *  handler propagates this onto the response so the frontend can
+   *  render "{n}" vs "{n}+" appropriately.
+   *
+   *  History: predefined DReps used to be counted by a 100-page walk
+   *  that timed out the directory sync, persisted a partial count
+   *  (typically 5000 — the old `MAX_DELEGATORS_WALK` ceiling), and
+   *  never surfaced that the value was an underestimate. The
+   *  single-request `count=exact` path replaced that walk so the count
+   *  is now always exact for predefined DReps. */
+  delegatorCountIsApprox?: boolean;
   /** Constant `'ALL'` partition for the `delegatorCount-index` GSI. */
   delegatorCountPartition?: 'ALL';
   /** Same fixed-width trick for delegator count sorting — 12 digits
