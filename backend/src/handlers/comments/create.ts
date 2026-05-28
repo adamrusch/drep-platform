@@ -124,8 +124,22 @@ export const handler = async (
     ]);
 
     // Seed-vote lovelace. When stake lookup fails we still create the
-    // comment with supportLovelace="0" — better UX than failing the post.
+    // comment with supportLovelace=0n — better UX than failing the post.
+    //
+    // `seedLovelace` (string) is the value that gets snapshotted on the
+    // per-vote row in `comment_votes` — that table's `lovelace` field is
+    // a string, so we leave it as-is. `seedLovelaceBig` (bigint) is the
+    // initial value of the running counter on the `comments` row, which
+    // since the 2026-05-28 P0-2 fix is a DDB `N` (so the vote handler's
+    // `ADD :delta` works). See the vote handler's `migrateLegacySupport-
+    // Lovelace` for how legacy `S`-typed rows are upgraded on first vote.
     const seedLovelace = stake.lovelace ?? '0';
+    let seedLovelaceBig: bigint;
+    try {
+      seedLovelaceBig = BigInt(seedLovelace);
+    } catch {
+      seedLovelaceBig = 0n;
+    }
 
     const commentItem: CommentItem = {
       actionId: decodedActionId,
@@ -136,7 +150,7 @@ export const handler = async (
       isDRep,
       createdAt: now,
       updatedAt: now,
-      supportLovelace: seedLovelace,
+      supportLovelace: seedLovelaceBig,
       upvoteCount: 1,
       downvoteCount: 0,
       ...(body.parentCommentId ? { parentCommentId: body.parentCommentId } : {}),
