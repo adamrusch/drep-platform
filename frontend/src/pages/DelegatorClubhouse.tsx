@@ -12,6 +12,7 @@ import {
   Radio,
 } from 'lucide-react';
 import {
+  useClubhouseComments,
   useClubhousePosts,
   useCreateClubhouseComment,
   useDeleteClubhousePost,
@@ -287,6 +288,27 @@ function PostCard({
   const createComment = useCreateClubhouseComment();
   const votePoll = useVotePoll();
 
+  // P0-3 de-inline migration (2026-05-28): the post listing handler
+  // now projects OUT the inline `comments[]` array — we only get the
+  // `commentCount` counter for the collapsed badge. When the user
+  // expands the panel, lazy-load the full comment set from the new
+  // `clubhouse_comments` table. Pre-backfill posts still carry the
+  // inline array; the merge below prefers fetched-fresh > inline.
+  const lazyComments = useClubhouseComments(drepId, post.postId, {
+    enabled: showComments,
+  });
+  const fetchedItems = lazyComments.data?.items;
+  const effectiveComments: ClubhouseComment[] =
+    fetchedItems && fetchedItems.length > 0
+      ? fetchedItems
+      : (post.comments ?? []);
+  // Badge count: prefer the denormalized counter (post-migration);
+  // fall back to the inline array length (pre-migration); finally to
+  // zero. The fetched lazy data is NOT used here — the badge is on
+  // the collapsed card and the lazy fetch only fires on expand.
+  const collapsedReplyCount =
+    post.commentCount ?? post.comments?.length ?? 0;
+
   const isAutoPost = post.type === 'auto_ga';
   // Auto-posts are immortal in the sense that they're not deletable
   // by any user (they're "owned" by the platform, not by the
@@ -308,7 +330,7 @@ function PostCard({
   const { topLevel, repliesByParent } = useMemo(() => {
     const topLevel: ClubhouseComment[] = [];
     const repliesByParent = new Map<string, ClubhouseComment[]>();
-    for (const c of post.comments) {
+    for (const c of effectiveComments) {
       if (c.parentCommentId) {
         const bucket = repliesByParent.get(c.parentCommentId) ?? [];
         bucket.push(c);
@@ -323,7 +345,7 @@ function PostCard({
       v.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
     }
     return { topLevel, repliesByParent };
-  }, [post.comments]);
+  }, [effectiveComments]);
 
   const handleAddTopLevelComment = async (): Promise<void> => {
     if (!commentBody.trim()) return;
@@ -471,12 +493,22 @@ function PostCard({
           className="inline-flex items-center gap-1.5 hover:text-[var(--text-primary)] transition-colors"
         >
           <MessageSquare size={13} strokeWidth={2} />
-          {post.comments.length} {post.comments.length === 1 ? 'reply' : 'replies'}
+          {collapsedReplyCount} {collapsedReplyCount === 1 ? 'reply' : 'replies'}
         </button>
       </div>
 
       {showComments && (
         <div className="border-l-2 border-[var(--border-subtle)] ml-2 pl-4 space-y-3 pt-2">
+          {/* P0-3 migration: tiny loading indicator while the lazy
+              comments query is in flight AND we have no inline fallback
+              to show. Pre-backfill posts that still carry the inline
+              array skip this entirely (effectiveComments is non-empty
+              from the start). */}
+          {lazyComments.isLoading && effectiveComments.length === 0 && (
+            <div className="text-[12px] text-[var(--text-tertiary)] italic">
+              Loading replies…
+            </div>
+          )}
           {topLevel.map((c) => (
             <ClubhouseCommentRow
               key={c.commentId}
