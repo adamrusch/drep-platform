@@ -550,13 +550,19 @@ export interface DRepDirectoryItem {
   deposit: string | null;
   hasScript: boolean;
   votingPower: string;
-  /** `'ALL'` — constant value used as the partition key on the
-   *  `votingPower-index` GSI so we can globally sort all DReps by power. */
+  /** `'ALL'` — was the partition key for the now-removed
+   *  `votingPower-index` GSI (2026-05-28). The sparse
+   *  `entityType-votingPower-index` replaces the same access pattern
+   *  more efficiently (sparse on PROFILE rows only). Field is still
+   *  written by the directory sync to avoid touching that code from the
+   *  perf PR; cleanup tracked as a follow-up. */
   votingPowerPartition: 'ALL';
   /** Voting power as a fixed-width zero-padded numeric string for
    *  lexicographic-sortable GSI sort key (DynamoDB sort keys are
-   *  byte-compared). 24 digits is plenty: 10^24 lovelace = 10^18 ADA,
-   *  far past total supply (45×10^9 ADA = 4.5×10^16 lovelace). */
+   *  byte-compared). Used as the sort key on the surviving
+   *  `entityType-votingPower-index` GSI. 24 digits is plenty: 10^24
+   *  lovelace = 10^18 ADA, far past total supply (45×10^9 ADA =
+   *  4.5×10^16 lovelace). */
   votingPowerSort: string;
   expiresEpoch: number | null;
   delegatorCount?: number;
