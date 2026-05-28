@@ -4,10 +4,9 @@ import { getItem, putItem, tableNames } from '../../lib/dynamodb';
 import type {
   ClubhousePostItem,
   ClubhouseCommentItem,
-  DRepCommitteeItem,
 } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
-import { lookupCurrentDrep } from '../../lib/recognition';
+import { resolveClubhouseMembership } from './_membership';
 import { ok, badRequest, forbidden, notFound, handleError } from '../_response';
 
 interface CreateClubhouseCommentBody {
@@ -50,81 +49,6 @@ function depthOfChain(
     if (!cursor) break;
   }
   return depth;
-}
-
-/**
- * Result of the clubhouse-membership check. The caller decides whether
- * to allow or reject; this function only reports the signals it found.
- */
-interface MembershipDecision {
-  /** True when the caller is a member of this clubhouse's committee
-   *  (lead DRep, committee_member, or trusted_delegator) for THIS drepId.
-   *  This is the strongest signal — role-holders can ALWAYS comment in
-   *  the clubhouses they manage, irrespective of their wallet's current
-   *  delegation. */
-  isRoleHolder: boolean;
-  /** True when the caller's wallet stake currently delegates to THIS
-   *  DRep (Koios/Blockfrost confirmed). */
-  isCurrentDelegator: boolean;
-  /** True when neither Koios nor Blockfrost could be reached to resolve
-   *  the current delegation. We fall back to "allow" in this case so a
-   *  transient upstream outage doesn't 503 the entire comment surface.
-   *  Documented as a soft-fail behavior; the role check above still
-   *  applies, so role-holders are never affected by upstream weather. */
-  delegationUnknown: boolean;
-}
-
-/**
- * Resolve the membership signals for a comment author against the
- * clubhouse identified by `drepId`. Reads the committee row (small
- * single-Get) and runs the live delegation lookup in parallel.
- *
- * The lookup is best-effort: a soft failure (both upstreams unreachable)
- * surfaces as `delegationUnknown=true`. We deliberately do NOT 503 the
- * comment write in that case — the role-holder branch still works, and
- * delegators can fall through to "allow" rather than be locked out of
- * their own clubhouse for the duration of an upstream outage. See the
- * `recognition.ts` module-header for the same fall-back pattern on
- * `/auth/me`.
- */
-async function resolveMembership(
-  walletAddress: string,
-  drepId: string,
-): Promise<MembershipDecision> {
-  const [committee, delegationResult] = await Promise.all([
-    getItem<DRepCommitteeItem>(tableNames.drepCommittees, {
-      drepId,
-      SK: 'COMMITTEE',
-    }).catch((err) => {
-      // Defensive — a committee Get failure shouldn't 5xx the whole
-      // comment surface. We log and treat the caller as a non-role-
-      // holder, which still leaves the delegator branch open.
-      console.warn(`createComment: committee Get failed for ${drepId}:`, err);
-      return undefined;
-    }),
-    lookupCurrentDrep(walletAddress).catch((err) => {
-      console.warn(`createComment: lookupCurrentDrep threw for ${walletAddress}:`, err);
-      return { drepId: null, source: null } as const;
-    }),
-  ]);
-
-  let isRoleHolder = false;
-  if (committee) {
-    if (committee.leadWallet === walletAddress) {
-      isRoleHolder = true;
-    } else if (Array.isArray(committee.members)) {
-      isRoleHolder = committee.members.some(
-        (m) => m.walletAddress === walletAddress,
-      );
-    }
-  }
-
-  return {
-    isRoleHolder,
-    isCurrentDelegator:
-      delegationResult.source !== null && delegationResult.drepId === drepId,
-    delegationUnknown: delegationResult.source === null,
-  };
 }
 
 export const handler = async (
@@ -213,7 +137,7 @@ export const handler = async (
     // Get, not an upstream call), so only the delegator path is
     // affected by upstream weather. This mirrors the pattern in
     // `lib/recognition.ts`.
-    const membership = await resolveMembership(authCtx.walletAddress, drepId);
+    const membership = await resolveClubhouseMembership(authCtx.walletAddress, drepId);
     if (!membership.isRoleHolder && !membership.isCurrentDelegator) {
       if (!membership.delegationUnknown) {
         // Definitive answer from upstream: caller is NOT delegated to

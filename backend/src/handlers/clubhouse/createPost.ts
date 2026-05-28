@@ -1,15 +1,15 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { ulid } from 'ulid';
-import { putItem, getItem, tableNames } from '../../lib/dynamodb';
+import { putItem, tableNames } from '../../lib/dynamodb';
 import type {
   ClubhousePostItem,
   ClubhousePollOption,
   ClubhousePostType,
-  DRepCommitteeItem,
 } from '../../lib/types';
-import { extractAuthContext, requireRole } from '../../middleware/role-guard';
+import { extractAuthContext } from '../../middleware/role-guard';
 import { lookupRecognition } from '../../lib/recognition';
-import { created, badRequest, forbidden, notFound, handleError } from '../_response';
+import { resolveClubhouseMembership } from './_membership';
+import { created, badRequest, forbidden, handleError } from '../_response';
 
 interface CreatePostBody {
   body: string;
@@ -41,8 +41,6 @@ export const handler = async (
     if (!drepId) {
       return badRequest('drepId path parameter is required');
     }
-
-    requireRole(authCtx, 'lead_drep', 'committee_member', 'trusted_delegator');
 
     if (!event.body) {
       return badRequest('Request body is required');
@@ -98,25 +96,48 @@ export const handler = async (
       }
     }
 
-    // Verify committee exists
-    const committee = await getItem<DRepCommitteeItem>(tableNames.drepCommittees, {
-      drepId: decodeURIComponent(drepId),
-      SK: 'COMMITTEE',
-    });
-    if (!committee) {
-      return notFound('DRep committee');
+    // ---- Membership gate ----
+    // Same gate as `createComment.ts` — see `_membership.ts` for the
+    // full policy. The Clubhouse is private to (a) the DRep's committee
+    // and (b) wallets currently delegating to this DRep on-chain.
+    //
+    // **2026-05-28 change:** the original `createPost` was role-only
+    // (requireRole on the JWT). A user reported they couldn't post in
+    // their own delegated-DRep's clubhouse because they're not a
+    // role-holder — the frontend gate had already been opened to
+    // delegators in PR #7 (Batch E) but the backend never followed.
+    // This unifies the two surfaces under the role-OR-delegator gate.
+    const drepIdDecoded = decodeURIComponent(drepId);
+    const membership = await resolveClubhouseMembership(
+      authCtx.walletAddress,
+      drepIdDecoded,
+    );
+    if (!membership.isRoleHolder && !membership.isCurrentDelegator) {
+      if (!membership.delegationUnknown) {
+        return forbidden(
+          'You must be delegated to this DRep or be a committee member to post in their clubhouse',
+        );
+      }
+      // Upstream couldn't be reached. Log and fall through to allow —
+      // a transient Koios outage shouldn't 503 the surface for
+      // legitimate delegators. Role-holders are unaffected (committee
+      // lookup is a DDB Get, not an upstream call).
+      console.warn(
+        `createPost: allowing post from ${authCtx.walletAddress} despite unknown delegation (Koios+Blockfrost both failed)`,
+      );
     }
 
-    const memberRecord = committee.members.find((m) => m.walletAddress === authCtx.walletAddress);
-    const isLeadOfThisCommittee = committee.leadWallet === authCtx.walletAddress;
-    const isMember = isLeadOfThisCommittee || memberRecord !== undefined;
-
-    if (!isMember) {
-      return forbidden('You must be a member of this committee to post');
-    }
-
+    // `isDRepPost` distinguishes posts authored BY the DRep / their
+    // committee from posts authored by delegators. Derived from the
+    // committee row when one exists; defaults to false for pure
+    // delegators (no committee role).
+    const committee = membership.committee;
+    const memberRecord = committee?.members.find(
+      (m) => m.walletAddress === authCtx.walletAddress,
+    );
+    const isLeadOfThisCommittee = committee?.leadWallet === authCtx.walletAddress;
     const isDRepPost =
-      isLeadOfThisCommittee ||
+      Boolean(isLeadOfThisCommittee) ||
       memberRecord?.role === 'lead_drep' ||
       memberRecord?.role === 'committee_member';
     const now = new Date().toISOString();
@@ -127,7 +148,7 @@ export const handler = async (
     const recognition = await lookupRecognition(authCtx.walletAddress);
 
     const post: ClubhousePostItem = {
-      drepId: decodeURIComponent(drepId),
+      drepId: drepIdDecoded,
       postId,
       authorWallet: authCtx.walletAddress,
       isDRepPost,
