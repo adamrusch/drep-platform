@@ -93,7 +93,7 @@ const NAV_ITEMS: NavItem[] = [
   },
   {
     id: 'committee',
-    label: 'Committee',
+    label: 'DRep Committees',
     href: '/committee',
     icon: Shield,
     match: (p) => p.startsWith('/committee'),

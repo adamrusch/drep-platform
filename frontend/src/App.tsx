@@ -146,8 +146,8 @@ function App(): React.ReactElement {
                 path="/committee"
                 element={
                   <ComingSoon
-                    title="Committee"
-                    description="Constitutional Committee directory, voting power, and cross-DRep coordination. Coming soon."
+                    title="DRep Committees"
+                    description="Coordination committees for DReps and their trusted delegators — committee membership, lead-DRep roles, and cross-DRep collaboration. Coming soon."
                   />
                 }
               />
