@@ -12,6 +12,8 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { get } from '@/lib/api';
+import { useMe } from '@/hooks/useAuth';
+import { useEpoch } from '@/hooks/useEpoch';
 import { Card } from '@/components/ui/Card';
 import { StatusPill } from '@/components/ui/StatusPill';
 import { Sparkline, seededRandomWalk } from '@/components/ui/Sparkline';
@@ -150,6 +152,8 @@ function shortHash(hash: string): string {
 export function DRepPublicProfile(): React.ReactElement {
   const { drepId } = useParams<{ drepId: string }>();
   const addToast = useUiStore((s) => s.addToast);
+  const { data: viewerProfile } = useMe();
+  const { data: epochInfo } = useEpoch();
 
   const { data: drep, isLoading, error } = useQuery({
     queryKey: ['drep-detail', drepId],
@@ -188,6 +192,29 @@ export function DRepPublicProfile(): React.ReactElement {
     }
   })();
   const delegatorCount = drep.delegatorCountLive ?? drep.delegatorCount;
+
+  // Viewer-specific delegation indicator: when the current viewer's
+  // wallet is delegated to THIS DRep, surface how long they've been
+  // delegated. The live source (delegatedToDrepId on /auth/me) tells us
+  // the wallet IS currently delegated; the history array gives the
+  // epoch the delegation started. If the live ID and the latest history
+  // entry agree, the duration is from that history entry's epochStart
+  // to "now" (current epoch). When history hasn't caught up (live ID
+  // confirmed but no matching history row), we still surface "Delegated
+  // to this DRep" without the epoch math.
+  const viewerDelegation = (() => {
+    if (!viewerProfile || viewerProfile.delegatedToDrepId !== drep.drepId) return null;
+    const matchingHistory = viewerProfile.delegationHistory?.find(
+      (h) => h.drepId === drep.drepId && (h.epochEnd === null || h.epochEnd === undefined),
+    );
+    const epochStart = matchingHistory?.epochStart;
+    const currentEpoch = epochInfo?.epoch;
+    const epochsDelegated =
+      typeof epochStart === 'number' && typeof currentEpoch === 'number'
+        ? Math.max(0, currentEpoch - epochStart)
+        : null;
+    return { epochStart, epochsDelegated };
+  })();
 
   const handleCopyId = async (): Promise<void> => {
     try {
@@ -268,6 +295,22 @@ export function DRepPublicProfile(): React.ReactElement {
               )}
               {drep.anchorVerified === false && (
                 <StatusPill status="warning" label="Anchor mismatch" />
+              )}
+              {viewerDelegation && (
+                <StatusPill
+                  status="passed"
+                  label={
+                    viewerDelegation.epochsDelegated !== null &&
+                    typeof viewerDelegation.epochStart === 'number'
+                      ? `You're delegated · ${viewerDelegation.epochsDelegated} epoch${viewerDelegation.epochsDelegated === 1 ? '' : 's'} (since E${viewerDelegation.epochStart})`
+                      : "You're delegated to this DRep"
+                  }
+                  title={
+                    viewerDelegation.epochsDelegated !== null
+                      ? `Cardano epochs are ~5 days each — roughly ${viewerDelegation.epochsDelegated * 5} days delegated`
+                      : 'Your wallet is currently delegated to this DRep'
+                  }
+                />
               )}
             </div>
 

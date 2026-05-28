@@ -49,15 +49,17 @@ vi.mock('../../lib/dynamodb', () => ({
 
 vi.mock('../../lib/recognition', () => ({
   lookupRecognition: vi.fn(),
+  lookupCurrentDrep: vi.fn(),
 }));
 
 import { getItem, putItem } from '../../lib/dynamodb';
-import { lookupRecognition } from '../../lib/recognition';
+import { lookupRecognition, lookupCurrentDrep } from '../../lib/recognition';
 import { handler } from './createPost';
 
 const mockGet = vi.mocked(getItem);
 const mockPut = vi.mocked(putItem);
 const mockRecognition = vi.mocked(lookupRecognition);
+const mockLookupCurrentDrep = vi.mocked(lookupCurrentDrep);
 
 // ---- Test fixtures ----
 
@@ -129,52 +131,42 @@ describe('clubhouse/createPost', () => {
     mockGet.mockReset();
     mockPut.mockReset();
     mockRecognition.mockReset();
+    mockLookupCurrentDrep.mockReset();
     // Default: recognition succeeds with mock pills.
     mockRecognition.mockResolvedValue({
       stakeAda: '1.0M ₳',
       drep: 'drep1mock',
     });
+    // Default: caller is currently delegated to THIS DRep. Most tests
+    // exercise role-holder paths (where this lookup doesn't matter for
+    // the allow/reject decision) so a "delegated correctly" default is
+    // the least-surprising baseline. Tests covering the non-delegator
+    // path override this per-test.
+    mockLookupCurrentDrep.mockResolvedValue({ drepId: DREP_ID, source: 'koios' });
     mockPut.mockResolvedValue(undefined);
   });
 
   // ---- Authorization gates ----
+  //
+  // Updated 2026-05-28: the Clubhouse posting gate was unified with the
+  // comment gate under `resolveClubhouseMembership`. The gate now
+  // accepts EITHER role-holders (committee members of THIS drep) OR
+  // wallets currently delegating to THIS drep. The legacy JWT-role-only
+  // gate ("rejects callers without lead_drep/etc.") is gone — that gate
+  // didn't match what users expected from a "clubhouse" surface (their
+  // own DRep's clubhouse should let them post, not just the committee).
 
-  it('rejects callers without one of the required roles', async () => {
-    const event = buildEvent({
-      walletAddress: LEAD_WALLET,
-      roles: ['delegator'], // not lead_drep / committee_member / trusted_delegator
-      drepId: DREP_ID,
-      body: { body: 'hi' },
-    });
-
-    const res = (await handler(event)) as APIGatewayProxyResultV2;
-    expect(res).toMatchObject({ statusCode: 403 });
-    // Committee lookup should NOT have happened — role check rejects first.
-    expect(mockGet).not.toHaveBeenCalled();
-    expect(mockPut).not.toHaveBeenCalled();
-  });
-
-  it('rejects when the DRep committee does not exist', async () => {
-    mockGet.mockResolvedValueOnce(undefined);
-    const event = buildEvent({
-      walletAddress: LEAD_WALLET,
-      roles: ['lead_drep'],
-      drepId: DREP_ID,
-      body: { body: 'hi' },
-    });
-
-    const res = (await handler(event)) as APIGatewayProxyResultV2;
-    expect(res).toMatchObject({ statusCode: 404 });
-    expect(mockPut).not.toHaveBeenCalled();
-  });
-
-  it("rejects when caller has the role but isn't a member of THIS committee", async () => {
-    // Outsider has lead_drep role (they lead some OTHER committee) but
-    // is not in this committee's `members` array — must be rejected.
+  it('rejects callers who are neither delegated to THIS DRep nor role-holders', async () => {
+    // Committee exists, caller isn't in it. Caller is delegated to a
+    // DIFFERENT DRep — definitive non-membership.
     mockGet.mockResolvedValueOnce(buildCommittee() as never);
+    mockLookupCurrentDrep.mockResolvedValue({
+      drepId: 'drep1other',
+      source: 'koios',
+    });
     const event = buildEvent({
       walletAddress: OUTSIDER_WALLET,
-      roles: ['lead_drep'],
+      roles: ['delegator'],
       drepId: DREP_ID,
       body: { body: 'hi' },
     });
@@ -182,8 +174,61 @@ describe('clubhouse/createPost', () => {
     const res = (await handler(event)) as APIGatewayProxyResultV2;
     expect(res).toMatchObject({ statusCode: 403 });
     const parsed = parseResponseBody(res);
-    expect(parsed['message']).toMatch(/member of this committee/i);
+    expect(parsed['message']).toMatch(/delegated to this DRep|committee/i);
     expect(mockPut).not.toHaveBeenCalled();
+  });
+
+  it('rejects callers when undelegated AND not a role-holder', async () => {
+    // Definitive null delegation (Koios confirmed undelegated).
+    mockGet.mockResolvedValueOnce(buildCommittee() as never);
+    mockLookupCurrentDrep.mockResolvedValue({ drepId: null, source: 'koios' });
+    const event = buildEvent({
+      walletAddress: OUTSIDER_WALLET,
+      roles: ['delegator'],
+      drepId: DREP_ID,
+      body: { body: 'hi' },
+    });
+
+    const res = (await handler(event)) as APIGatewayProxyResultV2;
+    expect(res).toMatchObject({ statusCode: 403 });
+    expect(mockPut).not.toHaveBeenCalled();
+  });
+
+  it('allows a delegator (no committee role) to post in their DRep clubhouse', async () => {
+    // Outsider has no role here; the lookup confirms they're delegated.
+    mockGet.mockResolvedValueOnce(buildCommittee() as never);
+    mockLookupCurrentDrep.mockResolvedValue({ drepId: DREP_ID, source: 'koios' });
+    const event = buildEvent({
+      walletAddress: OUTSIDER_WALLET,
+      roles: ['delegator'],
+      drepId: DREP_ID,
+      body: { body: 'hi from a delegator' },
+    });
+
+    const res = (await handler(event)) as APIGatewayProxyResultV2;
+    expect(res).toMatchObject({ statusCode: 201 });
+    expect(mockPut).toHaveBeenCalledTimes(1);
+    const written = mockPut.mock.calls[0]![1] as Record<string, unknown>;
+    // Delegator posts must NOT be marked as DRep posts — they're not
+    // authored by the DRep or their committee.
+    expect(written['isDRepPost']).toBe(false);
+  });
+
+  it('soft-allows when both Koios + Blockfrost are unreachable', async () => {
+    // source=null signals both upstreams failed. We allow the write
+    // rather than 503 — matches the recognition.ts soft-fail pattern.
+    mockGet.mockResolvedValueOnce(buildCommittee() as never);
+    mockLookupCurrentDrep.mockResolvedValue({ drepId: null, source: null });
+    const event = buildEvent({
+      walletAddress: OUTSIDER_WALLET,
+      roles: ['delegator'],
+      drepId: DREP_ID,
+      body: { body: 'upstream is down but I should still be able to post' },
+    });
+
+    const res = (await handler(event)) as APIGatewayProxyResultV2;
+    expect(res).toMatchObject({ statusCode: 201 });
+    expect(mockPut).toHaveBeenCalledTimes(1);
   });
 
   // ---- Body validation ----
