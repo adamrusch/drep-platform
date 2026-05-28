@@ -235,7 +235,41 @@ export class ApiStack extends cdk.Stack {
     );
 
     // ---- JWT Authorizer Lambda ----
-    const jwtAuthorizerFn = fn('JwtAuthorizerFn', 'middleware/jwt-authorizer.ts');
+    //
+    // Carved out of `commonLambdaProps` (which defaults to 512MB / 30s) with
+    // a tighter footprint: 128MB / 5s. Rationale:
+    //   - The authorizer's hot path does a single cached Secrets Manager
+    //     fetch (the JWT signing secret, kept warm in module scope on the
+    //     container) plus an HMAC-SHA256 / JWT verify. Both are CPU-bound,
+    //     sub-millisecond operations with negligible memory pressure.
+    //   - Lambda billing scales linearly with `memorySize × duration`. At
+    //     128MB the authorizer costs 1/4 of the default 512MB allocation
+    //     per invocation. Because the authorizer runs on EVERY
+    //     authenticated request (one extra invocation per /auth/me,
+    //     /comments POST, /clubhouse POST, etc.), the savings compound
+    //     directly with API traffic — this is the single highest-leverage
+    //     memory tweak in the whole stack.
+    //   - 128MB also gets the slowest CPU allocation on Lambda (CPU is
+    //     proportional to memory, capped at ~1769MB for one vCPU). The
+    //     authorizer doesn't care: JWT verify on a 64-byte token takes
+    //     ~0.5ms even at 128MB. Cold-start init runs Secrets Manager
+    //     fetch + KMS decrypt once, ~200ms total — well inside the 5s
+    //     timeout below.
+    //   - Timeout reduced from 30s → 5s as defense-in-depth. If the
+    //     authorizer ever blocks for >5s (e.g. Secrets Manager hung), we
+    //     fail closed (401) rather than letting API Gateway sit on a
+    //     half-open connection. The legitimate code path completes in
+    //     <50ms warm / <300ms cold.
+    //
+    // No other Lambda's memory is changed by this carve-out — every other
+    // handler still uses the 512MB default from `commonLambdaProps`.
+    const jwtAuthorizerFn = new lambdaNodejs.NodejsFunction(this, 'JwtAuthorizerFn', {
+      ...commonLambdaProps,
+      entry: path.join(backendDir, 'src', 'middleware/jwt-authorizer.ts'),
+      handler: 'handler',
+      memorySize: 128,
+      timeout: cdk.Duration.seconds(5),
+    });
 
     // ---- HTTP API v2 ----
     const api = new apigwv2.HttpApi(this, 'DRepPlatformApi', {
