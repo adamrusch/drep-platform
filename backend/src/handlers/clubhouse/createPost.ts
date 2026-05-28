@@ -157,6 +157,13 @@ export const handler = async (
       createdAt: now,
       updatedAt: now,
       type: postType,
+      // P0-3 de-inline migration (2026-05-28): initialize the denormalized
+      // counter so the `ADD :one` in `createComment.ts` starts from a
+      // known-good zero. Without this, the first comment's `ADD` would
+      // create the attribute lazily (DynamoDB treats missing as 0 for
+      // `ADD`), but reads would have to default the field too. Setting it
+      // explicitly here is cheaper than handling absence on every read.
+      commentCount: 0,
       ...(reqBody.title?.trim() ? { title: reqBody.title.trim() } : {}),
       ...(pollOptions ? { pollOptions, pollMultiple: pollMultiple ?? false } : {}),
       ...(pollClosesAt ? { pollClosesAt } : {}),

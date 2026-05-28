@@ -178,6 +178,11 @@ async function writeAutoPost(
     body,
     title,
     comments: [],
+    // P0-3 de-inline migration (2026-05-28): every freshly-written
+    // post carries the denormalized comment counter initialized to 0.
+    // See `backend/src/handlers/clubhouse/createComment.ts` for the
+    // matching `ADD :one` contract.
+    commentCount: 0,
     createdAt: now,
     updatedAt: now,
     type: 'auto_ga',

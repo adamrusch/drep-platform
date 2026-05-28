@@ -168,24 +168,52 @@ describe('GET /clubhouse/{drepId}/rail/active-threads', () => {
 
   it('serves cached results on a second call within the TTL', async () => {
     const recentIso = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    mockQuery.mockResolvedValueOnce({
-      items: [
-        buildPost({
-          postId: 'p1',
-          title: 'cached',
-          createdAt: '2026-05-25T00:00:00.000Z',
-          comments: [{ commentId: 'c1', createdAt: recentIso }],
-        }),
-      ],
-      count: 1,
-    });
+    // P0-3 migration: the handler issues TWO Query calls per uncached
+    // pass — one for posts, one per active post for its per-row
+    // comments. Build the post with denormalized `lastReplyAt` so it
+    // qualifies as active, then mock the per-post comments Query too.
+    mockQuery
+      .mockResolvedValueOnce({
+        // Call 1: post list.
+        items: [
+          {
+            ...buildPost({
+              postId: 'p1',
+              title: 'cached',
+              createdAt: '2026-05-25T00:00:00.000Z',
+            }),
+            // Denormalized counters drive the active-post filter.
+            commentCount: 1,
+            lastReplyAt: recentIso,
+            // Comments[] omitted — post.ts list projection strips it.
+            comments: undefined,
+          },
+        ],
+        count: 1,
+      })
+      .mockResolvedValueOnce({
+        // Call 2: per-post comments Query for p1.
+        items: [
+          {
+            postKey: `${DREP_ID}#p1`,
+            commentId: 'c1',
+            drepId: DREP_ID,
+            postId: 'p1',
+            authorWallet: 'stake1commenter',
+            createdAt: recentIso,
+            depth: 0,
+          },
+        ],
+        count: 1,
+      });
 
     const res1 = (await handler(buildEvent({ drepId: DREP_ID }))) as APIGatewayProxyResultV2;
     const res2 = (await handler(buildEvent({ drepId: DREP_ID }))) as APIGatewayProxyResultV2;
     expect(res1).toMatchObject({ statusCode: 200 });
     expect(res2).toMatchObject({ statusCode: 200 });
-    // Only one Query — second call was served from the in-memory cache.
-    expect(mockQuery).toHaveBeenCalledTimes(1);
+    // First call = 2 Queries (post list + per-post comments). Second
+    // call served entirely from the in-Lambda cache → no new Queries.
+    expect(mockQuery).toHaveBeenCalledTimes(2);
     // Identical payloads.
     expect(parseBody(res1)).toEqual(parseBody(res2));
   });
