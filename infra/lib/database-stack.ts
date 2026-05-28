@@ -15,6 +15,7 @@ export class DatabaseStack extends cdk.Stack {
   public readonly commentsTable: dynamodb.Table;
   public readonly commentVotesTable: dynamodb.Table;
   public readonly clubhousePostsTable: dynamodb.Table;
+  public readonly clubhouseCommentsTable: dynamodb.Table;
   public readonly poolMetadataTable: dynamodb.Table;
   public readonly ccMembersTable: dynamodb.Table;
   public readonly auditLogTable: dynamodb.Table;
@@ -333,6 +334,54 @@ export class DatabaseStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
+    // ---- clubhouse_comments ----
+    // Per-comment rows for the Clubhouse threading surface — one row per
+    // comment, replacing the inline `clubhouse_posts.comments[]` array.
+    //
+    // **Why this table exists (2026-05-28, P0-3 migration):** the legacy
+    // shape stored every comment inline on the post row, then `createComment`
+    // did a full read-modify-write of the post on each new comment. Two
+    // failure modes:
+    //   (1) Concurrent replies silently dropped comments — no version
+    //       guard on the RMW, last writer wins.
+    //   (2) DynamoDB's 400KB per-item cap was hit at ~80 × 5KB comments,
+    //       at which point ALL further writes to the post (including
+    //       pinning, edits, AND new comments) returned
+    //       `ValidationException` and the post was effectively write-
+    //       locked forever.
+    //
+    // **Shape:**
+    //   PK=`postKey` (= `${drepId}#${postId}`) — co-locates every comment
+    //     for one post in a single partition for a single `Query`.
+    //   SK=`commentId` (ULID, monotonic on insertion ordering).
+    // No GSIs at launch — the rail ranker reads via a per-post `Query`
+    // (not a global "all recent comments" scan), and the listComments
+    // handler is also a single-partition Query. Adding a GSI later is
+    // additive and doesn't require any data migration.
+    //
+    // **Counters live on the post row, not here.** `commentCount` and
+    // `lastReplyAt` are denormalized onto `clubhouse_posts` via atomic
+    // `ADD` / `SET` from the `createComment` handler — no read-modify-
+    // write of the comment set is ever required to render the badge or
+    // rank the rail.
+    //
+    // **Capacity:** today's mainnet has ~5 active clubhouses × ~50 posts
+    // × ~10 comments median = ~2500 rows steady-state. PAY_PER_REQUEST
+    // is comfortable here; the per-`Query` cost when expanding a post
+    // is ~1 RCU for a typical thread, ~50 RCU for a pathological 400-
+    // comment legacy post — still pennies.
+    //
+    // PITR on (consistent with every other DDB table in this stack;
+    // see PR #3 / Batch A). RETAIN on prod.
+    this.clubhouseCommentsTable = new dynamodb.Table(this, 'ClubhouseCommentsTable', {
+      tableName: `${this.tablePrefix}clubhouse_comments`,
+      partitionKey: { name: 'postKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'commentId', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: props.stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
     // ---- pool_metadata ----
     // SPO ticker / name / homepage cache populated daily by
     // `backend/src/sync/pool-metadata.ts` from Koios `/pool_list` +
@@ -413,6 +462,7 @@ export class DatabaseStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'CommentsTableName', { value: this.commentsTable.tableName, exportName: `${props.stage}-CommentsTableName` });
     new cdk.CfnOutput(this, 'CommentVotesTableName', { value: this.commentVotesTable.tableName, exportName: `${props.stage}-CommentVotesTableName` });
     new cdk.CfnOutput(this, 'ClubhousePostsTableName', { value: this.clubhousePostsTable.tableName, exportName: `${props.stage}-ClubhousePostsTableName` });
+    new cdk.CfnOutput(this, 'ClubhouseCommentsTableName', { value: this.clubhouseCommentsTable.tableName, exportName: `${props.stage}-ClubhouseCommentsTableName` });
     new cdk.CfnOutput(this, 'PoolMetadataTableName', { value: this.poolMetadataTable.tableName, exportName: `${props.stage}-PoolMetadataTableName` });
     new cdk.CfnOutput(this, 'CCMembersTableName', { value: this.ccMembersTable.tableName, exportName: `${props.stage}-CCMembersTableName` });
     new cdk.CfnOutput(this, 'AuditLogTableName', { value: this.auditLogTable.tableName, exportName: `${props.stage}-AuditLogTableName` });

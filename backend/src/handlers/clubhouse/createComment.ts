@@ -1,9 +1,16 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { ulid } from 'ulid';
-import { getItem, putItem, tableNames } from '../../lib/dynamodb';
-import type {
-  ClubhousePostItem,
-  ClubhouseCommentItem,
+import {
+  getItem,
+  putItem,
+  updateItem,
+  tableNames,
+} from '../../lib/dynamodb';
+import {
+  clubhouseCommentPostKey,
+  type ClubhousePostItem,
+  type ClubhouseCommentItem,
+  type ClubhouseCommentRowItem,
 } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { resolveClubhouseMembership } from './_membership';
@@ -19,47 +26,60 @@ interface CreateClubhouseCommentBody {
 }
 
 /**
- * Compute the nesting depth of a chain ending at the given comment.
+ * Handler: POST /clubhouse/{drepId}/post/{postId}/comment
+ *
+ * # P0-3 de-inline migration (2026-05-28)
+ *
+ * Comments now live in the dedicated `clubhouse_comments` table — one
+ * row per comment, partitioned by `postKey = ${drepId}#${postId}`.
+ * The handler dual-writes during the rotation window:
+ *
+ *   1. `putItem` the new row to `clubhouse_comments` with
+ *      `attribute_not_exists(commentId)` so a retry doesn't double-
+ *      insert. Depth is computed from a single `GetItem(parent)` —
+ *      no in-memory walk required.
+ *   2. Atomically bump the denormalized counter on the parent post:
+ *      `ADD commentCount :one SET lastReplyAt = :now, updatedAt = :now`.
+ *      The post is the source of truth for "{n} replies" badges and
+ *      the rail's "active in 24h" filter without ever scanning the
+ *      comment set.
+ *   3. LEGACY: append the comment to the inline `comments[]` on the
+ *      post row, with a `ConditionExpression: updatedAt = :prev` so
+ *      the silently-dropping RMW race is bounded to a single conflict
+ *      retry. This write stays alive in THIS PR — deferring its
+ *      removal until after the backfill verifies and the read path
+ *      has rotated to the new table (Phases 6 and 7 in the plan).
+ *
+ * # Depth guard
+ *
  *   - depth 0 → top-level (no `parentCommentId`)
  *   - depth 1 → reply to a top-level comment
  *   - depth 2 → sub-reply to a reply
  *
- * The Clubhouse surface caps depth at 2. A NEW reply with
- * `parentCommentId === X` would land at `depthOf(X) + 1` — so we reject
- * if `depthOf(parent) >= 2`. Implementation walks at most 2 hops, since
- * any deeper chain would already have been rejected at write time.
+ * The Clubhouse surface caps depth at 2. A new reply with
+ * `parentCommentId === X` lands at `depthOf(X) + 1`, so we reject
+ * if `depthOf(parent) >= 2`. After the migration, the parent's depth
+ * is read directly off its persisted row in `clubhouse_comments`
+ * (one `GetItem`); pre-backfill we fall back to the in-memory walk
+ * against `post.comments[]` so the gate still works during rotation.
+ *
+ * # KNOWN-ISSUE: votePoll RMW
+ *
+ * The companion handler `votePoll.ts` does its OWN read-modify-write
+ * of `pollVotes` on the post row. Oracle flagged that as a separate
+ * P1 follow-up — not addressed in this PR (which is scoped to the
+ * comment-cap blast radius). Tracked alongside Phases 5/6/7 in the
+ * plan.
  */
-function depthOfChain(
-  comments: ClubhouseCommentItem[],
-  commentId: string,
-): number {
-  // Build a lookup once — clubhouse posts cap at a handful of comments
-  // typically; even with 100s of comments the O(N) scan is negligible
-  // compared to the DDB Get this avoids.
-  const byId = new Map<string, ClubhouseCommentItem>();
-  for (const c of comments) byId.set(c.commentId, c);
-  let depth = 0;
-  let cursor = byId.get(commentId);
-  // Cap the walk at 3 hops defensively — if persisted data is corrupted
-  // and we end up with a cycle, we don't want an infinite loop. Any
-  // legitimate row should resolve in <= 2 hops.
-  for (let i = 0; i < 3 && cursor?.parentCommentId; i++) {
-    depth += 1;
-    cursor = byId.get(cursor.parentCommentId);
-    if (!cursor) break;
-  }
-  return depth;
-}
-
 export const handler = async (
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
 ): Promise<APIGatewayProxyResultV2> => {
   try {
     const authCtx = extractAuthContext(event);
     const drepIdRaw = event.pathParameters?.['drepId'];
-    const postId = event.pathParameters?.['postId'];
+    const postIdRaw = event.pathParameters?.['postId'];
 
-    if (!drepIdRaw || !postId) {
+    if (!drepIdRaw || !postIdRaw) {
       return badRequest('drepId and postId path parameters are required');
     }
 
@@ -85,10 +105,11 @@ export const handler = async (
     }
 
     const drepId = decodeURIComponent(drepIdRaw);
+    const postId = decodeURIComponent(postIdRaw);
 
     const post = await getItem<ClubhousePostItem>(tableNames.clubhousePosts, {
       drepId,
-      postId: decodeURIComponent(postId),
+      postId,
     });
 
     if (!post) {
@@ -96,60 +117,53 @@ export const handler = async (
     }
 
     // ---- Depth guard (Clubhouse: 2 levels) ----
-    // Replies on the Clubhouse surface allow ONE level deeper than the
-    // Public Comments surface — top-level → reply → sub-reply. A reply
-    // pointing at a comment whose chain depth is already 2 would create
-    // a depth-3 comment, which we reject with 400.
-    //
-    // The post stores comments in an inline `comments[]` array, so we
-    // can resolve the parent chain entirely from the in-memory post —
-    // no extra DDB Gets needed.
+    // Resolve the parent's depth, then derive `newDepth = parent.depth + 1`.
+    // The parent lookup tries the new table first (one `GetItem`); the
+    // legacy in-memory walk on `post.comments[]` is the fallback so
+    // pre-migration replies still resolve correctly during rotation.
+    let newDepth: 0 | 1 | 2 = 0;
     if (reqBody.parentCommentId !== undefined) {
-      const parent = post.comments.find(
-        (c) => c.commentId === reqBody.parentCommentId,
+      const parentCommentId = reqBody.parentCommentId;
+      const parentRow = await getItem<ClubhouseCommentRowItem>(
+        tableNames.clubhouseComments,
+        {
+          postKey: clubhouseCommentPostKey(drepId, postId),
+          commentId: parentCommentId,
+        },
       );
-      if (!parent) {
-        return notFound('Parent comment');
+      let parentDepth: number;
+      if (parentRow && typeof parentRow.depth === 'number') {
+        parentDepth = parentRow.depth;
+      } else {
+        // Fallback: pre-backfill parent — read it off the inline array.
+        const inlineParent = (post.comments ?? []).find(
+          (c) => c.commentId === parentCommentId,
+        );
+        if (!inlineParent) {
+          return notFound('Parent comment');
+        }
+        parentDepth = depthOfInlineChain(post.comments ?? [], parentCommentId);
       }
-      const parentDepth = depthOfChain(post.comments, parent.commentId);
-      // A new reply targeting `parent` lands at depth `parentDepth + 1`.
-      // We allow depths 1 and 2; reject anything that would become 3.
       if (parentDepth >= 2) {
         return badRequest('Replies nested deeper than 2 levels are not allowed');
       }
+      newDepth = (parentDepth + 1) as 0 | 1 | 2;
     }
 
     // ---- Membership gate ----
-    // The Clubhouse surface is private to (a) the DRep's committee
-    // members (lead, committee_member, trusted_delegator) AND (b) the
-    // wallets currently delegating to this DRep on-chain. Public
-    // strangers must not be able to post in another DRep's clubhouse.
-    //
-    // The OLD behavior was to skip this check entirely on the server
-    // side, relying on the frontend to hide the composer. That left
-    // the surface bypassable: a determined caller could POST directly
-    // and write into any clubhouse. We added the live-delegation
-    // lookup here in the same shape as `/auth/me`'s pattern.
-    //
-    // Soft-fail on upstream outage: if Koios AND Blockfrost are both
-    // unreachable, we fall through to "allow" rather than 503. The
-    // role-holder branch still works (committee membership is a DDB
-    // Get, not an upstream call), so only the delegator path is
-    // affected by upstream weather. This mirrors the pattern in
-    // `lib/recognition.ts`.
+    // See `_membership.ts` for the policy. Role-holders (lead /
+    // committee_member / trusted_delegator) and wallets currently
+    // delegating to THIS DRep may comment; everyone else is rejected.
+    // Soft-fail when both Koios + Blockfrost are unreachable so a
+    // transient upstream outage doesn't 503 the comment surface; the
+    // role-holder branch is unaffected (DDB Get).
     const membership = await resolveClubhouseMembership(authCtx.walletAddress, drepId);
     if (!membership.isRoleHolder && !membership.isCurrentDelegator) {
       if (!membership.delegationUnknown) {
-        // Definitive answer from upstream: caller is NOT delegated to
-        // this DRep and NOT a role-holder. Reject.
         return forbidden(
           'You must be delegated to this DRep or be a committee member to post in their clubhouse',
         );
       }
-      // Upstream couldn't be reached. Log and fall through to "allow"
-      // — this prevents a transient Koios outage from breaking the
-      // comment surface for legitimate delegators. The role-holder
-      // branch above is unaffected.
       console.warn(
         `createComment: allowing comment from ${authCtx.walletAddress} despite unknown delegation (Koios+Blockfrost both failed)`,
       );
@@ -158,25 +172,217 @@ export const handler = async (
     const commentId = ulid();
     const now = new Date().toISOString();
 
-    const newComment: ClubhouseCommentItem = {
+    // ---- (1) Write the per-row comment to the NEW table FIRST. ----
+    // `attribute_not_exists(commentId)` defends against a retried Lambda
+    // invocation re-inserting the same row. ULIDs are globally unique
+    // so a collision here means the original write already landed and
+    // we should treat it as success.
+    const commentRow: ClubhouseCommentRowItem = {
+      postKey: clubhouseCommentPostKey(drepId, postId),
+      commentId,
+      drepId,
+      postId,
+      authorWallet: authCtx.walletAddress,
+      body: reqBody.body.trim(),
+      createdAt: now,
+      depth: newDepth,
+      ...(reqBody.parentCommentId ? { parentCommentId: reqBody.parentCommentId } : {}),
+    };
+    try {
+      await putItem(
+        tableNames.clubhouseComments,
+        commentRow as unknown as Record<string, unknown>,
+        'attribute_not_exists(#commentId)',
+        { '#commentId': 'commentId' },
+      );
+    } catch (err) {
+      // A retried invocation with the same ULID hits this branch — the
+      // row is already written, treat it as success. Anything else is
+      // a real failure that should propagate.
+      if (
+        err &&
+        typeof err === 'object' &&
+        (err as { name?: string }).name === 'ConditionalCheckFailedException'
+      ) {
+        console.warn(
+          `createComment: clubhouse_comments row ${commentId} already existed — treating as idempotent re-do`,
+        );
+      } else {
+        throw err;
+      }
+    }
+
+    // ---- (2) Atomically bump the denormalized counters on the post. ----
+    // Single UpdateItem: ADD commentCount :one SET lastReplyAt = :now,
+    //                        updatedAt = :now.
+    // No conditional check needed — `ADD` is commutative on the counter,
+    // and `SET lastReplyAt` is monotonic-newest by design (every comment
+    // is newer than the previous one within a request lifetime).
+    // Best-effort: if this fails after the per-row write succeeded, the
+    // comment IS persisted; the counter will resync on the next backfill
+    // pass. We log and continue rather than 5xx the user.
+    try {
+      await updateItem(
+        tableNames.clubhousePosts,
+        { drepId, postId },
+        'ADD #cc :one SET #lra = :now, #u = :now',
+        {
+          '#cc': 'commentCount',
+          '#lra': 'lastReplyAt',
+          '#u': 'updatedAt',
+        },
+        {
+          ':one': 1,
+          ':now': now,
+        },
+      );
+    } catch (err) {
+      console.warn(
+        `createComment: counter Update failed for drepId=${drepId} postId=${postId} (comment ${commentId} was still persisted to clubhouse_comments):`,
+        err,
+      );
+    }
+
+    // ---- (3) LEGACY inline write — kept alive during rotation. ----
+    // DO NOT remove this in this PR. The read path still tolerates the
+    // inline array (until Phase 4 cuts over for new posts and Phase 6
+    // stops the inline write entirely). Keeping the dual-write means
+    // a rollback of the API code is safe: the inline array stays the
+    // source of truth for older Lambda containers.
+    //
+    // The RMW race is reduced (NOT eliminated) by guarding the write
+    // with `ConditionExpression: updatedAt = :prevUpdatedAt`. On
+    // conflict we retry ONCE by re-reading the post — anything beyond
+    // a single retry is rare enough that the new-row write above is
+    // the authoritative record. The new-table write already succeeded,
+    // so a dropped inline append only affects the legacy read path
+    // (which the migration is replacing anyway).
+    const inlineComment: ClubhouseCommentItem = {
       commentId,
       authorWallet: authCtx.walletAddress,
       body: reqBody.body.trim(),
       createdAt: now,
       ...(reqBody.parentCommentId ? { parentCommentId: reqBody.parentCommentId } : {}),
     };
+    await dualWriteLegacyInlineComment(drepId, postId, post, inlineComment, now);
 
-    const updatedPost: ClubhousePostItem = {
-      ...post,
-      comments: [...post.comments, newComment],
-      updatedAt: now,
-    };
-
-    await putItem(tableNames.clubhousePosts, updatedPost as unknown as Record<string, unknown>);
-
-    return ok(newComment);
+    return ok(inlineComment);
   } catch (err) {
     console.error('clubhouse/createComment handler error:', err);
     return handleError(err);
   }
 };
+
+/**
+ * Walk the in-memory inline-comments graph to compute a parent's depth.
+ * Used as a FALLBACK only — once the per-row backfill runs, parent
+ * depths are read directly off the persisted `clubhouse_comments` row.
+ * The walk caps defensively at 3 hops to avoid an infinite loop on
+ * pathological data; legitimate chains resolve in <= 2 hops.
+ */
+function depthOfInlineChain(
+  comments: ClubhouseCommentItem[],
+  commentId: string,
+): number {
+  const byId = new Map<string, ClubhouseCommentItem>();
+  for (const c of comments) byId.set(c.commentId, c);
+  let depth = 0;
+  let cursor = byId.get(commentId);
+  for (let i = 0; i < 3 && cursor?.parentCommentId; i++) {
+    depth += 1;
+    cursor = byId.get(cursor.parentCommentId);
+    if (!cursor) break;
+  }
+  return depth;
+}
+
+/**
+ * Append `inlineComment` to the post's inline `comments[]` array using
+ * a version-guarded `UpdateItem` (`ConditionExpression` on `updatedAt`).
+ * On conflict, refetch the post once and retry. After one retry we
+ * accept silent loss of the inline write — the per-row write above is
+ * the authoritative copy, and the inline path is being removed in a
+ * follow-up.
+ *
+ * The legacy RMW race is the reason this migration exists. Wrapping
+ * it with a version guard reduces (but does not eliminate) silent
+ * drops during the rotation window — full elimination requires Phase 6
+ * (stop the inline write) and Phase 7 (REMOVE the inline attribute).
+ */
+async function dualWriteLegacyInlineComment(
+  drepId: string,
+  postId: string,
+  initialPost: ClubhousePostItem,
+  inlineComment: ClubhouseCommentItem,
+  now: string,
+): Promise<void> {
+  let outcome = await attemptVersionGuardedAppend(
+    drepId,
+    postId,
+    initialPost,
+    inlineComment,
+    now,
+  );
+  if (outcome === 'conflict') {
+    const fresh = await getItem<ClubhousePostItem>(tableNames.clubhousePosts, {
+      drepId,
+      postId,
+    });
+    if (!fresh) {
+      console.warn(
+        `createComment: legacy inline write — post disappeared between read and write for drepId=${drepId} postId=${postId}`,
+      );
+      return;
+    }
+    outcome = await attemptVersionGuardedAppend(
+      drepId,
+      postId,
+      fresh,
+      inlineComment,
+      now,
+    );
+    if (outcome === 'conflict') {
+      console.warn(
+        `createComment: legacy inline write lost a race after retry for drepId=${drepId} postId=${postId} (comment ${inlineComment.commentId} is persisted to clubhouse_comments)`,
+      );
+    }
+  }
+}
+
+async function attemptVersionGuardedAppend(
+  drepId: string,
+  postId: string,
+  post: ClubhousePostItem,
+  inlineComment: ClubhouseCommentItem,
+  now: string,
+): Promise<'ok' | 'conflict'> {
+  const prevUpdatedAt = post.updatedAt;
+  const nextComments = [...(post.comments ?? []), inlineComment];
+  try {
+    await updateItem(
+      tableNames.clubhousePosts,
+      { drepId, postId },
+      'SET #c = :comments, #u = :now',
+      {
+        '#c': 'comments',
+        '#u': 'updatedAt',
+      },
+      {
+        ':comments': nextComments,
+        ':now': now,
+        ':prev': prevUpdatedAt,
+      },
+      '#u = :prev',
+    );
+    return 'ok';
+  } catch (err) {
+    if (
+      err &&
+      typeof err === 'object' &&
+      (err as { name?: string }).name === 'ConditionalCheckFailedException'
+    ) {
+      return 'conflict';
+    }
+    throw err;
+  }
+}
