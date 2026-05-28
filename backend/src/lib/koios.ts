@@ -1452,7 +1452,16 @@ export async function fetchPredefinedDRepDelegatorCount(
       rangeFrom: 0,
       rangeTo: 0,
       headers: { Prefer: 'count=exact' },
-      timeoutMs: 8_000,
+      // `count=exact` forces a server-side COUNT(*) over the full
+      // delegator set. For `drep_always_abstain` (~181k delegators) that
+      // measured ~25s against live Koios — the previous 8s cap timed out
+      // and the sync silently preserved a stale count (1000). 30s clears
+      // it with margin; only two predefined DReps are fetched per cycle
+      // and the directory-sync Lambda has a 300s budget. If Koios ever
+      // slows past 30s the caller already falls back to preserving the
+      // prior count; `count=estimated` (~8s) is the next lever, at the
+      // cost of an approximate value.
+      timeoutMs: 30_000,
     });
   } catch (err) {
     console.warn(
