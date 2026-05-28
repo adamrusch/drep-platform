@@ -31,6 +31,11 @@ vi.mock('../lib/recognition', () => ({
 vi.mock('../lib/dynamodb', () => ({
   scanItems: vi.fn(),
   transactWrite: vi.fn(),
+  // P0-2 (2026-05-28): backfill now invokes `updateItem` first when the
+  // comment row's `supportLovelace` is a legacy `S` string, to flip it
+  // to `N`. Tests that don't exercise the migration path leave it
+  // unmocked-by-default; the call simply resolves to undefined.
+  updateItem: vi.fn().mockResolvedValue(undefined),
   tableNames: {
     users: 'test-users',
     drepCommittees: 'test-drep_committees',
@@ -48,7 +53,7 @@ vi.mock('../lib/dynamodb', () => ({
 }));
 
 import { lookupStake } from '../lib/recognition';
-import { transactWrite } from '../lib/dynamodb';
+import { transactWrite, updateItem } from '../lib/dynamodb';
 import {
   processComment,
   type BackfillSeedCounters,
@@ -57,6 +62,7 @@ import type { CommentItem } from '../lib/types';
 
 const mockLookupStake = vi.mocked(lookupStake);
 const mockTransactWrite = vi.mocked(transactWrite);
+const mockUpdateItem = vi.mocked(updateItem);
 
 const STAKE = 'stake1uyvjdz9rxsfsmv44rtk75k2rqyqskrga96dgdfrqjvjjpwsefcjnp';
 const LOVELACE = '12345000000';
@@ -92,6 +98,8 @@ describe('backfill-legacy-comment-seeds:processComment', () => {
   beforeEach(() => {
     mockLookupStake.mockReset();
     mockTransactWrite.mockReset();
+    mockUpdateItem.mockReset();
+    mockUpdateItem.mockResolvedValue(undefined);
   });
 
   it('writes a seed vote + counter update when stake lookup succeeds and no prior row exists', async () => {
@@ -135,7 +143,13 @@ describe('backfill-legacy-comment-seeds:processComment', () => {
     expect(updateExpr).toMatch(/ADD\s+#supportLov\s+:delta/);
     expect(updateExpr).toMatch(/#upCount\s+:upD/);
     const values = updateItem!['ExpressionAttributeValues'] as Record<string, unknown>;
-    expect(values[':delta']).toBe(LOVELACE);
+    // P0-2 (2026-05-28): the script now emits `:delta` as a JS bigint
+    // so the doc client marshals it to DDB `N`. Previously it was a
+    // string and the marshaller emitted `S`, which made the `ADD`
+    // throw `ValidationException` (same bug as in the live vote
+    // handler).
+    expect(values[':delta']).toBe(BigInt(LOVELACE));
+    expect(typeof values[':delta']).toBe('bigint');
     expect(values[':upD']).toBe(1);
   });
 
@@ -199,5 +213,43 @@ describe('backfill-legacy-comment-seeds:processComment', () => {
     expect(counters.seeded).toBe(1);
     expect(counters.skipped).toBe(1);
     expect(counters.errors).toBe(0);
+  });
+
+  // ---- P0-2 (2026-05-28) ----
+
+  it('P0-2: when comment.supportLovelace is a legacy `S` string, runs the migration UpdateItem before the seed transactWrite', async () => {
+    mockLookupStake.mockResolvedValue({ lovelace: LOVELACE, source: 'koios' });
+    mockTransactWrite.mockResolvedValue(undefined);
+
+    const counters = freshCounters();
+    const legacyComment = makeComment({ supportLovelace: '7777000000' });
+    await processComment(legacyComment, counters);
+
+    // The migration ran exactly once with the right shape.
+    expect(mockUpdateItem).toHaveBeenCalledTimes(1);
+    const [tableName, key, expr, names, values, condition] =
+      mockUpdateItem.mock.calls[0]!;
+    expect(tableName).toBe('test-comments');
+    expect(key).toEqual({ actionId: 'action-1', commentId: 'cmt-01HF0' });
+    expect(expr).toBe('SET #supportLov = :n');
+    expect(names).toEqual({ '#supportLov': 'supportLovelace' });
+    expect(values).toEqual({ ':n': BigInt('7777000000'), ':sType': 'S' });
+    expect(condition).toBe('attribute_type(#supportLov, :sType)');
+
+    // …and the regular seed transactWrite still ran afterwards.
+    expect(mockTransactWrite).toHaveBeenCalledTimes(1);
+    expect(counters.seeded).toBe(1);
+  });
+
+  it('P0-2: skips the migration UpdateItem when supportLovelace is absent (the existing legacy filter)', async () => {
+    mockLookupStake.mockResolvedValue({ lovelace: LOVELACE, source: 'koios' });
+    mockTransactWrite.mockResolvedValue(undefined);
+
+    const counters = freshCounters();
+    // The default `makeComment` shape omits `supportLovelace`.
+    await processComment(makeComment(), counters);
+
+    expect(mockUpdateItem).not.toHaveBeenCalled();
+    expect(counters.seeded).toBe(1);
   });
 });

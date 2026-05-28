@@ -777,13 +777,25 @@ export interface CommentItem {
    *  comment that already has a `parentCommentId`. */
   parentCommentId?: string;
   /** Denormalized running support level — sum of (lovelace × ±1) across
-   *  every active vote on this comment, stringified BigInt. Seeded with
-   *  the author's stake at create time (implicit upvote). Mutated by
-   *  `handlers/comments/vote.ts` via `transactWrite` so it stays
-   *  consistent with the per-vote rows in the `comment_votes` table.
-   *  Stored as a string (not number) because comment-author stake can
-   *  exceed 2^53 lovelace = 9 quadrillion lovelace = 9 trillion ADA. */
-  supportLovelace?: string;
+   *  every active vote on this comment. Seeded with the author's stake
+   *  at create time (implicit upvote). Mutated by `handlers/comments/
+   *  vote.ts` via `transactWrite` so it stays consistent with the per-
+   *  vote rows in the `comment_votes` table.
+   *
+   *  # Wire shape (post 2026-05-28 P0-2 fix)
+   *
+   *  Stored as a DDB Number (`N`) so the vote handler's atomic `ADD :delta`
+   *  works. The doc client's `smartUnwrapNumber` returns this field as:
+   *    - `number` when its magnitude fits in `Number.MAX_SAFE_INTEGER`
+   *      (~9.0×10^15 lovelace ≈ 9 trillion ADA), or
+   *    - `bigint` when it exceeds that ceiling (a popular comment whose
+   *      summed support crosses the safe-int boundary).
+   *  Legacy rows written before the P0-2 fix may still surface as
+   *  `string` (DDB `S`) until the lazy migration in the vote handler
+   *  flips them to `N` on first vote, OR until the broadened
+   *  `backfill-legacy-comment-seeds.ts` script processes them. Read
+   *  paths feed this through `safeBigInt` which accepts all three. */
+  supportLovelace?: string | number | bigint;
   /** Headcount of active upvotes (including author seed). Optional only
    *  for backwards compat with rows written before this field landed —
    *  treat absence as zero. */
