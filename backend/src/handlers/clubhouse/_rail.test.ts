@@ -14,7 +14,12 @@
 
 import { describe, it, expect } from 'vitest';
 import type { ClubhousePostItem } from '../../lib/types';
-import { rankActiveThreads, rankTopContributors } from './_rail';
+import {
+  rankActiveThreads,
+  rankTopContributors,
+  selectActivePostsForRailQuery,
+  type RailCommentRow,
+} from './_rail';
 import { AUTO_POST_AUTHOR_WALLET } from '../../sync/clubhouseAutoPosts';
 
 const DREP_ID = 'drep1ygqgayvx8yzsaj9hprja3l6jy3v4px9z3u8uvecuvm3f92ce7mckx';
@@ -381,5 +386,196 @@ describe('rankTopContributors', () => {
     // Both tied at 2; walletA wins because latestAt is newer.
     expect(result[0]!.walletAddress).toBe('walletA');
     expect(result[1]!.walletAddress).toBe('walletB');
+  });
+});
+
+/**
+ * Tests for the P0-3 de-inline migration's rail-read path:
+ *
+ *   - `selectActivePostsForRailQuery` chooses posts whose denormalized
+ *     `lastReplyAt` falls inside the activity window.
+ *   - `rankActiveThreads` prefers per-row `RailCommentRow[]` (from the
+ *     new `clubhouse_comments` Query) over the legacy inline array.
+ *   - `rankTopContributors` does the same.
+ */
+describe('selectActivePostsForRailQuery', () => {
+  it('selects only posts with lastReplyAt inside the 24h window', () => {
+    const recent = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString(); // 1h ago
+    const old = new Date(NOW.getTime() - 48 * 60 * 60 * 1000).toISOString(); // 48h ago
+    const posts: ClubhousePostItem[] = [
+      { ...buildPost({ postId: 'recent', createdAt: '2026-05-20T00:00:00.000Z' }), lastReplyAt: recent },
+      { ...buildPost({ postId: 'old', createdAt: '2026-05-20T00:00:00.000Z' }), lastReplyAt: old },
+    ];
+    const active = selectActivePostsForRailQuery(posts, { now: NOW });
+    expect(active.map((p) => p.postId)).toEqual(['recent']);
+  });
+
+  it('excludes auto_ga posts regardless of recency', () => {
+    const recent = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+    const posts: ClubhousePostItem[] = [
+      {
+        ...buildPost({
+          postId: 'auto-ga#a',
+          type: 'auto_ga',
+          createdAt: '2026-05-20T00:00:00.000Z',
+        }),
+        lastReplyAt: recent,
+      },
+      {
+        ...buildPost({ postId: 'organic', createdAt: '2026-05-20T00:00:00.000Z' }),
+        lastReplyAt: recent,
+      },
+    ];
+    const active = selectActivePostsForRailQuery(posts, { now: NOW });
+    expect(active.map((p) => p.postId)).toEqual(['organic']);
+  });
+
+  it('falls back to inline-comments existence for pre-backfill posts without lastReplyAt', () => {
+    const recent = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+    // Pre-backfill post: has inline comments[] but no lastReplyAt.
+    // Should still be selected so the legacy fallback path picks it up.
+    const posts: ClubhousePostItem[] = [
+      buildPost({
+        postId: 'preBackfill',
+        createdAt: '2026-05-20T00:00:00.000Z',
+        comments: [{ commentId: 'c1', authorWallet: 'w1', createdAt: recent }],
+      }),
+      // A truly cold post: no inline, no lastReplyAt — excluded.
+      buildPost({ postId: 'cold', createdAt: '2026-05-20T00:00:00.000Z' }),
+    ];
+    const active = selectActivePostsForRailQuery(posts, { now: NOW });
+    expect(active.map((p) => p.postId)).toEqual(['preBackfill']);
+  });
+});
+
+describe('rankActiveThreads — uses per-row comments when supplied', () => {
+  it('prefers RailCommentRow[] over inline comments for counting recent replies', () => {
+    const recentIso = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+    // The inline array claims ZERO comments (post.ts projection
+    // strips it on the wire); per-row data is the truth.
+    const posts: ClubhousePostItem[] = [
+      buildPost({
+        postId: 'p1',
+        title: 'New shape',
+        createdAt: '2026-05-25T00:00:00.000Z',
+        // Notably empty inline — projected out by the list handler.
+      }),
+    ];
+    const commentsByPostId = new Map<string, RailCommentRow[]>([
+      [
+        'p1',
+        [
+          { authorWallet: 'w1', createdAt: recentIso },
+          { authorWallet: 'w2', createdAt: recentIso },
+        ],
+      ],
+    ]);
+    const result = rankActiveThreads(posts, { now: NOW, limit: 5, commentsByPostId });
+    expect(result).toHaveLength(1);
+    expect(result[0]!.replyCount24h).toBe(2);
+    expect(result[0]!.lastReplyAt).toBe(recentIso);
+  });
+
+  it('falls back to inline comments when per-row map has no entry for a post', () => {
+    const recentIso = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+    const posts: ClubhousePostItem[] = [
+      buildPost({
+        postId: 'preBackfill',
+        title: 'Pre-backfill',
+        createdAt: '2026-05-25T00:00:00.000Z',
+        comments: [
+          { commentId: 'c1', authorWallet: 'w1', createdAt: recentIso },
+        ],
+      }),
+    ];
+    // Empty map — no per-row data. Ranker MUST fall back to inline.
+    const result = rankActiveThreads(posts, {
+      now: NOW,
+      limit: 5,
+      commentsByPostId: new Map(),
+    });
+    expect(result).toHaveLength(1);
+    expect(result[0]!.replyCount24h).toBe(1);
+  });
+
+  it('does not double-count when both per-row and inline are present', () => {
+    const recentIso = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+    const posts: ClubhousePostItem[] = [
+      buildPost({
+        postId: 'p1',
+        title: 'Double-count guard',
+        createdAt: '2026-05-25T00:00:00.000Z',
+        // Inline has TWO entries.
+        comments: [
+          { commentId: 'c1', authorWallet: 'w1', createdAt: recentIso },
+          { commentId: 'c2', authorWallet: 'w2', createdAt: recentIso },
+        ],
+      }),
+    ];
+    const commentsByPostId = new Map<string, RailCommentRow[]>([
+      // Per-row has FIVE entries — should win.
+      [
+        'p1',
+        [
+          { authorWallet: 'w1', createdAt: recentIso },
+          { authorWallet: 'w2', createdAt: recentIso },
+          { authorWallet: 'w3', createdAt: recentIso },
+          { authorWallet: 'w4', createdAt: recentIso },
+          { authorWallet: 'w5', createdAt: recentIso },
+        ],
+      ],
+    ]);
+    const result = rankActiveThreads(posts, { now: NOW, limit: 5, commentsByPostId });
+    expect(result[0]!.replyCount24h).toBe(5);
+  });
+});
+
+describe('rankTopContributors — uses per-row comments when supplied', () => {
+  it('attributes comment authorship from RailCommentRow[] over inline', () => {
+    const posts: ClubhousePostItem[] = [
+      buildPost({
+        postId: 'p1',
+        authorWallet: 'walletA',
+        createdAt: '2026-05-20T00:00:00.000Z',
+        // No inline comments — they were projected out.
+      }),
+    ];
+    const commentsByPostId = new Map<string, RailCommentRow[]>([
+      [
+        'p1',
+        [
+          { authorWallet: 'walletB', createdAt: '2026-05-21T00:00:00.000Z' },
+          { authorWallet: 'walletB', createdAt: '2026-05-22T00:00:00.000Z' },
+          { authorWallet: 'walletC', createdAt: '2026-05-23T00:00:00.000Z' },
+        ],
+      ],
+    ]);
+    const result = rankTopContributors(posts, { limit: 5, commentsByPostId });
+    // walletA: 1 post; walletB: 2 comments; walletC: 1 comment.
+    expect(result).toHaveLength(3);
+    expect(result[0]!.walletAddress).toBe('walletB');
+    expect(result[0]!.contributionCount).toBe(2);
+  });
+
+  it('excludes the auto-post system wallet from per-row contributions too', () => {
+    const posts: ClubhousePostItem[] = [
+      buildPost({
+        postId: 'p1',
+        authorWallet: 'walletA',
+        createdAt: '2026-05-20T00:00:00.000Z',
+      }),
+    ];
+    const commentsByPostId = new Map<string, RailCommentRow[]>([
+      [
+        'p1',
+        [
+          // System wallet — must be excluded.
+          { authorWallet: AUTO_POST_AUTHOR_WALLET, createdAt: '2026-05-21T00:00:00.000Z' },
+          { authorWallet: 'walletB', createdAt: '2026-05-22T00:00:00.000Z' },
+        ],
+      ],
+    ]);
+    const result = rankTopContributors(posts, { limit: 5, commentsByPostId });
+    expect(result.map((r) => r.walletAddress).sort()).toEqual(['walletA', 'walletB']);
   });
 });

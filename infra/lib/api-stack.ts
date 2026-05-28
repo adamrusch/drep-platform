@@ -106,6 +106,11 @@ export class ApiStack extends cdk.Stack {
       databaseStack.commentsTable,
       databaseStack.commentVotesTable,
       databaseStack.clubhousePostsTable,
+      // Per-comment rows for the Clubhouse threading surface — the
+      // P0-3 migration (2026-05-28) split comments off the post row.
+      // `createComment.ts` writes here; `listComments.ts` + `_rail.ts`
+      // read. Granted RW across the loop for symmetry.
+      databaseStack.clubhouseCommentsTable,
       // Read-only-from-API in practice (the sync Lambdas own the
       // writes), but granted RW here to match the rest of the loop's
       // symmetry and unblock future ad-hoc admin tools without an
@@ -199,6 +204,12 @@ export class ApiStack extends cdk.Stack {
     const clubhouseCreateCommentFn = fn(
       'ClubhouseCreateCommentFn',
       'handlers/clubhouse/createComment.ts',
+    );
+    // P0-3 de-inline migration (2026-05-28): lazy-load per-post comments
+    // from the new `clubhouse_comments` table. Public-read, no auth.
+    const clubhouseListCommentsFn = fn(
+      'ClubhouseListCommentsFn',
+      'handlers/clubhouse/listComments.ts',
     );
     const clubhouseDeletePostFn = fn('ClubhouseDeletePostFn', 'handlers/clubhouse/deletePost.ts');
     const clubhouseVotePollFn = fn('ClubhouseVotePollFn', 'handlers/clubhouse/votePoll.ts');
@@ -387,6 +398,15 @@ export class ApiStack extends cdk.Stack {
       clubhouseCreateCommentFn,
       'ClubhouseCreateComment',
       true,
+    );
+    // Lazy-load comments for one post. Public-read; the membership
+    // gate only protects writes. Falls under the same `/clubhouse/*`
+    // CloudFront behavior (no-cache, mutations + reads share prefix).
+    addRoute(
+      apigwv2.HttpMethod.GET,
+      '/clubhouse/{drepId}/post/{postId}/comments',
+      clubhouseListCommentsFn,
+      'ClubhouseListComments',
     );
     addRoute(
       apigwv2.HttpMethod.DELETE,

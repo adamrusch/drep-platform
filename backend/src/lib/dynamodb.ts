@@ -105,6 +105,15 @@ export const tableNames = {
    *  the vote handler. See `handlers/comments/vote.ts`. */
   commentVotes: `${TABLE_PREFIX}comment_votes`,
   clubhousePosts: `${TABLE_PREFIX}clubhouse_posts`,
+  /** Per-comment rows for the Clubhouse threading surface. Replaces the
+   *  legacy inline `clubhouse_posts.comments[]` array (P0-3 migration,
+   *  2026-05-28). PK=`postKey` (= `${drepId}#${postId}`), SK=`commentId`
+   *  (ULID). Counters (`commentCount`, `lastReplyAt`) are denormalized
+   *  onto the parent `clubhouse_posts` row via atomic `ADD` / `SET` from
+   *  the `createComment` handler — no read-modify-write of the comment
+   *  set is ever required to render the badge or rank the rail. See
+   *  `infra/lib/database-stack.ts` for the table definition and rationale. */
+  clubhouseComments: `${TABLE_PREFIX}clubhouse_comments`,
   /** SPO ticker / name / homepage cache populated daily by
    *  `sync/pool-metadata.ts` from Koios `/pool_list` + `/pool_metadata`.
    *  PK=`poolId` (bech32 `pool1...`). Read by `recognition.ts`'s
@@ -290,6 +299,12 @@ export interface QueryOptions {
   limit?: number;
   exclusiveStartKey?: Record<string, unknown>;
   scanIndexForward?: boolean;
+  /** Optional projection of attributes to return. Useful for Query
+   *  paths that only need a subset of fields — e.g. the rail ranker
+   *  projects `(authorWallet, createdAt, parentCommentId)` and skips
+   *  the comment body to avoid pulling kilobytes of text it never
+   *  reads. */
+  projectionExpression?: string;
 }
 
 export interface QueryResult<T> {
@@ -315,6 +330,9 @@ export async function queryItems<T extends Record<string, unknown>>(
     ...(options.exclusiveStartKey ? { ExclusiveStartKey: options.exclusiveStartKey } : {}),
     ...(options.scanIndexForward !== undefined
       ? { ScanIndexForward: options.scanIndexForward }
+      : {}),
+    ...(options.projectionExpression
+      ? { ProjectionExpression: options.projectionExpression }
       : {}),
   };
   const result = await docClient.send(new QueryCommand(params));

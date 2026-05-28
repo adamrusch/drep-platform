@@ -5,6 +5,11 @@
  * participation. See `_rail.ts` for the cache contract, the
  * scoring formula, and the "why count, not stake-weighted today"
  * judgment-call rationale.
+ *
+ * P0-3 migration (2026-05-28) — read path: when the post carries
+ * the denormalized `lastReplyAt`, attribute comments by Querying
+ * `clubhouse_comments` for that post. Pre-backfill posts fall back
+ * to the inline `comments[]` walk inside the ranker.
  */
 
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
@@ -12,12 +17,14 @@ import { batchGetItems, tableNames } from '../../lib/dynamodb';
 import type { UserItem } from '../../lib/types';
 import {
   fetchClubhousePosts,
+  fetchPostComments,
   parseRailLimit,
   rankTopContributors,
   RAIL_CACHE_MAX_ENTRIES,
   RAIL_CACHE_TTL_MS,
   MAX_RAIL_LIMIT,
   type TopContributorEntry,
+  type RailCommentRow,
 } from './_rail';
 import { ok, badRequest, internalError } from '../_response';
 
@@ -50,7 +57,42 @@ export const handler = async (
     }
 
     const posts = await fetchClubhousePosts(drepId);
-    const ranked = rankTopContributors(posts, { limit: MAX_RAIL_LIMIT });
+
+    // P0-3 migration: per-post `Query` against `clubhouse_comments`
+    // for every post that the denormalized counters say HAS comments.
+    // Cold posts (commentCount === 0) skip the round-trip entirely.
+    //
+    // Note: top-contributors doesn't have an "active in 24h" filter —
+    // historical participants count too — so we Query every post
+    // with `commentCount > 0`. For a clubhouse with many posts this
+    // could be N Queries; the 60s cache amortizes the burst.
+    const postsNeedingFetch = posts.filter((p) => {
+      if (p.type === 'auto_ga') {
+        // Auto-posts are skipped from the wallet attribution itself
+        // (the system wallet is excluded), but their organic replies
+        // DO count, so we still need to Query them.
+      }
+      return (
+        typeof p.commentCount === 'number' && p.commentCount > 0
+      );
+    });
+    const commentsByPostId = new Map<string, RailCommentRow[]>();
+    for (const post of postsNeedingFetch) {
+      try {
+        const rows = await fetchPostComments(drepId, post.postId);
+        commentsByPostId.set(post.postId, rows);
+      } catch (err) {
+        console.warn(
+          `clubhouse/topContributors: per-post Query failed for postId=${post.postId} drepId=${drepId}; falling back to inline:`,
+          err,
+        );
+      }
+    }
+
+    const ranked = rankTopContributors(posts, {
+      limit: MAX_RAIL_LIMIT,
+      commentsByPostId,
+    });
 
     // Best-effort displayName resolution. Misses are non-fatal —
     // the FE renders truncated wallets when no name is available.
