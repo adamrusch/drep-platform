@@ -17,7 +17,13 @@
 
 import { describe, it, expect } from 'vitest';
 import type { APIGatewayProxyEventV2WithJWTAuthorizer } from 'aws-lambda';
-import { extractAuthContext } from './role-guard';
+import type { CommitteeMemberItem } from '../lib/types';
+import {
+  extractAuthContext,
+  requireOwner,
+  requireOwnerOrCommitteeLead,
+  AuthorizationError,
+} from './role-guard';
 
 const WALLET = 'stake1uyvjdz9rxsfsmv44rtk75k2rqyqskrga96dgdfrqjvjjpwsefcjnp';
 const NEW_DREP = 'drep1newfield';
@@ -88,5 +94,93 @@ describe('extractAuthContext — registeredDrepId rename compat', () => {
     );
 
     expect(ctx.registeredDrepId).toBeUndefined();
+  });
+});
+
+// ---- P0-4 (2026-05-28) — committee-scoped authorization helpers ----
+
+describe('requireOwner — author-only check (action comments etc.)', () => {
+  const authCtx = {
+    walletAddress: WALLET,
+    roles: ['lead_drep' as const, 'committee_member' as const],
+  };
+
+  it('permits the owner regardless of roles held', () => {
+    expect(() => requireOwner(authCtx, WALLET)).not.toThrow();
+  });
+
+  it('REJECTS a non-owner even when they hold lead_drep globally', () => {
+    expect(() => requireOwner(authCtx, 'stake1somebody_else')).toThrow(
+      AuthorizationError,
+    );
+  });
+});
+
+describe('requireOwnerOrCommitteeLead — scope-aware override', () => {
+  const X_LEAD = 'stake1x_lead';
+  const X_MEMBER_LEAD = 'stake1x_member_with_lead_role';
+  const X_PLAIN = 'stake1x_plain_committee_member';
+  const Y_LEAD = 'stake1y_lead_of_some_other_committee';
+
+  const xCommittee: {
+    leadWallet: string;
+    members: CommitteeMemberItem[];
+  } = {
+    leadWallet: X_LEAD,
+    members: [
+      { walletAddress: X_LEAD, role: 'lead_drep', joinedAt: 't' },
+      { walletAddress: X_MEMBER_LEAD, role: 'lead_drep', joinedAt: 't' },
+      { walletAddress: X_PLAIN, role: 'committee_member', joinedAt: 't' },
+    ],
+  };
+
+  const ctxFor = (wallet: string) => ({
+    walletAddress: wallet,
+    roles: ['lead_drep' as const],
+  });
+
+  it('permits the owner regardless of committee membership', () => {
+    expect(() =>
+      requireOwnerOrCommitteeLead(ctxFor('stake1author'), 'stake1author', xCommittee),
+    ).not.toThrow();
+  });
+
+  it('permits the platform-level leadWallet of THIS committee', () => {
+    expect(() =>
+      requireOwnerOrCommitteeLead(ctxFor(X_LEAD), 'stake1author', xCommittee),
+    ).not.toThrow();
+  });
+
+  it('permits a `lead_drep`-role member of THIS committee', () => {
+    expect(() =>
+      requireOwnerOrCommitteeLead(ctxFor(X_MEMBER_LEAD), 'stake1author', xCommittee),
+    ).not.toThrow();
+  });
+
+  it('REJECTS the lead of some OTHER committee (the P0-4 exploit)', () => {
+    expect(() =>
+      requireOwnerOrCommitteeLead(ctxFor(Y_LEAD), 'stake1author', xCommittee),
+    ).toThrow(AuthorizationError);
+  });
+
+  it('REJECTS a `committee_member` (non-lead) of THIS committee', () => {
+    // `committee_member` is a posting role, not a moderation role.
+    // Even when listed in this committee's members, they cannot
+    // delete other authors' posts.
+    expect(() =>
+      requireOwnerOrCommitteeLead(ctxFor(X_PLAIN), 'stake1author', xCommittee),
+    ).toThrow(AuthorizationError);
+  });
+
+  it('REJECTS any non-owner when committee is undefined (auto-post clubhouse fallback)', () => {
+    expect(() =>
+      requireOwnerOrCommitteeLead(ctxFor(Y_LEAD), 'stake1author', undefined),
+    ).toThrow(AuthorizationError);
+  });
+
+  it('permits the owner even when committee is undefined', () => {
+    expect(() =>
+      requireOwnerOrCommitteeLead(ctxFor('stake1author'), 'stake1author', undefined),
+    ).not.toThrow();
   });
 });

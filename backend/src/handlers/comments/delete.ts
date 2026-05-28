@@ -1,7 +1,7 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { getItem, deleteItem, queryItems, tableNames } from '../../lib/dynamodb';
 import type { CommentItem, CommentVoteItem } from '../../lib/types';
-import { extractAuthContext, requireOwnerOrRole } from '../../middleware/role-guard';
+import { extractAuthContext, requireOwner } from '../../middleware/role-guard';
 import { noContent, badRequest, notFound, handleError } from '../_response';
 
 export const handler = async (
@@ -28,8 +28,19 @@ export const handler = async (
       return notFound('Comment');
     }
 
-    // Only the comment owner or a lead_drep can delete
-    requireOwnerOrRole(authCtx, existing.walletAddress, 'lead_drep');
+    // Only the comment AUTHOR can delete their own action comments.
+    //
+    // P0-4 (2026-05-28): the previous code allowed any caller holding
+    // `lead_drep` globally to delete any action comment — a privilege-
+    // escalation path for every wallet that ever registered a DRep
+    // committee. Comments here are scoped to a governance ACTION, not
+    // a DRep, so there is no natural "committee that owns this
+    // comment" to scope the override against. Option (a) from the
+    // audit brief was chosen: no platform moderator override exists
+    // for action comments. If product later wants moderation, it
+    // should be added as an explicit, audited role (not piggy-backed
+    // on an unrelated committee role).
+    requireOwner(authCtx, existing.walletAddress);
 
     // Best-effort vote-row cleanup. We delete the per-vote rows in
     // `comment_votes` so they don't dangle. Failure here doesn't roll
