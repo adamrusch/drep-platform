@@ -154,7 +154,11 @@ describe('comments/create', () => {
     const comment = commentPut.Item;
     expect(comment['actionId']).toBe(ACTION_ID);
     expect(comment['walletAddress']).toBe(WALLET);
-    expect(comment['supportLovelace']).toBe(STAKE_LOVELACE);
+    // P0-2 (2026-05-28): supportLovelace is now written as a JS `bigint`
+    // so the doc-client marshals it to DDB `N` (the type the vote
+    // handler's `ADD :delta` requires). Compare as bigint, not string.
+    expect(comment['supportLovelace']).toBe(BigInt(STAKE_LOVELACE));
+    expect(typeof comment['supportLovelace']).toBe('bigint');
     expect(comment['upvoteCount']).toBe(1);
     expect(comment['downvoteCount']).toBe(0);
     expect(comment['parentCommentId']).toBeUndefined();
@@ -267,7 +271,9 @@ describe('comments/create', () => {
     const items = mockTransact.mock.calls[0]![0];
     const comment = (items as Array<{ Put: { Item: Record<string, unknown> } }>)[0]!.Put.Item;
     const vote = (items as Array<{ Put: { Item: Record<string, unknown> } }>)[1]!.Put.Item;
-    expect(comment['supportLovelace']).toBe('0');
+    // P0-2 fix: comment.supportLovelace is BigInt(0) (DDB N); the per-
+    // vote row's lovelace stays as the string snapshot.
+    expect(comment['supportLovelace']).toBe(0n);
     expect(vote['lovelace']).toBe('0');
   });
 

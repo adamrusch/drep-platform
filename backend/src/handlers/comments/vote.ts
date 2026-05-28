@@ -56,7 +56,7 @@
  */
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb';
-import { getItem, tableNames, transactWrite } from '../../lib/dynamodb';
+import { getItem, tableNames, transactWrite, updateItem } from '../../lib/dynamodb';
 
 type TransactItem = NonNullable<TransactWriteCommandInput['TransactItems']>[number];
 import type { CommentItem, CommentVoteItem } from '../../lib/types';
@@ -109,6 +109,27 @@ export const handler = async (
       commentId: decodedCommentId,
     });
     if (!comment) return notFound('Comment');
+
+    // Lazy migration of legacy `supportLovelace` rows.
+    //
+    // Prior to the 2026-05-28 P0-2 fix, `supportLovelace` was stored as a
+    // DynamoDB String (`S`) because the original counter-update path SET
+    // the field rather than `ADD`-ing to it. After the flip to `ADD :delta`
+    // (with `:delta` as a real numeric N), an existing row with an `S`-
+    // typed `supportLovelace` would cause DDB to throw `ValidationException:
+    // Type mismatch for attribute to update`. We detect this here and run
+    // a one-shot conditional UpdateItem that REPLACES the `S` value with
+    // an equivalent `N` value (using `attribute_type` to gate the rewrite
+    // against a concurrent voter who already migrated it). After this
+    // succeeds — or harmlessly fails on conditional-check — the
+    // transactWrite below sees an `N` and `ADD` works.
+    if (typeof comment.supportLovelace === 'string') {
+      await migrateLegacySupportLovelace(
+        decodedActionId,
+        decodedCommentId,
+        comment.supportLovelace,
+      );
+    }
 
     // Authors cannot remove their own seed vote — see module header.
     // Changing it (up → down) is also blocked since "down on my own
@@ -287,18 +308,23 @@ export const handler = async (
  * `supportLovelace` BigInt and headcount counters atomically with the
  * vote row write.
  *
- * `supportLovelace` is stored as a stringified BigInt (to preserve
- * precision past 2^53), so DynamoDB's native `ADD` cannot be used —
- * BigInt arithmetic lives in JS-land. We pre-compute the new value here
- * and write it via a SET expression. This is correct because the
- * containing transaction's ConditionCheck on the vote row gates against
- * a stale read: if another voter raced us, the ConditionCheck on THEIR
- * row would fail their transact, not ours, so our read of the comments
- * counter (implicit in the pre-computed value) is the relevant one.
+ * Concurrency: `supportLovelace` is a DynamoDB Number attribute updated
+ * with `ADD :delta` — atomic at the DDB layer, so two voters writing in
+ * parallel each contribute their own delta without one clobbering the
+ * other (unlike read-modify-write SET). The vote-row ConditionCheck in
+ * the surrounding transactWrite handles same-voter idempotency.
  *
- * Wait — actually our own pre-computed value is based on what we read
- * from the prior vote, NOT from a fresh read of the counter. We need a
- * different concurrency story for the counter. See below.
+ * Precision: `:delta` is a JS `bigint`, marshalled by the doc client
+ * directly as a DDB Number with full precision (up to DDB's 38-digit
+ * decimal cap, vs JS's 2^53 safe-int limit). The `wrapNumbers` function
+ * in `dynamodb.ts` reads it back as `bigint` when the value exceeds
+ * `Number.MAX_SAFE_INTEGER`, otherwise as a JS `number`. `safeBigInt`
+ * accepts all three input shapes (string from legacy `S` rows, number
+ * for small new totals, bigint for large new totals).
+ *
+ * Lovelace max: 45e9 ADA × 1e6 = 4.5e16, far under DynamoDB's 38-digit
+ * decimal cap. Sum across all voters won't ever exceed 2x total supply
+ * (you can't have more upvotes than total existing lovelace).
  */
 function buildCommentCounterUpdate(
   actionId: string,
@@ -307,25 +333,6 @@ function buildCommentCounterUpdate(
   upDelta: number,
   downDelta: number,
 ): TransactItem[] {
-  // We use DynamoDB's `ADD` on a STRING attribute is not supported, so we
-  // store `supportLovelace` numerically by encoding deltas in a separate
-  // numeric attribute that we then read back into a BigInt on response.
-  //
-  // BUT: the cleaner approach is to keep `supportLovelace` as a NUMBER on
-  // the wire (DynamoDB Number is arbitrary-precision decimal — up to 38
-  // significant digits — which comfortably fits any lovelace amount on
-  // mainnet). The JS document client unmarshals it as a `string` already
-  // because we have `wrapNumbers: false`, so on read we just get the
-  // string form back. `ADD` on numeric attributes IS supported.
-  //
-  // So: write delta as a NUMBER, let DynamoDB add it, and read it back as
-  // the string form via `wrapNumbers: false`. The Item type still types
-  // `supportLovelace` as a string — it is on the JS side.
-  //
-  // Lovelace max: 45e9 ADA × 1e6 = 4.5e16, far under DynamoDB's 38-digit
-  // decimal cap. Sum across all voters can theoretically be higher but
-  // won't ever exceed 2x total supply (you can't have more upvotes than
-  // total existing lovelace).
   return [
     {
       Update: {
@@ -340,12 +347,13 @@ function buildCommentCounterUpdate(
           '#updatedAt': 'updatedAt',
         },
         ExpressionAttributeValues: {
-          // DynamoDB accepts a string for numeric attributes; the SDK
-          // will marshal it as a Number. `delta.toString()` keeps full
-          // precision. The `ADD` action handles missing attributes as
-          // zero, so this works on rows written before the counter
-          // landed (old comments rolled-in).
-          ':delta': delta.toString(),
+          // Pass the raw bigint — the doc-client marshaller emits a real
+          // DDB `N` with full precision. Previously this code did
+          // `delta.toString()` which the marshaller emitted as `S`,
+          // causing every `ADD` to throw `ValidationException: An operand
+          // in the update expression has an incorrect data type`. That
+          // was the P0-2 bug fixed on 2026-05-28.
+          ':delta': delta,
           ':upD': upDelta,
           ':downD': downDelta,
           ':now': new Date().toISOString(),
@@ -355,12 +363,71 @@ function buildCommentCounterUpdate(
   ];
 }
 
+/**
+ * Convert a comment row whose `supportLovelace` is a legacy `S` (string)
+ * to the new `N` (number) representation, so the subsequent `ADD :delta`
+ * doesn't throw `ValidationException: Type mismatch for attribute to
+ * update`.
+ *
+ * The UpdateItem is gated by `attribute_type(#supportLov, :sType)` so a
+ * concurrent voter who already migrated this row doesn't get its `N`
+ * value clobbered with our re-derived value. ConditionalCheckFailed in
+ * that case is benign — we swallow it and let the caller proceed.
+ *
+ * Any other error propagates so the calling handler returns 5xx; that's
+ * preferable to silently dropping the vote on a real DDB outage.
+ */
+async function migrateLegacySupportLovelace(
+  actionId: string,
+  commentId: string,
+  currentStringValue: string,
+): Promise<void> {
+  let asBig: bigint;
+  try {
+    asBig = BigInt(currentStringValue);
+  } catch {
+    // Malformed legacy data — reset to zero rather than carrying the
+    // bad value forward. ADD will then start the counter at zero.
+    asBig = 0n;
+  }
+  try {
+    await updateItem(
+      tableNames.comments,
+      { actionId, commentId },
+      'SET #supportLov = :n',
+      { '#supportLov': 'supportLovelace' },
+      { ':n': asBig, ':sType': 'S' },
+      // Only rewrite when the field is still an `S` — a concurrent voter
+      // who already migrated it shouldn't have their `N` value clobbered.
+      'attribute_type(#supportLov, :sType)',
+    );
+  } catch (err) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
+      // Another voter raced us and already migrated. Fine — proceed.
+      return;
+    }
+    throw err;
+  }
+}
+
 async function readCommentForResponse(actionId: string, commentId: string): Promise<CommentItem | undefined> {
   return getItem<CommentItem>(tableNames.comments, { actionId, commentId });
 }
 
-function safeBigInt(s: string | undefined | null): bigint {
-  if (!s) return 0n;
+/**
+ * Coerce a `supportLovelace`-shaped field to `bigint` regardless of how
+ * the SDK unmarshalled it.
+ *
+ * After the 2026-05-28 P0-2 fix the field is a DDB `N` and can come
+ * back as either `number` (for values ≤ MAX_SAFE_INTEGER) or `bigint`
+ * (for values past it, via the smart unmarshall in `dynamodb.ts`).
+ * Legacy `S`-typed rows still come back as `string` until the lazy
+ * migration in this handler (or the broadened backfill script) flips
+ * them to `N`.
+ */
+function safeBigInt(s: string | number | bigint | undefined | null): bigint {
+  if (s === undefined || s === null || s === '') return 0n;
+  if (typeof s === 'bigint') return s;
   try {
     return BigInt(s);
   } catch {

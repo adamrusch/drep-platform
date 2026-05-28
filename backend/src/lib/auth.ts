@@ -4,6 +4,10 @@ import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-sec
 import { decode as cborDecode, encode as cborEncode } from 'cbor-x';
 import type { JWTPayload, UserRole, SessionType } from './types';
 import { putItem, getItem, deleteItem, tableNames } from './dynamodb';
+import {
+  decodeCardanoAddress,
+  publicKeyMatchesAddress,
+} from './cardanoAddress';
 
 // ---- Auth nonce DynamoDB record ----
 
@@ -170,17 +174,60 @@ export interface WalletSignature {
 }
 
 /**
- * Verifies a CIP-30 wallet signature.
+ * Verifies a CIP-30 wallet signature AND binds the verified public key to
+ * the claimed wallet address.
  *
  * CIP-30 wallet.signData() returns a DataSignature { signature, key } where:
  *   - signature: CBOR hex of COSE_Sign1 [protected_header_bytes, {}, payload_bytes, sig_bytes]
  *   - key: CBOR hex of COSE_Key map { 1: 1 (OKP), 3: -8 (EdDSA), -1: 6 (Ed25519), -2: pubkey_bytes }
  *
- * Verification reconstructs the Sig_Structure and verifies the Ed25519 signature
- * with the public key extracted from the COSE_Key.
+ * # The bug this guards against (P0-1, 2026-05-28 audit)
+ *
+ * The original implementation verified that the Ed25519 signature was valid
+ * for the COSE_Key pubkey, and that the COSE_Sign1 payload matched the
+ * expected challenge — but never bound that pubkey to the claimed
+ * `walletAddress`. An attacker could sign the (victim-addressed) challenge
+ * with THEIR OWN key, ship the resulting DataSignature with the victim's
+ * address as the `walletAddress` body field, and the verifier would accept
+ * it. Outcome: arbitrary account takeover for any wallet whose address the
+ * attacker could observe (i.e. all of them on a public governance platform).
+ *
+ * # Defense layers (in order of trust)
+ *
+ *   1. **Pubkey → address credential binding (LOAD-BEARING).** We
+ *      blake2b-224 the COSE_Key pubkey and check that the resulting 28-byte
+ *      key hash matches one of the credentials embedded in the claimed
+ *      bech32 address (per CIP-19). For a base address, either the payment
+ *      OR stake credential may match; for a reward/stake address, only the
+ *      stake credential. Script-credential addresses are rejected outright
+ *      — the platform has no contract-wallet UX. Mismatch = reject.
+ *
+ *   2. **CIP-8 protected-header address cross-check (defense-in-depth).**
+ *      CIP-30 `signData` requires the wallet to include the signing address
+ *      in the COSE_Sign1 protected header as a CBOR map entry under the
+ *      string key `"address"`, with the raw address bytes as the value.
+ *      We decode and compare against `decoded.bytes` from step 1. Mismatch
+ *      = reject. When the header field is absent (some older wallet builds
+ *      omit it), we skip the cross-check and rely on step 1. Step 1 is
+ *      always enough on its own — an attacker cannot forge a valid
+ *      Ed25519 signature with a key whose hash falls inside someone else's
+ *      address.
+ *
+ * # References
+ *
+ *   - CIP-8  https://cips.cardano.org/cips/cip8/
+ *   - CIP-19 https://cips.cardano.org/cips/cip19/
+ *   - CIP-30 https://cips.cardano.org/cips/cip30/  (search "signData" — the
+ *           returned COSE_Sign1's protected header includes the `address`
+ *           field per the spec's "DataSignature" type).
+ *   - COSE   RFC 8152  (COSE_Sign1 structure, Sig_Structure encoding).
+ *
+ * Oracle consultation: NO subagent available in this session; implemented
+ * per the CIP-8 / CIP-30 spec text above and made step 1 the load-bearing
+ * check so that security never depends on the optional header parse.
  */
 export function verifyWalletSignature(
-  _walletAddress: string,
+  walletAddress: string,
   message: string,
   walletSig: WalletSignature,
 ): { valid: boolean; reason?: string } {
@@ -259,6 +306,94 @@ export function verifyWalletSignature(
     const isValid = crypto.verify(null, sigStructure, publicKey, sigBuf);
     if (!isValid) {
       return { valid: false, reason: 'Ed25519 signature verification failed' };
+    }
+
+    // --- 5. Bind the verified pubkey to the claimed wallet address ---
+    // This is the load-bearing security check. Without it, an attacker can
+    // present a valid COSE_Sign1 signed by THEIR key and claim ANY
+    // walletAddress — the prior steps would all pass. See the function-
+    // header docblock for the full attack story.
+    //
+    // We catch decode errors so a malformed/unsupported address rejects
+    // cleanly (4xx-equivalent) rather than 5xx-ing through the handler's
+    // generic catch.
+    let decoded;
+    try {
+      decoded = decodeCardanoAddress(walletAddress);
+    } catch {
+      return {
+        valid: false,
+        reason: 'Claimed wallet address is malformed or unsupported',
+      };
+    }
+
+    const matchResult = publicKeyMatchesAddress(pubkeyBytes, decoded);
+    if (matchResult === 'mismatch') {
+      return {
+        valid: false,
+        reason: 'Public key does not match the claimed wallet address',
+      };
+    }
+    if (matchResult === 'script-credential') {
+      return {
+        valid: false,
+        reason: 'Script-credential addresses are not supported for login',
+      };
+    }
+    // matchResult === 'match' — fall through.
+
+    // --- 6. (Defense-in-depth) Cross-check the protected-header address.
+    //
+    // CIP-30 `signData` puts the signing address in the COSE_Sign1
+    // protected header (a bstr-wrapped CBOR map) under the string key
+    // "address", with the raw address bytes as the value. We decode the
+    // header and, when the address field is present, require it to equal
+    // `decoded.bytes`. If the field is absent (some older wallet builds
+    // omit it), we skip this check — step 5 above is already authoritative.
+    //
+    // Implementation notes:
+    //   - The protected header is itself a CBOR-encoded bstr; an empty
+    //     header (length 0) is valid CBOR and decodes to nothing. We
+    //     treat an empty header as "no address claim" and skip.
+    //   - `cbor-x` may decode the header map as a `Map<string, unknown>`
+    //     OR as a plain object (its behaviour depends on internal heuristics
+    //     about which keys appeared). We handle both shapes the same way
+    //     the COSE_Key extraction above does.
+    //   - Any decode failure on the header is logged at debug level and
+    //     skipped — it MUST NOT cause a hard fail, because step 5 already
+    //     bound the pubkey to the address. A malformed header from a
+    //     buggy wallet would otherwise lock a legitimate user out.
+    if (protectedBytes.length > 0) {
+      try {
+        const headerDecoded = cborDecode(protectedBytes);
+        let headerAddressBytes: Buffer | undefined;
+        if (headerDecoded instanceof Map) {
+          const raw = headerDecoded.get('address');
+          if (Buffer.isBuffer(raw)) headerAddressBytes = raw;
+          else if (raw instanceof Uint8Array) headerAddressBytes = Buffer.from(raw);
+        } else if (typeof headerDecoded === 'object' && headerDecoded !== null) {
+          const headerMap = headerDecoded as Record<string, unknown>;
+          const raw = headerMap['address'];
+          if (Buffer.isBuffer(raw)) headerAddressBytes = raw;
+          else if (raw instanceof Uint8Array) headerAddressBytes = Buffer.from(raw);
+        }
+        if (headerAddressBytes && !headerAddressBytes.equals(decoded.bytes)) {
+          return {
+            valid: false,
+            reason:
+              'COSE_Sign1 protected-header address does not match the claimed wallet address',
+          };
+        }
+        // headerAddressBytes === undefined → no address claim in the
+        // header; step 5 is authoritative.
+      } catch (err) {
+        // Don't fail closed on a header decode error — step 5 already
+        // bound the pubkey to the address.
+        console.debug(
+          'verifyWalletSignature: protected header decode failed; relying on credential binding alone:',
+          err,
+        );
+      }
     }
 
     return { valid: true };

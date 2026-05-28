@@ -16,6 +16,7 @@
     "@aws-sdk/lib-dynamodb": "^3.600.0",
     "@blockfrost/blockfrost-js": "^5.6.0",
     "@emurgo/cardano-serialization-lib-nodejs": "^15.0.3",
+    "bech32": "^2.0.0",
     "blake2b": "^2.1.4",
     "cbor-x": "^1.6.4",
     "jose": "^5.3.0",
