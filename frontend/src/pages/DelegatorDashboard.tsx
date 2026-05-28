@@ -1,5 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import { FileText, Users, Calendar, RefreshCw } from 'lucide-react';
 import { useGovernanceActions } from '@/hooks/useGovernanceActions';
 import { useEpoch } from '@/hooks/useEpoch';
@@ -12,7 +13,9 @@ import { StatTile } from '@/components/ui/StatTile';
 import { Button } from '@/components/ui/Button';
 import { DashboardRail } from '@/components/rails/DashboardRail';
 import { PageWithRail } from '@/components/Layout';
-import { formatRelativeTime } from '@/lib/utils';
+import { formatRelativeTime, formatWalletAddress } from '@/lib/utils';
+import { get } from '@/lib/api';
+import type { DRepDetail } from '@/types';
 
 function formatCountdown(seconds: number): string {
   const d = Math.floor(seconds / 86_400);
@@ -59,6 +62,23 @@ export function DelegatorDashboard(): React.ReactElement {
         ? undefined // confirmed undelegated — DO NOT fall back to stale history
         : historyEntry; // unknown live state — best-effort history fallback
 
+  // Resolve the DRep's display name from the directory. Shares the
+  // `drep-detail` cache key with DRepPublicProfile.tsx and
+  // DelegatorClubhouse.tsx so React-Query reuses the entry across pages.
+  // The history fallback `drepName` is a snapshotted value from the
+  // sync — usable when the live DRep ID agrees with history, but stale
+  // otherwise (e.g. a DRep changed their CIP-119 anchor name).
+  const { data: currentDrepDetail } = useQuery({
+    queryKey: ['drep-detail', currentDrep?.drepId],
+    queryFn: () => get<DRepDetail>(`/dreps/${encodeURIComponent(currentDrep?.drepId ?? '')}`),
+    enabled: Boolean(currentDrep?.drepId),
+    staleTime: 5 * 60 * 1000,
+  });
+  const currentDrepName =
+    currentDrepDetail?.givenName?.trim() ||
+    currentDrep?.drepName ||
+    (currentDrep ? formatWalletAddress(currentDrep.drepId, 8) : '');
+
   const hotActions = [...allActions]
     .filter((a) => a.status === 'active')
     .sort((a, b) => a.epochDeadline - b.epochDeadline)
@@ -89,16 +109,27 @@ export function DelegatorDashboard(): React.ReactElement {
           icon={FileText}
           iconVariant="indigo"
         />
-        <StatTile
-          label="Your Delegation"
-          value={
-            currentDrep
-              ? currentDrep.drepName ?? `${currentDrep.drepId.slice(0, 10)}…`
-              : 'Not delegated'
-          }
-          icon={Users}
-          iconVariant="violet"
-        />
+        {currentDrep ? (
+          <Link
+            to={`/drep/${encodeURIComponent(currentDrep.drepId)}`}
+            className="block rounded-token-xl outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)] focus-visible:ring-offset-2 transition-colors hover:[&>div]:border-[var(--brand-primary)]"
+            aria-label={`View ${currentDrepName} profile`}
+          >
+            <StatTile
+              label="Your DRep"
+              value={currentDrepName}
+              icon={Users}
+              iconVariant="violet"
+            />
+          </Link>
+        ) : (
+          <StatTile
+            label="Your DRep"
+            value="Not delegated"
+            icon={Users}
+            iconVariant="violet"
+          />
+        )}
         <StatTile
           label="Current Epoch"
           value={epoch ? epoch.epoch : '—'}
@@ -117,24 +148,6 @@ export function DelegatorDashboard(): React.ReactElement {
           iconVariant="amber"
         />
       </div>
-
-      {/* Current delegation card — kept as a secondary tile */}
-      {currentDrep && (
-        <div className="rounded-token-xl border border-[var(--brand-primary)]/30 bg-[var(--brand-primary-soft)]/30 p-4">
-          <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)] mb-1">
-            Currently Delegated To
-          </div>
-          <Link
-            to={`/drep/${currentDrep.drepId}`}
-            className="font-semibold text-[var(--text-primary)] hover:underline"
-          >
-            {currentDrep.drepName ?? `${currentDrep.drepId.slice(0, 16)}…`}
-          </Link>
-          <div className="text-xs text-[var(--text-tertiary)] mt-0.5">
-            Since epoch {currentDrep.epochStart}
-          </div>
-        </div>
-      )}
 
       {/* Governance History — reference card sitting above Hot Actions
           so delegators see the full historical picture (with the
