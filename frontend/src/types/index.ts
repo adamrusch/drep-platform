@@ -523,6 +523,17 @@ export interface ClubhousePost {
    *  top-level field name used by the GSI partition key on the backend.
    *  Frontend can use either field; both reference the same value. */
   linkedActionId?: string;
+  // ---- P0-3 de-inline migration (2026-05-28) ----
+  /** Denormalized counter on the post row — number of comments in the
+   *  `clubhouse_comments` table for this post. Present on all new
+   *  writes; absent only on rows synced before the migration's backfill
+   *  ran. The frontend renders the badge as
+   *  `commentCount ?? comments?.length ?? 0`. */
+  commentCount?: number;
+  /** ISO-8601 timestamp of the most recent comment on this post. Used
+   *  by the right-rail's "active in last 24h" filter. Absent on posts
+   *  with zero comments. */
+  lastReplyAt?: string;
 }
 
 export interface ClubhouseComment {

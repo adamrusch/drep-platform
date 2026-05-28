@@ -910,6 +910,24 @@ export interface ClubhousePostItem {
    *  partition key on `linkedActionId-index` (see database-stack.ts).
    *  Present only when `type === 'auto_ga'`. */
   linkedActionId?: string;
+  /** ---- P0-3 de-inline migration (2026-05-28) ---- */
+  /** Number of per-row comments in the new `clubhouse_comments` table
+   *  for this post. Denormalized counter — incremented atomically via
+   *  DynamoDB `ADD :one` on every `createComment`. Replaces the
+   *  cardinality read off `comments.length` for the collapsed-card "{n}
+   *  replies" badge and the rail ranker.
+   *
+   *  Frontend renders `commentCount ?? comments?.length ?? 0` during
+   *  rotation — older rows that pre-date the backfill may still have
+   *  the inline array AND no counter. Once the backfill completes,
+   *  every post row carries `commentCount`. */
+  commentCount?: number;
+  /** ISO-8601 timestamp of the most recent comment in `clubhouse_comments`
+   *  for this post. Denormalized via `SET lastReplyAt = :now` on every
+   *  `createComment`. Powers the rail ranker's "active in last 24h"
+   *  filter without scanning the comment set. Absent on posts with zero
+   *  comments. */
+  lastReplyAt?: string;
   [key: string]: unknown;
 }
 
@@ -920,7 +938,13 @@ export interface ClubhousePostItem {
  *  Top-level comments have no `parentCommentId`. The depth guard in
  *  `clubhouse/createComment.ts` enforces the 2-level rule by
  *  rejecting any reply whose parent is itself a reply AND whose
- *  parent's parent is also a reply (i.e. depth would become 3). */
+ *  parent's parent is also a reply (i.e. depth would become 3).
+ *
+ *  This shape mirrors the legacy inline rows stored on
+ *  `ClubhousePostItem.comments[]`. The same shape is also returned by
+ *  the new `listComments.ts` handler that reads from the
+ *  `clubhouse_comments` table (see `ClubhouseCommentRowItem` for the
+ *  full persisted shape). */
 export interface ClubhouseCommentItem {
   commentId: string;
   authorWallet: string;
@@ -933,6 +957,56 @@ export interface ClubhouseCommentItem {
    *  parent that is also a reply. 3-deep is rejected at the API
    *  layer. */
   parentCommentId?: string;
+}
+
+/**
+ * Persisted row shape for the `clubhouse_comments` table. PK=`postKey`
+ * (= `${drepId}#${postId}`), SK=`commentId` (ULID).
+ *
+ * One row per comment — replaces the legacy inline
+ * `clubhouse_posts.comments[]` array (P0-3 migration, 2026-05-28).
+ *
+ * `depth` is persisted on the row so the create handler does NOT need
+ * to walk the entire thread to decide whether a new reply would exceed
+ * the 2-level cap. A new reply only needs one `GetItem` on its parent
+ * — `newDepth = parent.depth + 1`, reject if `parent.depth >= 2`.
+ *
+ * `drepId` + `postId` are denormalized onto every row even though they
+ * can be derived from `postKey`. This keeps the row trivially usable as
+ * a `ClubhouseCommentItem` after the projected fields are stripped, and
+ * avoids the FE/BE having to parse out a composite key. The marginal
+ * storage cost is ~0.1KB/row × ~2500 rows = pennies.
+ */
+export interface ClubhouseCommentRowItem {
+  /** `${drepId}#${postId}` — the partition key. Single Query returns
+   *  every comment for one post in ULID-ascending order. */
+  postKey: string;
+  /** ULID — monotonic on insertion timestamp; sort key. */
+  commentId: string;
+  /** Denormalized — same as the parent post's drepId. */
+  drepId: string;
+  /** Denormalized — same as the parent post's postId. */
+  postId: string;
+  authorWallet: string;
+  authorDisplayName?: string;
+  body: string;
+  createdAt: string;
+  /** Set when this row is a reply. Top-level rows omit the field. */
+  parentCommentId?: string;
+  /** Nesting depth — 0 = top-level, 1 = reply, 2 = sub-reply. Persisted
+   *  on the row so `createComment` doesn't have to walk the whole
+   *  thread to enforce the 2-level cap. */
+  depth: 0 | 1 | 2;
+  [key: string]: unknown;
+}
+
+/**
+ * Compose the PK used by the `clubhouse_comments` table. Exported so
+ * every read/write site uses the same shape — the format is part of
+ * the table contract.
+ */
+export function clubhouseCommentPostKey(drepId: string, postId: string): string {
+  return `${drepId}#${postId}`;
 }
 
 export interface AuditLogItem {
