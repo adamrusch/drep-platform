@@ -896,7 +896,15 @@ export interface ClubhousePostItem {
   authorDisplayName?: string;
   isDRepPost: boolean;
   body: string;
-  comments: ClubhouseCommentItem[];
+  /** @deprecated Inline `comments[]` was REMOVED in P0-3 Phase 6
+   *  (2026-05-28). New writes (`createPost.ts`, `clubhouseAutoPosts.ts`,
+   *  `backfill-ga-auto-posts.ts`) no longer set this field; the source
+   *  of truth is the `clubhouse_comments` table. Kept optional only
+   *  for back-compat reads of pre-Phase-6 rows (effectively empty in
+   *  prod — the feature was never used pre-migration). The Phase 7
+   *  cleanup script (`backend/scripts/cleanup-inline-comments.ts`)
+   *  strips this attribute from existing rows. */
+  comments?: ClubhouseCommentItem[];
   createdAt: string;
   updatedAt: string;
   /** Day-3 additions — optional, rolled-out post-deploy. */

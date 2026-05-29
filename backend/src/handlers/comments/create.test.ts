@@ -30,6 +30,11 @@ import type {
 vi.mock('../../lib/dynamodb', () => ({
   getItem: vi.fn(),
   transactWrite: vi.fn(),
+  // `putItem` is mocked separately so the audit-best-effort tests at the
+  // bottom of this file can drive it directly without going through the
+  // audit module's own mock. The other comments/create tests don't touch
+  // `putItem` — only the audit-helper does.
+  putItem: vi.fn().mockResolvedValue(undefined),
   tableNames: {
     users: 'test-users',
     drepCommittees: 'test-drep_committees',
@@ -61,13 +66,14 @@ vi.mock('../../lib/auth', async () => {
   };
 });
 
-import { getItem, transactWrite } from '../../lib/dynamodb';
+import { getItem, transactWrite, putItem } from '../../lib/dynamodb';
 import { lookupRecognition, lookupStake } from '../../lib/recognition';
 import { validateMutationNonce, verifyWalletSignature } from '../../lib/auth';
 import { handler } from './create';
 
 const mockGet = vi.mocked(getItem);
 const mockTransact = vi.mocked(transactWrite);
+const mockPutItem = vi.mocked(putItem);
 const mockRecognition = vi.mocked(lookupRecognition);
 const mockStake = vi.mocked(lookupStake);
 const mockNonce = vi.mocked(validateMutationNonce);
@@ -117,6 +123,8 @@ describe('comments/create', () => {
     mockGet.mockReset();
     mockTransact.mockReset();
     mockTransact.mockResolvedValue(undefined);
+    mockPutItem.mockReset();
+    mockPutItem.mockResolvedValue(undefined);
     mockRecognition.mockReset();
     mockRecognition.mockResolvedValue({});
     mockStake.mockReset();
@@ -291,5 +299,96 @@ describe('comments/create', () => {
 
     expect(res).toMatchObject({ statusCode: 404 });
     expect(mockTransact).not.toHaveBeenCalled();
+  });
+
+  // ---- Audit-log wiring (Oracle's #1 credibility item, 2026-05-28) ----
+
+  it('writes an audit-log row to the audit_log table on a successful comment', async () => {
+    // The audit module's `writeAuditEvent` is the real implementation
+    // in this file (NOT mocked) — it routes through `putItem` which
+    // IS mocked. We verify the `putItem(auditLog, ...)` call fires
+    // with the expected shape AFTER the mutation `transactWrite` lands.
+    mockGet.mockResolvedValueOnce({ actionId: ACTION_ID, SK: 'ACTION' } as never);
+
+    const res = (await handler(
+      buildEvent({
+        walletAddress: WALLET,
+        roles: ['delegator'],
+        actionId: ACTION_ID,
+        body: validBody,
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 201 });
+    // Find the audit-log putItem call. There MAY in theory be other
+    // putItem calls in some handlers, but comments/create only fires
+    // ONE putItem (the audit write) — the mutation goes through
+    // transactWrite.
+    const auditCalls = mockPutItem.mock.calls.filter(
+      (c) => c[0] === 'test-audit_log',
+    );
+    expect(auditCalls).toHaveLength(1);
+    const row = auditCalls[0]![1] as Record<string, unknown>;
+    expect(row['entityType']).toBe('comment');
+    expect(typeof row['entityId']).toBe('string');
+    expect(row['eventType']).toBe('comment.created');
+    expect(row['actorWallet']).toBe(WALLET);
+    // pk + sk + ttl follow the schema-pinned shape.
+    expect(row['pk']).toBe(`comment#${row['entityId'] as string}`);
+    expect(typeof row['sk']).toBe('string');
+    expect((row['sk'] as string).endsWith('#comment.created')).toBe(true);
+    expect(typeof row['ttl']).toBe('number');
+    // Metadata is the documented minimal/non-sensitive shape — IDs +
+    // flags only, NEVER the body.
+    const metadata = row['metadata'] as Record<string, unknown>;
+    expect(metadata['actionId']).toBe(ACTION_ID);
+    expect(metadata['isPublic']).toBe(true);
+    // Body field MUST NOT appear in the audit metadata.
+    expect(metadata).not.toHaveProperty('body');
+  });
+
+  it('CRITICAL: a thrown error from the audit-log putItem does NOT change the handler\'s 201 response (best-effort guarantee)', async () => {
+    // This is THE handler-integration test that proves the load-bearing
+    // invariant called out in the brief: an audit-write failure MUST
+    // NEVER fail or 5xx the underlying mutation. If this test ever
+    // flakes back to expecting a 5xx, the entire mutation surface
+    // becomes takedown-able via DDB partition throttling on
+    // `audit_log`.
+    //
+    // We arrange the underlying mutation (transactWrite) to SUCCEED,
+    // and the trailing audit putItem to REJECT. The handler must still
+    // return 201 with the created comment.
+    mockGet.mockResolvedValueOnce({ actionId: ACTION_ID, SK: 'ACTION' } as never);
+    mockPutItem.mockRejectedValueOnce(
+      new Error('audit_log partition throttled'),
+    );
+    // Silence the warn from the audit helper so the test output stays
+    // clean. We assert the warn was called (= audit error path
+    // exercised) below.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const res = (await handler(
+      buildEvent({
+        walletAddress: WALLET,
+        roles: ['delegator'],
+        actionId: ACTION_ID,
+        body: validBody,
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    // The mutation succeeded — the handler MUST still return 201.
+    expect(res).toMatchObject({ statusCode: 201 });
+    // The mutation transactWrite IS the source of truth. It fired.
+    expect(mockTransact).toHaveBeenCalledTimes(1);
+    // The audit putItem WAS attempted (so this test actually exercises
+    // the path under question; if it had been skipped, the test would
+    // be vacuously passing).
+    const auditCalls = mockPutItem.mock.calls.filter(
+      (c) => c[0] === 'test-audit_log',
+    );
+    expect(auditCalls).toHaveLength(1);
+    // The failure was logged (via console.warn) but swallowed.
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 });
