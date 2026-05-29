@@ -145,6 +145,22 @@ export function internalError(message = 'Internal server error'): APIGatewayProx
   };
 }
 
+/**
+ * 503 Service Unavailable. Use when a write surface depends on an
+ * upstream we couldn't reach (Koios + Blockfrost both down) AND
+ * uncertainty about the answer must not grant access — i.e. fail-CLOSED
+ * paths. The frontend can present a "please retry" affordance keyed on
+ * this status; differs semantically from a 500 (we know what happened —
+ * upstream is unreachable — so this is an expected, transient condition).
+ */
+export function serviceUnavailable(message = 'Service Unavailable'): APIGatewayProxyResultV2 {
+  return {
+    statusCode: 503,
+    headers: corsHeaders,
+    body: JSON.stringify({ error: 'ServiceUnavailable', message, statusCode: 503 }),
+  };
+}
+
 export function handleError(err: unknown): APIGatewayProxyResultV2 {
   if (err instanceof Error) {
     if (err.name === 'AuthorizationError') {

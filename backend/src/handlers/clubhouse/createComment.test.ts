@@ -696,7 +696,12 @@ describe('clubhouse/createComment — membership gate', () => {
     expect(findCommentsTablePut()).toBeDefined();
   });
 
-  it('soft-allows when Koios+Blockfrost both fail (source: null)', async () => {
+  it('fails CLOSED with 503 when Koios+Blockfrost both fail (source: null) AND caller is not a role-holder', async () => {
+    // SEC-2 (2026-05-28): the previous behavior was to soft-allow on
+    // dual-upstream outage. Oracle flagged that as fail-open. New
+    // posture: 503 the write so an attacker who can degrade the
+    // delegation lookup can't post into any clubhouse. Role-holders
+    // are exempt (separate test below).
     wireDdbMocks({ post: buildPostWithComments([]), committee: buildCommittee() });
     mockLookup.mockResolvedValueOnce({ drepId: null, source: null });
 
@@ -705,7 +710,59 @@ describe('clubhouse/createComment — membership gate', () => {
         drepId: DREP_ID,
         postId: POST_ID,
         walletAddress: WALLET,
-        body: { body: 'koios is down' },
+        body: { body: 'koios is down — I should NOT be allowed through' },
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 503 });
+    const parsed = JSON.parse((res as { body: string }).body) as {
+      error: string;
+      message: string;
+    };
+    expect(parsed.error).toBe('ServiceUnavailable');
+    expect(parsed.message).toMatch(/verify your delegation|retry/i);
+    // CRITICAL: no write should have happened on the fail-closed path.
+    expect(findCommentsTablePut()).toBeUndefined();
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it('role-holder BYPASS: lead DRep still comments during a dual-upstream outage', async () => {
+    // The fail-closed change above MUST NOT lock out role-holders. A
+    // lead is identified via the local DDB committee Get, which has
+    // no upstream dependency — they can comment even during a Koios
+    // + Blockfrost outage.
+    wireDdbMocks({
+      post: buildPostWithComments([]),
+      committee: buildCommittee({ leadWallet: WALLET }),
+    });
+    mockLookup.mockResolvedValueOnce({ drepId: null, source: null });
+
+    const res = (await handler(
+      buildEvent({
+        drepId: DREP_ID,
+        postId: POST_ID,
+        walletAddress: WALLET,
+        body: { body: 'lead chime-in during outage' },
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 200 });
+    expect(findCommentsTablePut()).toBeDefined();
+  });
+
+  it('role-holder BYPASS: committee_member still comments during a dual-upstream outage', async () => {
+    wireDdbMocks({
+      post: buildPostWithComments([]),
+      committee: buildCommittee({ memberWallets: [WALLET] }),
+    });
+    mockLookup.mockResolvedValueOnce({ drepId: null, source: null });
+
+    const res = (await handler(
+      buildEvent({
+        drepId: DREP_ID,
+        postId: POST_ID,
+        walletAddress: WALLET,
+        body: { body: 'committee voice during outage' },
       }),
     )) as APIGatewayProxyResultV2;
 

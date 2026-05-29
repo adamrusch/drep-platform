@@ -9,7 +9,7 @@ import type {
 import { extractAuthContext } from '../../middleware/role-guard';
 import { lookupRecognition } from '../../lib/recognition';
 import { resolveClubhouseMembership } from './_membership';
-import { created, badRequest, forbidden, handleError } from '../_response';
+import { created, badRequest, forbidden, serviceUnavailable, handleError } from '../_response';
 
 interface CreatePostBody {
   body: string;
@@ -101,6 +101,19 @@ export const handler = async (
     // full policy. The Clubhouse is private to (a) the DRep's committee
     // and (b) wallets currently delegating to this DRep on-chain.
     //
+    // **2026-05-28 SEC-2 fail-closed change:** if neither role nor
+    // delegation can affirm membership AND both upstreams are down for
+    // the delegation lookup (`delegationUnknown`), reject with 503 —
+    // uncertainty about delegation MUST NOT grant access. Role-holders
+    // bypass this 503 path entirely because the committee Get is a
+    // local DDB read with no external dependency, so the DRep and
+    // their committee retain write access during outages.
+    //
+    // Prior behavior (≤ 2026-05-27) soft-allowed writes when both
+    // upstreams failed; Oracle's fresh-eyes audit flagged that as a
+    // fail-open anti-pattern (an attacker who can degrade the lookup
+    // posts into any clubhouse with no check).
+    //
     // **2026-05-28 change:** the original `createPost` was role-only
     // (requireRole on the JWT). A user reported they couldn't post in
     // their own delegated-DRep's clubhouse because they're not a
@@ -113,17 +126,19 @@ export const handler = async (
       drepIdDecoded,
     );
     if (!membership.isRoleHolder && !membership.isCurrentDelegator) {
-      if (!membership.delegationUnknown) {
-        return forbidden(
-          'You must be delegated to this DRep or be a committee member to post in their clubhouse',
+      if (membership.delegationUnknown) {
+        // Fail-CLOSED: dual-upstream outage means we can't confirm
+        // delegation. Role-holders never hit this branch (they would
+        // have been let through above on `isRoleHolder`).
+        console.warn(
+          `createPost: 503 rejecting ${authCtx.walletAddress} on drepId=${drepIdDecoded} — delegation lookup failed (Koios+Blockfrost both unreachable) and caller is not a role-holder`,
+        );
+        return serviceUnavailable(
+          "Couldn't verify your delegation right now, please retry",
         );
       }
-      // Upstream couldn't be reached. Log and fall through to allow —
-      // a transient Koios outage shouldn't 503 the surface for
-      // legitimate delegators. Role-holders are unaffected (committee
-      // lookup is a DDB Get, not an upstream call).
-      console.warn(
-        `createPost: allowing post from ${authCtx.walletAddress} despite unknown delegation (Koios+Blockfrost both failed)`,
+      return forbidden(
+        'You must be delegated to this DRep or be a committee member to post in their clubhouse',
       );
     }
 

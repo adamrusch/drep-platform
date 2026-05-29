@@ -14,7 +14,7 @@ import {
 } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { resolveClubhouseMembership } from './_membership';
-import { ok, badRequest, forbidden, notFound, handleError } from '../_response';
+import { ok, badRequest, forbidden, notFound, serviceUnavailable, handleError } from '../_response';
 
 interface CreateClubhouseCommentBody {
   body: string;
@@ -63,13 +63,13 @@ interface CreateClubhouseCommentBody {
  * (one `GetItem`); pre-backfill we fall back to the in-memory walk
  * against `post.comments[]` so the gate still works during rotation.
  *
- * # KNOWN-ISSUE: votePoll RMW
+ * # Companion: votePoll RMW
  *
- * The companion handler `votePoll.ts` does its OWN read-modify-write
- * of `pollVotes` on the post row. Oracle flagged that as a separate
- * P1 follow-up — not addressed in this PR (which is scoped to the
- * comment-cap blast radius). Tracked alongside Phases 5/6/7 in the
- * plan.
+ * The companion handler `votePoll.ts` previously did its OWN read-
+ * modify-write of `pollVotes` on the post row. Fixed in SEC-2
+ * (2026-05-28) — `votePoll` now issues a single atomic UpdateExpression
+ * (`SET pollVotes.<wallet> = :newIdx` + `ADD pollOptions[i].votes`)
+ * guarded by a per-wallet ConditionExpression. No RMW on either path.
  */
 export const handler = async (
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
@@ -154,18 +154,31 @@ export const handler = async (
     // See `_membership.ts` for the policy. Role-holders (lead /
     // committee_member / trusted_delegator) and wallets currently
     // delegating to THIS DRep may comment; everyone else is rejected.
-    // Soft-fail when both Koios + Blockfrost are unreachable so a
-    // transient upstream outage doesn't 503 the comment surface; the
-    // role-holder branch is unaffected (DDB Get).
+    //
+    // **2026-05-28 SEC-2 fail-closed change:** when both Koios +
+    // Blockfrost are unreachable AND the caller is not a role-holder,
+    // reject with 503 — uncertainty about delegation MUST NOT grant
+    // access. The role-holder branch is the bypass: committee membership
+    // is a local DDB Get with no upstream dependency, so the DRep and
+    // their committee retain comment access during outages.
+    //
+    // Prior behavior (≤ 2026-05-27) soft-allowed; Oracle flagged that
+    // as fail-open. See `_membership.ts` for the full rationale.
     const membership = await resolveClubhouseMembership(authCtx.walletAddress, drepId);
     if (!membership.isRoleHolder && !membership.isCurrentDelegator) {
-      if (!membership.delegationUnknown) {
-        return forbidden(
-          'You must be delegated to this DRep or be a committee member to post in their clubhouse',
+      if (membership.delegationUnknown) {
+        // Fail-CLOSED: role-holders never hit this branch (they would
+        // have been let through above on `isRoleHolder`). A non-role-
+        // holder gets a 503 so they can retry once upstream recovers.
+        console.warn(
+          `createComment: 503 rejecting ${authCtx.walletAddress} on drepId=${drepId} — delegation lookup failed (Koios+Blockfrost both unreachable) and caller is not a role-holder`,
+        );
+        return serviceUnavailable(
+          "Couldn't verify your delegation right now, please retry",
         );
       }
-      console.warn(
-        `createComment: allowing comment from ${authCtx.walletAddress} despite unknown delegation (Koios+Blockfrost both failed)`,
+      return forbidden(
+        'You must be delegated to this DRep or be a committee member to post in their clubhouse',
       );
     }
 
