@@ -2,6 +2,7 @@ import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 }
 import { getItem, putItem, tableNames } from '../../lib/dynamodb';
 import type { UserItem, SocialLinks } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
+import { writeAuditEvent } from '../../lib/audit';
 import { ok, badRequest, internalError, handleError } from '../_response';
 
 interface UpsertProfileBody {
@@ -61,6 +62,24 @@ export const handler = async (
     };
 
     await putItem(tableNames.users, updated);
+
+    // Best-effort audit AFTER the user-row write succeeds. Metadata
+    // captures WHICH fields were touched (not their values — that's
+    // PII territory).
+    await writeAuditEvent({
+      entityType: 'user_profile',
+      entityId: authCtx.walletAddress,
+      eventType: 'profile.updated',
+      actorWallet: authCtx.walletAddress,
+      metadata: {
+        isNewProfile: existing === undefined,
+        fieldsSet: [
+          ...(body.displayName !== undefined ? ['displayName'] : []),
+          ...(body.bio !== undefined ? ['bio'] : []),
+          ...(body.socialLinks !== undefined ? ['socialLinks'] : []),
+        ],
+      },
+    });
 
     const {
       sessionTokenHash: _s,

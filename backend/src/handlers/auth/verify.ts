@@ -10,6 +10,7 @@ import {
 } from '../../lib/auth';
 import { getItem, putItem, tableNames } from '../../lib/dynamodb';
 import { _invalidateForStake } from '../../lib/recognition';
+import { writeAuditEvent } from '../../lib/audit';
 import type { UserItem, SessionType } from '../../lib/types';
 import { ok, badRequest, unauthorized, internalError } from '../_response';
 
@@ -109,6 +110,22 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     } catch (err) {
       console.warn('verify: recognition cache eviction failed (non-fatal):', err);
     }
+
+    // Best-effort audit AFTER the user-row write succeeds. The actor
+    // and entity are both the verified wallet — `auth.login` events
+    // colocate per-wallet so `Query(pk='auth#stake1...')` yields a
+    // login timeline for incident review.
+    await writeAuditEvent({
+      entityType: 'auth',
+      entityId: walletAddress,
+      eventType: 'auth.login',
+      actorWallet: walletAddress,
+      metadata: {
+        sessionType,
+        rolesAtIssue: typedRoles,
+        isNewUser: existing === undefined,
+      },
+    });
 
     const cookieHeader = buildSetCookieHeader(token, sessionType);
 

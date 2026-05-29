@@ -8,6 +8,7 @@ import type {
 } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { lookupRecognition } from '../../lib/recognition';
+import { writeAuditEvent } from '../../lib/audit';
 import { resolveClubhouseMembership } from './_membership';
 import { created, badRequest, forbidden, serviceUnavailable, handleError } from '../_response';
 
@@ -133,10 +134,35 @@ export const handler = async (
         console.warn(
           `createPost: 503 rejecting ${authCtx.walletAddress} on drepId=${drepIdDecoded} — delegation lookup failed (Koios+Blockfrost both unreachable) and caller is not a role-holder`,
         );
+        // Audit the security-relevant rejection — these are the rows an
+        // incident-responder needs to spot abuse during a Koios outage
+        // (e.g. someone trying to slip writes through under cover of
+        // an upstream blip).
+        await writeAuditEvent({
+          entityType: 'auth',
+          entityId: authCtx.walletAddress,
+          eventType: 'auth.delegation_unverified',
+          actorWallet: authCtx.walletAddress,
+          metadata: {
+            surface: 'createPost',
+            drepId: drepIdDecoded,
+          },
+        });
         return serviceUnavailable(
           "Couldn't verify your delegation right now, please retry",
         );
       }
+      await writeAuditEvent({
+        entityType: 'clubhouse_post',
+        entityId: drepIdDecoded,
+        eventType: 'clubhouse.post.denied',
+        actorWallet: authCtx.walletAddress,
+        metadata: {
+          surface: 'createPost',
+          drepId: drepIdDecoded,
+          reason: 'not_member',
+        },
+      });
       return forbidden(
         'You must be delegated to this DRep or be a committee member to post in their clubhouse',
       );
@@ -168,16 +194,16 @@ export const handler = async (
       authorWallet: authCtx.walletAddress,
       isDRepPost,
       body: reqBody.body.trim(),
-      comments: [],
       createdAt: now,
       updatedAt: now,
       type: postType,
-      // P0-3 de-inline migration (2026-05-28): initialize the denormalized
-      // counter so the `ADD :one` in `createComment.ts` starts from a
-      // known-good zero. Without this, the first comment's `ADD` would
-      // create the attribute lazily (DynamoDB treats missing as 0 for
-      // `ADD`), but reads would have to default the field too. Setting it
-      // explicitly here is cheaper than handling absence on every read.
+      // P0-3 de-inline migration (2026-05-28): the inline `comments: []`
+      // field was REMOVED in Phase 6. Posts now carry only the
+      // denormalized `commentCount` counter; the per-row comments live
+      // in `clubhouse_comments`. The Phase 7 cleanup script strips the
+      // residual empty `comments` attribute from existing post rows.
+      // Initialize the counter so the `ADD :one` in `createComment.ts`
+      // starts from a known-good zero.
       commentCount: 0,
       ...(reqBody.title?.trim() ? { title: reqBody.title.trim() } : {}),
       ...(pollOptions ? { pollOptions, pollMultiple: pollMultiple ?? false } : {}),
@@ -188,6 +214,19 @@ export const handler = async (
     };
 
     await putItem(tableNames.clubhousePosts, post as unknown as Record<string, unknown>);
+
+    await writeAuditEvent({
+      entityType: 'clubhouse_post',
+      entityId: postId,
+      eventType: 'clubhouse.post.created',
+      actorWallet: authCtx.walletAddress,
+      metadata: {
+        drepId: drepIdDecoded,
+        type: postType,
+        isDRepPost,
+        ...(pollOptions ? { pollOptionCount: pollOptions.length } : {}),
+      },
+    });
 
     return created(post);
   } catch (err) {
