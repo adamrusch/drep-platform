@@ -46,6 +46,7 @@ import {
   activeDRepIds,
   fanoutAutoPosts,
   selectCompletionSweepCandidates,
+  selectFanoutCandidates,
   unpinAutoPostsForAction,
 } from './clubhouseAutoPosts';
 import type { DRepDirectoryItem } from '../lib/types';
@@ -1091,20 +1092,32 @@ async function processAutoPostFanout(
     completionSweepUnpinned: 0,
   };
 
-  // Fan-out for newly-detected GAs. Only load the DRep list when there
-  // ARE new GAs — on quiet cycles (the common case) we skip the GSI
-  // query entirely.
-  if (newGAItems.length > 0) {
+  // Fan-out for newly-detected GAs. SEC-2 (2026-05-28): a brand-new GA
+  // whose status is already `enacted` / `expired` / `dropped` is filtered
+  // out — fanning out ~368 pinned posts that the immediate sweep would
+  // unpin (and then the new-rows-fan-out + sweep noise in CloudWatch)
+  // for an auto-post that's invisible to delegators is ~736 wasted
+  // writes per born-completed GA. Active GAs (the common case) pass
+  // through unchanged.
+  const fanoutCandidates = selectFanoutCandidates(newGAItems);
+  if (fanoutCandidates.length > 0) {
+    // Only load the DRep list when we have at least one fan-out
+    // candidate — on quiet cycles (the common case) we skip the GSI
+    // query entirely.
     const drepIds = await loadActiveDRepIds();
     if (drepIds.length === 0) {
       console.warn(
-        `auto-post fan-out: 0 active DReps loaded; skipping fan-out for ${newGAItems.length} new GA(s)`,
+        `auto-post fan-out: 0 active DReps loaded; skipping fan-out for ${fanoutCandidates.length} new GA(s)`,
       );
     } else {
+      const bornCompletedSkipped = newGAItems.length - fanoutCandidates.length;
       console.log(
-        `auto-post fan-out: ${newGAItems.length} new GA(s) × ${drepIds.length} active DReps`,
+        `auto-post fan-out: ${fanoutCandidates.length} new GA(s) × ${drepIds.length} active DReps` +
+          (bornCompletedSkipped > 0
+            ? ` (skipped ${bornCompletedSkipped} born-completed GA(s))`
+            : ''),
       );
-      for (const ga of newGAItems) {
+      for (const ga of fanoutCandidates) {
         try {
           // The `now` we pass here is what gets stamped on every row's
           // `abstractFrozenAt` AND `createdAt`. Using a single timestamp
@@ -1125,6 +1138,12 @@ async function processAutoPostFanout(
         }
       }
     }
+  } else if (newGAItems.length > 0) {
+    // All new GAs were born-completed — log the skip explicitly so
+    // CloudWatch shows the work was intentionally avoided.
+    console.log(
+      `auto-post fan-out: skipped all ${newGAItems.length} new GA(s) (born-completed)`,
+    );
   }
 
   // Completion sweep — find GAs that transitioned INTO a completed
