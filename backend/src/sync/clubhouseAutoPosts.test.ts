@@ -50,6 +50,7 @@ import {
   buildAutoPostBody,
   fanoutAutoPosts,
   selectCompletionSweepCandidates,
+  selectFanoutCandidates,
   unpinAutoPostsForAction,
   activeDRepIds,
   AUTO_POST_AUTHOR_DISPLAY_NAME,
@@ -326,13 +327,16 @@ describe('selectCompletionSweepCandidates', () => {
     expect(selectCompletionSweepCandidates(pairs)).toHaveLength(0);
   });
 
-  it('fires for a brand-new GA that lands ALREADY-completed (no previous row)', () => {
-    // Edge case: a cold-start backfill or a particularly slow sync
-    // could insert a row that's already past its lifecycle. We fire
-    // the sweep so any auto-posts created (by a parallel fan-out) get
-    // unpinned correctly. In practice the new-GA detection branch
-    // upstream will fan out FIRST then this sweep will unpin — the
-    // order matters; tested via the integration test below.
+  it('SKIPS a brand-new GA that lands ALREADY-completed (no previous row) — SEC-2 born-completed guard', () => {
+    // SEC-2 (2026-05-28): a GA discovered for the first time when
+    // it's ALREADY in a completed state (`enacted`/`expired`/`dropped`)
+    // skips the fan-out (handled in governance-intake's
+    // `selectFanoutCandidates`), so there are no pinned auto-posts to
+    // unpin. Running the sweep regardless would issue ~368 UpdateItem
+    // calls against nonexistent post rows — wasted work and CloudWatch
+    // noise. Pre-SEC-2 this fired; the comment in the previous version
+    // of this test rationalized it as "in case a parallel fan-out
+    // created posts" but the new fan-out gate makes that impossible.
     const pairs = [
       {
         actionId: 'a#0',
@@ -340,7 +344,73 @@ describe('selectCompletionSweepCandidates', () => {
         next: buildAction({ actionId: 'a#0', status: 'expired' }),
       },
     ];
-    expect(selectCompletionSweepCandidates(pairs)).toHaveLength(1);
+    expect(selectCompletionSweepCandidates(pairs)).toHaveLength(0);
+  });
+
+  it('SKIPS a born-completed GA across all three completed statuses', () => {
+    // Coverage matrix — every completed status should follow the same
+    // born-completed skip rule.
+    for (const status of ['enacted', 'expired', 'dropped']) {
+      const pairs = [
+        {
+          actionId: 'a#0',
+          previous: undefined,
+          next: buildAction({ actionId: 'a#0', status: status as 'enacted' }),
+        },
+      ];
+      expect(selectCompletionSweepCandidates(pairs)).toHaveLength(0);
+    }
+  });
+});
+
+describe('selectFanoutCandidates', () => {
+  it('passes through new active GAs unchanged (the common case)', () => {
+    const active = buildAction({ actionId: 'a#0', status: 'active' });
+    expect(selectFanoutCandidates([active])).toEqual([active]);
+  });
+
+  it('SKIPS new GAs that are born-completed (enacted/expired/dropped)', () => {
+    // Cold-start / late-discovery scenario: a GA the sync sees for
+    // the first time when its lifecycle is already finished. Fanning
+    // out ~368 pinned auto-posts that nobody can see (they'd be
+    // unpinned immediately) is ~736 wasted DDB writes per GA plus
+    // CloudWatch noise. SEC-2 (2026-05-28): we skip these.
+    expect(
+      selectFanoutCandidates([
+        buildAction({ actionId: 'a#0', status: 'enacted' }),
+      ]),
+    ).toEqual([]);
+    expect(
+      selectFanoutCandidates([
+        buildAction({ actionId: 'b#0', status: 'expired' }),
+      ]),
+    ).toEqual([]);
+    expect(
+      selectFanoutCandidates([
+        buildAction({ actionId: 'c#0', status: 'dropped' }),
+      ]),
+    ).toEqual([]);
+  });
+
+  it('mixes: keeps active ones, drops born-completed ones (preserves input order)', () => {
+    // The full GovernanceActionStatus enum is
+    // `'active' | 'expired' | 'enacted' | 'dropped'`. `active` is the
+    // only non-completed value. The filter must drop the three
+    // completed statuses while keeping order on the rest.
+    const list = [
+      buildAction({ actionId: 'a#0', status: 'active' }),
+      buildAction({ actionId: 'b#0', status: 'expired' }),
+      buildAction({ actionId: 'c#0', status: 'active' }),
+      buildAction({ actionId: 'd#0', status: 'enacted' }),
+      buildAction({ actionId: 'e#0', status: 'dropped' }),
+      buildAction({ actionId: 'f#0', status: 'active' }),
+    ];
+    const out = selectFanoutCandidates(list);
+    expect(out.map((g) => g.actionId)).toEqual(['a#0', 'c#0', 'f#0']);
+  });
+
+  it('empty list → empty list', () => {
+    expect(selectFanoutCandidates([])).toEqual([]);
   });
 });
 
