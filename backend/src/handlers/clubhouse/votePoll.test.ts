@@ -58,6 +58,12 @@ vi.mock('../../lib/dynamodb', () => ({
   },
 }));
 
+// Stub the audit-log writer — see `lib/audit.test.ts` for its own
+// coverage. Tests in THIS file focus on the poll-vote mutation.
+vi.mock('../../lib/audit', () => ({
+  writeAuditEvent: vi.fn().mockResolvedValue(undefined),
+}));
+
 import { docClient, getItem } from '../../lib/dynamodb';
 import { handler } from './votePoll';
 

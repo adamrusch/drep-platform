@@ -177,10 +177,10 @@ async function writeAutoPost(
     isDRepPost: false,
     body,
     title,
-    comments: [],
-    // P0-3 de-inline migration (2026-05-28): every freshly-written
-    // post carries the denormalized comment counter initialized to 0.
-    // See `backend/src/handlers/clubhouse/createComment.ts` for the
+    // P0-3 de-inline migration (2026-05-28): the inline `comments: []`
+    // field was REMOVED in Phase 6. Posts carry only the denormalized
+    // `commentCount: 0` counter. See
+    // `backend/src/handlers/clubhouse/createComment.ts` for the
     // matching `ADD :one` contract.
     commentCount: 0,
     createdAt: now,

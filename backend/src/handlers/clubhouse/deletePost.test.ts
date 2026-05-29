@@ -51,6 +51,11 @@ import type {
 vi.mock('../../lib/dynamodb', () => ({
   getItem: vi.fn(),
   deleteItem: vi.fn(),
+  // P0-3 Phase 6+ (2026-05-28): deletePost now cascades to comment
+  // rows in `clubhouse_comments` via a Query. Default to an empty
+  // page so existing tests that don't care about the cascade keep
+  // their semantics; cascade-specific tests override per-test.
+  queryItems: vi.fn().mockResolvedValue({ items: [], count: 0 }),
   tableNames: {
     users: 'test-users',
     drepCommittees: 'test-drep_committees',
@@ -60,16 +65,27 @@ vi.mock('../../lib/dynamodb', () => ({
     comments: 'test-comments',
     commentVotes: 'test-comment_votes',
     clubhousePosts: 'test-clubhouse_posts',
+    clubhouseComments: 'test-clubhouse_comments',
     auditLog: 'test-audit_log',
     authNonces: 'test-auth_nonces',
   },
 }));
 
-import { getItem, deleteItem } from '../../lib/dynamodb';
+// Audit-log writes are side-channel — stub to a no-op so test
+// expectations focus on the delete behaviour. See `lib/audit.test.ts`
+// for the audit module's own coverage.
+vi.mock('../../lib/audit', () => ({
+  writeAuditEvent: vi.fn().mockResolvedValue(undefined),
+}));
+
+import { getItem, deleteItem, queryItems } from '../../lib/dynamodb';
+import { writeAuditEvent } from '../../lib/audit';
 import { handler } from './deletePost';
 
 const mockGet = vi.mocked(getItem);
 const mockDelete = vi.mocked(deleteItem);
+const mockQuery = vi.mocked(queryItems);
+const mockAudit = vi.mocked(writeAuditEvent);
 
 // Two distinct DReps: X (the post's owner clubhouse) and Y (the
 // attacker's clubhouse — they lead Y but not X).
@@ -165,6 +181,10 @@ describe('clubhouse/deletePost — P0-4 scope of lead_drep override', () => {
     mockGet.mockReset();
     mockDelete.mockReset();
     mockDelete.mockResolvedValue(undefined);
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValue({ items: [], count: 0 });
+    mockAudit.mockReset();
+    mockAudit.mockResolvedValue(undefined);
   });
 
   it('REJECTS the exploit: caller leads DRep Y, tries to delete a post in DRep X\'s clubhouse → 403', async () => {
@@ -303,6 +323,8 @@ describe('clubhouse/deletePost — P0-4 scope of lead_drep override', () => {
     mockGet.mockReset();
     mockDelete.mockReset();
     mockDelete.mockResolvedValue(undefined);
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValue({ items: [], count: 0 });
     mockGet
       .mockResolvedValueOnce(buildPost(POST_AUTHOR, DREP_X) as never)
       .mockResolvedValueOnce(undefined);
@@ -351,5 +373,187 @@ describe('clubhouse/deletePost — P0-4 scope of lead_drep override', () => {
 
     expect(res).toMatchObject({ statusCode: 404 });
     expect(mockDelete).not.toHaveBeenCalled();
+  });
+});
+
+describe('clubhouse/deletePost — P0-3 Phase 6+ comment-row cascade (2026-05-28)', () => {
+  // Now that comments live in the per-row `clubhouse_comments` table
+  // (PK=postKey=`drepId#postId`, SK=commentId), deleting a post MUST
+  // remove its comment rows too — otherwise the rows orphan with no
+  // way to re-attach or surface them.
+  beforeEach(() => {
+    mockGet.mockReset();
+    mockDelete.mockReset();
+    mockDelete.mockResolvedValue(undefined);
+    mockQuery.mockReset();
+    mockAudit.mockReset();
+    mockAudit.mockResolvedValue(undefined);
+  });
+
+  it('cascades to delete every clubhouse_comments row under the post (one Query → N deletes)', async () => {
+    mockGet
+      .mockResolvedValueOnce(buildPost(POST_AUTHOR, DREP_X) as never)
+      .mockResolvedValueOnce(buildXCommittee() as never);
+    // Query against clubhouse_comments returns 3 rows on a single page.
+    mockQuery.mockResolvedValueOnce({
+      items: [
+        { postKey: `${DREP_X}#${POST_ID}`, commentId: 'c1' },
+        { postKey: `${DREP_X}#${POST_ID}`, commentId: 'c2' },
+        { postKey: `${DREP_X}#${POST_ID}`, commentId: 'c3' },
+      ],
+      count: 3,
+    });
+
+    const res = (await handler(
+      buildEvent({
+        walletAddress: POST_AUTHOR,
+        roles: [],
+        drepId: DREP_X,
+        postId: POST_ID,
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 204 });
+    // 1 delete for the post + 3 for the comment rows = 4 total.
+    expect(mockDelete).toHaveBeenCalledTimes(4);
+    // The post delete fires first.
+    expect(mockDelete.mock.calls[0]![0]).toBe('test-clubhouse_posts');
+    // The cascade deletes go to clubhouse_comments with the right keys.
+    const cascadeCalls = mockDelete.mock.calls.filter(
+      (c) => c[0] === 'test-clubhouse_comments',
+    );
+    expect(cascadeCalls).toHaveLength(3);
+    expect(cascadeCalls.map((c) => (c[1] as Record<string, unknown>)['commentId'])).toEqual(
+      ['c1', 'c2', 'c3'],
+    );
+    // The Query used the partition-key shape we expect.
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+    const queryArgs = mockQuery.mock.calls[0]![1] as { expressionAttributeValues: Record<string, unknown> };
+    expect(queryArgs.expressionAttributeValues[':pk']).toBe(`${DREP_X}#${POST_ID}`);
+  });
+
+  it('cascades across paginated Query pages (LastEvaluatedKey loop)', async () => {
+    // First page returns 2 rows + a continuation key; second page
+    // returns 1 row + no continuation. Total 3 cascade deletes.
+    mockGet
+      .mockResolvedValueOnce(buildPost(POST_AUTHOR, DREP_X) as never)
+      .mockResolvedValueOnce(buildXCommittee() as never);
+    mockQuery
+      .mockResolvedValueOnce({
+        items: [
+          { postKey: `${DREP_X}#${POST_ID}`, commentId: 'c1' },
+          { postKey: `${DREP_X}#${POST_ID}`, commentId: 'c2' },
+        ],
+        count: 2,
+        lastEvaluatedKey: { postKey: `${DREP_X}#${POST_ID}`, commentId: 'c2' },
+      })
+      .mockResolvedValueOnce({
+        items: [{ postKey: `${DREP_X}#${POST_ID}`, commentId: 'c3' }],
+        count: 1,
+      });
+
+    const res = (await handler(
+      buildEvent({
+        walletAddress: POST_AUTHOR,
+        roles: [],
+        drepId: DREP_X,
+        postId: POST_ID,
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 204 });
+    expect(mockQuery).toHaveBeenCalledTimes(2);
+    const cascadeCalls = mockDelete.mock.calls.filter(
+      (c) => c[0] === 'test-clubhouse_comments',
+    );
+    expect(cascadeCalls).toHaveLength(3);
+  });
+
+  it('204 even when zero comments exist on the post (no-comments cascade is a no-op)', async () => {
+    mockGet
+      .mockResolvedValueOnce(buildPost(POST_AUTHOR, DREP_X) as never)
+      .mockResolvedValueOnce(buildXCommittee() as never);
+    mockQuery.mockResolvedValueOnce({ items: [], count: 0 });
+
+    const res = (await handler(
+      buildEvent({
+        walletAddress: POST_AUTHOR,
+        roles: [],
+        drepId: DREP_X,
+        postId: POST_ID,
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 204 });
+    // Post delete fires. No cascade deletes — there's nothing to
+    // delete.
+    const cascadeCalls = mockDelete.mock.calls.filter(
+      (c) => c[0] === 'test-clubhouse_comments',
+    );
+    expect(cascadeCalls).toHaveLength(0);
+  });
+
+  it('continues + logs when a single comment-row delete fails (idempotent — re-run picks it up)', async () => {
+    mockGet
+      .mockResolvedValueOnce(buildPost(POST_AUTHOR, DREP_X) as never)
+      .mockResolvedValueOnce(buildXCommittee() as never);
+    mockQuery.mockResolvedValueOnce({
+      items: [
+        { postKey: `${DREP_X}#${POST_ID}`, commentId: 'c1' },
+        { postKey: `${DREP_X}#${POST_ID}`, commentId: 'c2' },
+      ],
+      count: 2,
+    });
+    // The post delete (first call) succeeds; c1 delete fails; c2
+    // succeeds. The handler still returns 204.
+    mockDelete
+      .mockResolvedValueOnce(undefined) // post delete
+      .mockRejectedValueOnce(new Error('throttled')) // c1 delete fails
+      .mockResolvedValueOnce(undefined); // c2 delete OK
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const res = (await handler(
+      buildEvent({
+        walletAddress: POST_AUTHOR,
+        roles: [],
+        drepId: DREP_X,
+        postId: POST_ID,
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 204 });
+    // The failure is logged; the cascade continues.
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('post delete still happens even if the cascade Query throws (idempotent re-run cleans up later)', async () => {
+    mockGet
+      .mockResolvedValueOnce(buildPost(POST_AUTHOR, DREP_X) as never)
+      .mockResolvedValueOnce(buildXCommittee() as never);
+    mockQuery.mockRejectedValueOnce(new Error('DDB Query failed'));
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const res = (await handler(
+      buildEvent({
+        walletAddress: POST_AUTHOR,
+        roles: [],
+        drepId: DREP_X,
+        postId: POST_ID,
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    // Post is GONE; the cascade Query failure is logged but doesn't
+    // roll back the post delete (the cleanup is left for a future
+    // re-run, which is idempotent).
+    expect(res).toMatchObject({ statusCode: 204 });
+    expect(mockDelete).toHaveBeenCalledWith(
+      'test-clubhouse_posts',
+      expect.objectContaining({ postId: POST_ID }),
+    );
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 });

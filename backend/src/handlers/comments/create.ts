@@ -9,6 +9,7 @@ import {
   buildMutationMessage,
 } from '../../lib/auth';
 import { lookupRecognition, lookupStake } from '../../lib/recognition';
+import { writeAuditEvent } from '../../lib/audit';
 import { created, badRequest, unauthorized, notFound, handleError } from '../_response';
 
 interface CreateCommentBody {
@@ -185,6 +186,22 @@ export const handler = async (
         },
       },
     ]);
+
+    // Best-effort audit-log write (Oracle's #1 credibility item, 2026-05-28).
+    // Fires AFTER the mutation succeeds — never blocks/fails the response.
+    // Metadata is minimal + non-sensitive (IDs only, NOT the comment body).
+    await writeAuditEvent({
+      entityType: 'comment',
+      entityId: commentId,
+      eventType: 'comment.created',
+      actorWallet: authCtx.walletAddress,
+      metadata: {
+        actionId: decodedActionId,
+        isPublic: body.isPublic,
+        isDRep,
+        ...(body.parentCommentId ? { parentCommentId: body.parentCommentId } : {}),
+      },
+    });
 
     return created(commentItem);
   } catch (err) {

@@ -13,6 +13,7 @@ import {
   type ClubhouseCommentRowItem,
 } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
+import { writeAuditEvent } from '../../lib/audit';
 import { resolveClubhouseMembership } from './_membership';
 import { ok, badRequest, forbidden, notFound, serviceUnavailable, handleError } from '../_response';
 
@@ -28,11 +29,12 @@ interface CreateClubhouseCommentBody {
 /**
  * Handler: POST /clubhouse/{drepId}/post/{postId}/comment
  *
- * # P0-3 de-inline migration (2026-05-28)
+ * # P0-3 de-inline migration — Phase 6 cutover (2026-05-28)
  *
  * Comments now live in the dedicated `clubhouse_comments` table — one
- * row per comment, partitioned by `postKey = ${drepId}#${postId}`.
- * The handler dual-writes during the rotation window:
+ * row per comment, partitioned by `postKey = ${drepId}#${postId}`. The
+ * dual-write that existed in the Phases 1–4 PR has been REMOVED in
+ * this Phase 6 cutover; new comments persist ONLY to the new table.
  *
  *   1. `putItem` the new row to `clubhouse_comments` with
  *      `attribute_not_exists(commentId)` so a retry doesn't double-
@@ -43,12 +45,20 @@ interface CreateClubhouseCommentBody {
  *      The post is the source of truth for "{n} replies" badges and
  *      the rail's "active in 24h" filter without ever scanning the
  *      comment set.
- *   3. LEGACY: append the comment to the inline `comments[]` on the
- *      post row, with a `ConditionExpression: updatedAt = :prev` so
- *      the silently-dropping RMW race is bounded to a single conflict
- *      retry. This write stays alive in THIS PR — deferring its
- *      removal until after the backfill verifies and the read path
- *      has rotated to the new table (Phases 6 and 7 in the plan).
+ *
+ * # Why removing the dual-write is safe now
+ *
+ *   - Production has ZERO historical comments — the clubhouse-comment
+ *     feature was never used before the P0-3 migration. The Phase 1–4
+ *     backfill processed 7360 posts but wrote 0 comment rows, so there
+ *     is no legacy data to fall back to.
+ *   - Read paths already prefer the new table:
+ *       - `list.ts` projects OUT inline `comments` at the Query level.
+ *       - `_rail.ts` per-active-post Queries `clubhouse_comments`.
+ *       - Frontend renders `commentCount ?? comments?.length ?? 0`.
+ *   - Rollback is bounded by the SEC-2 deploy ordering: redeploying
+ *     the previous Lambda image restores the dual-write, and the new
+ *     rows already written stay live as the source of truth.
  *
  * # Depth guard
  *
@@ -57,11 +67,11 @@ interface CreateClubhouseCommentBody {
  *   - depth 2 → sub-reply to a reply
  *
  * The Clubhouse surface caps depth at 2. A new reply with
- * `parentCommentId === X` lands at `depthOf(X) + 1`, so we reject
- * if `depthOf(parent) >= 2`. After the migration, the parent's depth
- * is read directly off its persisted row in `clubhouse_comments`
- * (one `GetItem`); pre-backfill we fall back to the in-memory walk
- * against `post.comments[]` so the gate still works during rotation.
+ * `parentCommentId === X` lands at `depthOf(X) + 1`, so we reject if
+ * `depthOf(parent) >= 2`. The depth is read directly off the parent's
+ * persisted row in `clubhouse_comments` (one `GetItem`); the inline-
+ * array fallback for pre-backfill rows remains as defense in depth
+ * but is dead code in production.
  *
  * # Companion: votePoll RMW
  *
@@ -173,10 +183,32 @@ export const handler = async (
         console.warn(
           `createComment: 503 rejecting ${authCtx.walletAddress} on drepId=${drepId} — delegation lookup failed (Koios+Blockfrost both unreachable) and caller is not a role-holder`,
         );
+        await writeAuditEvent({
+          entityType: 'auth',
+          entityId: authCtx.walletAddress,
+          eventType: 'auth.delegation_unverified',
+          actorWallet: authCtx.walletAddress,
+          metadata: {
+            surface: 'createComment',
+            drepId,
+            postId,
+          },
+        });
         return serviceUnavailable(
           "Couldn't verify your delegation right now, please retry",
         );
       }
+      await writeAuditEvent({
+        entityType: 'clubhouse_post',
+        entityId: postId,
+        eventType: 'clubhouse.comment.denied',
+        actorWallet: authCtx.walletAddress,
+        metadata: {
+          surface: 'createComment',
+          drepId,
+          reason: 'not_member',
+        },
+      });
       return forbidden(
         'You must be delegated to this DRep or be a committee member to post in their clubhouse',
       );
@@ -256,20 +288,41 @@ export const handler = async (
       );
     }
 
-    // ---- (3) LEGACY inline write — kept alive during rotation. ----
-    // DO NOT remove this in this PR. The read path still tolerates the
-    // inline array (until Phase 4 cuts over for new posts and Phase 6
-    // stops the inline write entirely). Keeping the dual-write means
-    // a rollback of the API code is safe: the inline array stays the
-    // source of truth for older Lambda containers.
+    // Best-effort audit AFTER the authoritative new-table write +
+    // counter update. The audit fires for the per-row write, which is
+    // the source of truth post-migration.
+    await writeAuditEvent({
+      entityType: 'clubhouse_comment',
+      entityId: commentId,
+      eventType: 'clubhouse.comment.created',
+      actorWallet: authCtx.walletAddress,
+      metadata: {
+        drepId,
+        postId,
+        depth: newDepth,
+        ...(reqBody.parentCommentId ? { parentCommentId: reqBody.parentCommentId } : {}),
+      },
+    });
+
+    // P0-3 Phase 6 cutover (2026-05-28): the LEGACY inline `comments[]`
+    // append on the post row has been REMOVED. New comments now live
+    // ONLY in the `clubhouse_comments` table (written above). The
+    // denormalized counter (`commentCount` / `lastReplyAt`) is still
+    // bumped on the post; reads use the new table via `listComments.ts`
+    // / `_rail.ts`. The Phase 7 cleanup script (`backend/scripts/
+    // cleanup-inline-comments.ts`) one-shot REMOVEs the residual
+    // (empty) `comments` attribute on existing post rows.
     //
-    // The RMW race is reduced (NOT eliminated) by guarding the write
-    // with `ConditionExpression: updatedAt = :prevUpdatedAt`. On
-    // conflict we retry ONCE by re-reading the post — anything beyond
-    // a single retry is rare enough that the new-row write above is
-    // the authoritative record. The new-table write already succeeded,
-    // so a dropped inline append only affects the legacy read path
-    // (which the migration is replacing anyway).
+    // Why this is safe NOW: production has ZERO historical comments
+    // (the feature was never used pre-migration; the Phase 1-4 backfill
+    // wrote 0 comment rows). All read paths already prefer the new
+    // table — see `list.ts` (projects OUT inline `comments`),
+    // `_rail.ts` (per-active-post Query against `clubhouse_comments`),
+    // and the frontend's `commentCount ?? comments?.length ?? 0`
+    // fallback. The dual-write existed only as a rollback safety net
+    // during the rotation window; with the new table proven and the
+    // backfill complete, the inline write is now pure cost + a race
+    // surface.
     const inlineComment: ClubhouseCommentItem = {
       commentId,
       authorWallet: authCtx.walletAddress,
@@ -277,7 +330,6 @@ export const handler = async (
       createdAt: now,
       ...(reqBody.parentCommentId ? { parentCommentId: reqBody.parentCommentId } : {}),
     };
-    await dualWriteLegacyInlineComment(drepId, postId, post, inlineComment, now);
 
     return ok(inlineComment);
   } catch (err) {
@@ -288,10 +340,18 @@ export const handler = async (
 
 /**
  * Walk the in-memory inline-comments graph to compute a parent's depth.
- * Used as a FALLBACK only — once the per-row backfill runs, parent
- * depths are read directly off the persisted `clubhouse_comments` row.
- * The walk caps defensively at 3 hops to avoid an infinite loop on
- * pathological data; legitimate chains resolve in <= 2 hops.
+ * Used as a FALLBACK only when the new-table parent row is absent —
+ * legitimate post-migration chains resolve via the `clubhouse_comments`
+ * `GetItem` above. The walk caps defensively at 3 hops to avoid an
+ * infinite loop on pathological data; legitimate chains resolve in
+ * <= 2 hops.
+ *
+ * Production has ZERO historical comments (the feature was never used
+ * pre-migration), so the inline-array fallback is now effectively
+ * dead code in production — but it's kept here as defense in depth in
+ * case a pre-backfill row ever surfaces during a rollback window. The
+ * Phase 7 cleanup script strips the residual empty `comments` attribute
+ * from post rows.
  */
 function depthOfInlineChain(
   comments: ClubhouseCommentItem[],
@@ -307,95 +367,4 @@ function depthOfInlineChain(
     if (!cursor) break;
   }
   return depth;
-}
-
-/**
- * Append `inlineComment` to the post's inline `comments[]` array using
- * a version-guarded `UpdateItem` (`ConditionExpression` on `updatedAt`).
- * On conflict, refetch the post once and retry. After one retry we
- * accept silent loss of the inline write — the per-row write above is
- * the authoritative copy, and the inline path is being removed in a
- * follow-up.
- *
- * The legacy RMW race is the reason this migration exists. Wrapping
- * it with a version guard reduces (but does not eliminate) silent
- * drops during the rotation window — full elimination requires Phase 6
- * (stop the inline write) and Phase 7 (REMOVE the inline attribute).
- */
-async function dualWriteLegacyInlineComment(
-  drepId: string,
-  postId: string,
-  initialPost: ClubhousePostItem,
-  inlineComment: ClubhouseCommentItem,
-  now: string,
-): Promise<void> {
-  let outcome = await attemptVersionGuardedAppend(
-    drepId,
-    postId,
-    initialPost,
-    inlineComment,
-    now,
-  );
-  if (outcome === 'conflict') {
-    const fresh = await getItem<ClubhousePostItem>(tableNames.clubhousePosts, {
-      drepId,
-      postId,
-    });
-    if (!fresh) {
-      console.warn(
-        `createComment: legacy inline write — post disappeared between read and write for drepId=${drepId} postId=${postId}`,
-      );
-      return;
-    }
-    outcome = await attemptVersionGuardedAppend(
-      drepId,
-      postId,
-      fresh,
-      inlineComment,
-      now,
-    );
-    if (outcome === 'conflict') {
-      console.warn(
-        `createComment: legacy inline write lost a race after retry for drepId=${drepId} postId=${postId} (comment ${inlineComment.commentId} is persisted to clubhouse_comments)`,
-      );
-    }
-  }
-}
-
-async function attemptVersionGuardedAppend(
-  drepId: string,
-  postId: string,
-  post: ClubhousePostItem,
-  inlineComment: ClubhouseCommentItem,
-  now: string,
-): Promise<'ok' | 'conflict'> {
-  const prevUpdatedAt = post.updatedAt;
-  const nextComments = [...(post.comments ?? []), inlineComment];
-  try {
-    await updateItem(
-      tableNames.clubhousePosts,
-      { drepId, postId },
-      'SET #c = :comments, #u = :now',
-      {
-        '#c': 'comments',
-        '#u': 'updatedAt',
-      },
-      {
-        ':comments': nextComments,
-        ':now': now,
-        ':prev': prevUpdatedAt,
-      },
-      '#u = :prev',
-    );
-    return 'ok';
-  } catch (err) {
-    if (
-      err &&
-      typeof err === 'object' &&
-      (err as { name?: string }).name === 'ConditionalCheckFailedException'
-    ) {
-      return 'conflict';
-    }
-    throw err;
-  }
 }

@@ -2,6 +2,7 @@ import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 }
 import { getItem, deleteItem, queryItems, tableNames } from '../../lib/dynamodb';
 import type { CommentItem, CommentVoteItem } from '../../lib/types';
 import { extractAuthContext, requireOwner } from '../../middleware/role-guard';
+import { writeAuditEvent } from '../../lib/audit';
 import { noContent, badRequest, notFound, handleError } from '../_response';
 
 export const handler = async (
@@ -40,7 +41,25 @@ export const handler = async (
     // for action comments. If product later wants moderation, it
     // should be added as an explicit, audited role (not piggy-backed
     // on an unrelated committee role).
-    requireOwner(authCtx, existing.walletAddress);
+    //
+    // Audit the denial BEFORE rethrowing so an incident-responder can
+    // see who tried to delete what they didn't own.
+    try {
+      requireOwner(authCtx, existing.walletAddress);
+    } catch (err) {
+      await writeAuditEvent({
+        entityType: 'comment',
+        entityId: decodedCommentId,
+        eventType: 'comment.delete_denied',
+        actorWallet: authCtx.walletAddress,
+        metadata: {
+          actionId: decodedActionId,
+          ownerWallet: existing.walletAddress,
+          reason: 'not_owner',
+        },
+      });
+      throw err;
+    }
 
     // Best-effort vote-row cleanup. We delete the per-vote rows in
     // `comment_votes` so they don't dangle. Failure here doesn't roll
@@ -120,6 +139,21 @@ export const handler = async (
     await deleteItem(tableNames.comments, {
       actionId: decodedActionId,
       commentId: decodedCommentId,
+    });
+
+    // Best-effort audit AFTER the delete succeeds. The cascade above
+    // may have removed vote rows + reply rows too; we don't echo those
+    // counts here — DDB's stream + PITR captures the full picture if
+    // forensic detail is ever needed.
+    await writeAuditEvent({
+      entityType: 'comment',
+      entityId: decodedCommentId,
+      eventType: 'comment.deleted',
+      actorWallet: authCtx.walletAddress,
+      metadata: {
+        actionId: decodedActionId,
+        isTopLevel: existing.parentCommentId === undefined,
+      },
     });
 
     return noContent();

@@ -62,6 +62,7 @@ type TransactItem = NonNullable<TransactWriteCommandInput['TransactItems']>[numb
 import type { CommentItem, CommentVoteItem } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { lookupStake } from '../../lib/recognition';
+import { writeAuditEvent } from '../../lib/audit';
 import { ok, badRequest, unauthorized, notFound, conflict, internalError, handleError } from '../_response';
 
 interface VoteBody {
@@ -207,6 +208,20 @@ export const handler = async (
         }
         throw err;
       }
+      // Best-effort audit. `priorVote.vote` is the direction being
+      // retracted; `actionId` lets a query group every vote on a
+      // governance action regardless of which comment it landed on.
+      await writeAuditEvent({
+        entityType: 'comment_vote',
+        entityId: decodedCommentId,
+        eventType: 'comment.voted',
+        actorWallet: authCtx.walletAddress,
+        metadata: {
+          actionId: decodedActionId,
+          voteDirection: 'none',
+          priorVote: priorVote.vote,
+        },
+      });
       return ok(await readCommentForResponse(decodedActionId, decodedCommentId));
     }
 
@@ -296,6 +311,19 @@ export const handler = async (
       }
       throw err;
     }
+    // Best-effort audit on cast / change. `priorVote` may be absent
+    // (first vote) — the metadata reflects that with `priorVote: null`.
+    await writeAuditEvent({
+      entityType: 'comment_vote',
+      entityId: decodedCommentId,
+      eventType: 'comment.voted',
+      actorWallet: authCtx.walletAddress,
+      metadata: {
+        actionId: decodedActionId,
+        voteDirection: parsed.vote,
+        priorVote: priorVote?.vote ?? null,
+      },
+    });
     return ok(await readCommentForResponse(decodedActionId, decodedCommentId));
   } catch (err) {
     console.error('comments/vote handler error:', err);
