@@ -209,10 +209,9 @@ export async function fanoutAutoPosts(
         isDRepPost: false,
         body,
         title,
-        comments: [],
-        // P0-3 de-inline migration (2026-05-28): every freshly-written
-        // post row carries `commentCount: 0` so the atomic `ADD :one`
-        // in `createComment.ts` starts from a known-good baseline. See
+        // P0-3 de-inline migration (2026-05-28): the inline `comments: []`
+        // field was REMOVED in Phase 6. Auto-posts initialize only the
+        // denormalized `commentCount: 0` counter. See
         // `handlers/clubhouse/createPost.ts` for the matching contract.
         commentCount: 0,
         createdAt: now,

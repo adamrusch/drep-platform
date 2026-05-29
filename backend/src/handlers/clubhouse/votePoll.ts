@@ -3,6 +3,7 @@ import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { docClient, getItem, tableNames } from '../../lib/dynamodb';
 import type { ClubhousePostItem } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
+import { writeAuditEvent } from '../../lib/audit';
 import { ok, badRequest, notFound, conflict, handleError } from '../_response';
 
 /**
@@ -177,6 +178,19 @@ export const handler = async (
         throw err;
       }
     }
+
+    // Best-effort audit AFTER the atomic update succeeds.
+    await writeAuditEvent({
+      entityType: 'clubhouse_post',
+      entityId: postId,
+      eventType: 'clubhouse.poll.voted',
+      actorWallet: authCtx.walletAddress,
+      metadata: {
+        drepId,
+        optionIndex: body.optionIndex,
+        priorOptionIndex: previousIndex ?? null,
+      },
+    });
 
     return ok(updatedPost ?? post);
   } catch (err) {
