@@ -359,7 +359,32 @@ export interface CompletionSweepCandidate {
 
 /** Filter the (prev, next) pairs to only those that transitioned to a
  *  completed status this cycle. Pure function — caller fires the
- *  sweep. */
+ *  sweep.
+ *
+ *  # SEC-2 (2026-05-28) — born-completed guard
+ *
+ *  A brand-new row (`previous === undefined`) whose `next.status` is
+ *  already a completed value (`enacted`/`expired`/`dropped`) is filtered
+ *  OUT. Rationale:
+ *
+ *    - The fan-out path is now ALSO gated to skip born-completed GAs
+ *      (see `governance-intake.ts`'s newGAItems filter), so there are
+ *      no pinned auto-posts to unpin for these rows.
+ *    - Running the sweep regardless would issue ~368 UpdateItem calls
+ *      against `clubhouse_posts` rows that don't exist — every one
+ *      would be a no-op against a missing row (UpdateItem is "upsert" by
+ *      default and would CREATE empty rows!). Even with the GSI Query
+ *      finding zero matching rows the sweep is wasted work + CloudWatch
+ *      noise.
+ *    - Worth the explicit guard rather than relying on the GSI being
+ *      empty: an audit / replay scenario could surface stale post rows
+ *      from a previous deploy, and the right answer is still "don't run
+ *      a sweep for a GA that completed before we ever saw it."
+ *
+ *  Active → completed transitions (the common case) STILL fire the
+ *  sweep — that's the whole point of unpinning a freshly-completed GA's
+ *  auto-posts in every clubhouse. The guard only changes behavior for
+ *  the rare cold-start / backfill / late-discovery cases. */
 export function selectCompletionSweepCandidates(
   pairs: readonly { actionId: string; previous: GovernanceActionItem | undefined; next: GovernanceActionItem }[],
 ): CompletionSweepCandidate[] {
@@ -375,6 +400,12 @@ export function selectCompletionSweepCandidates(
     if (previousStatus !== undefined && isCompletedStatus(previousStatus)) {
       continue;
     }
+    // Born-completed guard: a brand-new row that landed already in a
+    // completed state has no pinned auto-posts to unpin (the fan-out
+    // skipped it for the same reason). Skip the sweep.
+    if (p.previous === undefined) {
+      continue;
+    }
     out.push({
       actionId: p.actionId,
       previousStatus,
@@ -382,6 +413,25 @@ export function selectCompletionSweepCandidates(
     });
   }
   return out;
+}
+
+/**
+ * Filter a list of newly-detected GAs to those that should trigger
+ * the auto-post fan-out. A new GA whose status is already a completed
+ * value (`enacted` / `expired` / `dropped`) when first seen is excluded
+ * — fanning out ~368 pinned auto-posts and then immediately unpinning
+ * them is ~736 wasted writes plus CloudWatch noise for a GA that's
+ * invisible (unpinned) anyway. A GA that completed before we ever saw
+ * it doesn't need auto-posts in every clubhouse.
+ *
+ * Active GAs (the common case) pass through unchanged.
+ *
+ * SEC-2 (2026-05-28).
+ */
+export function selectFanoutCandidates(
+  newGAs: readonly GovernanceActionItem[],
+): GovernanceActionItem[] {
+  return newGAs.filter((ga) => !isCompletedStatus(ga.status as string));
 }
 
 // ---- Internal exports used by tests ----

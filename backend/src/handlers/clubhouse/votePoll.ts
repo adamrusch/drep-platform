@@ -1,8 +1,9 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
-import { getItem, putItem, tableNames } from '../../lib/dynamodb';
-import type { ClubhousePostItem, ClubhousePollOption } from '../../lib/types';
+import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { docClient, getItem, tableNames } from '../../lib/dynamodb';
+import type { ClubhousePostItem } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
-import { ok, badRequest, notFound, handleError } from '../_response';
+import { ok, badRequest, notFound, conflict, handleError } from '../_response';
 
 /**
  * Cast / change a vote on a clubhouse poll.
@@ -18,6 +19,44 @@ import { ok, badRequest, notFound, handleError } from '../_response';
  *
  * If poll results ever start driving on-chain decisions, swap this back
  * to the mutation-nonce flow. The handler shape is otherwise identical.
+ *
+ * # SEC-2 2026-05-28 — Atomic vote write (race fix)
+ *
+ * Prior behavior: read the post, mutate `pollVotes` + `pollOptions[].votes`
+ * in memory, `putItem` the whole row back. Two wallets clicking ~simultaneously
+ * each read the SAME `pollOptions[i].votes` baseline, each adds 1 in memory,
+ * each writes — final count goes up by 1 instead of 2. Same RMW race class
+ * as the comment-array race fixed in P0-3.
+ *
+ * Current behavior: single atomic `UpdateItem` that combines:
+ *   - `SET pollVotes.<wallet> = :newIdx, updatedAt = :now` — idempotent.
+ *   - `ADD pollOptions[newIdx].votes :one` — atomic, commutative.
+ *   - `ADD pollOptions[prevIdx].votes :negOne` (only when the wallet had
+ *     a previous vote on this poll) — atomic, decrements the old bucket.
+ *
+ * The write is guarded by a `ConditionExpression` that checks BOTH:
+ *   - `attribute_exists(postId)` — the post wasn't deleted between our
+ *     read and our write.
+ *   - the wallet's `pollVotes` entry is still what we read OR doesn't
+ *     exist — the previous-vote value didn't change under us. If it did
+ *     (a concurrent vote from the SAME wallet landed first — unusual but
+ *     possible with click-spamming), the condition fails, we re-read,
+ *     recompute prev, and retry ONCE. After one retry we surface 409 so
+ *     the caller can refresh.
+ *
+ * This eliminates the double-count without per-option counter denormalization
+ * — the in-row array element IS the counter, and DDB's `ADD` on a list
+ * element path is atomic.
+ *
+ * # Why a single retry is enough
+ *
+ * Concurrent votes from DIFFERENT wallets touch different
+ * `pollVotes.<walletA>` vs `pollVotes.<walletB>` paths and DIFFERENT
+ * (potentially overlapping) `pollOptions[i].votes` counters. The
+ * ConditionExpression keys on the CALLER's wallet entry only, so two
+ * concurrent votes from different wallets never block each other — both
+ * succeed in one round-trip each. The retry is only relevant for the
+ * narrow case of one wallet sending two near-simultaneous requests.
  */
 interface VoteBody {
   /** Index into `pollOptions` (0-based). For multi-choice polls clients
@@ -30,10 +69,10 @@ export const handler = async (
 ): Promise<APIGatewayProxyResultV2> => {
   try {
     const authCtx = extractAuthContext(event);
-    const drepId = event.pathParameters?.['drepId'];
-    const postId = event.pathParameters?.['postId'];
+    const drepIdRaw = event.pathParameters?.['drepId'];
+    const postIdRaw = event.pathParameters?.['postId'];
 
-    if (!drepId || !postId) {
+    if (!drepIdRaw || !postIdRaw) {
       return badRequest('drepId and postId path parameters are required');
     }
     if (!event.body) {
@@ -51,9 +90,15 @@ export const handler = async (
       return badRequest('optionIndex must be an integer');
     }
 
+    const drepId = decodeURIComponent(drepIdRaw);
+    const postId = decodeURIComponent(postIdRaw);
+
+    // One Get to validate (type=poll, in-range index, not closed) and to
+    // capture the caller's previous vote on this poll (the guard value
+    // for the atomic update).
     const post = await getItem<ClubhousePostItem>(tableNames.clubhousePosts, {
-      drepId: decodeURIComponent(drepId),
-      postId: decodeURIComponent(postId),
+      drepId,
+      postId,
     });
     if (!post) return notFound('Clubhouse post');
 
@@ -70,37 +115,170 @@ export const handler = async (
     }
 
     const previousIndex = post.pollVotes?.[authCtx.walletAddress];
-    // Idempotent: voting the same option twice is a no-op rather than
-    // a double-count.
+
+    // Defensive note: every poll persisted via `createPost.ts` is
+    // initialized with `pollVotes: {}` at the moment of poll creation
+    // (see the `...(pollOptions ? { pollVotes: {} } : {})` spread there),
+    // so the atomic `SET pollVotes.<wallet> = :newIdx` below always has
+    // a valid map path. If a pre-init poll ever appears in DDB (none
+    // exist in prod per git history — the spread predates the first
+    // poll write), the UpdateItem would 400 with ValidationException
+    // and be visible in CloudWatch. The handleError fallback would
+    // surface a 500 in that case rather than silently swallowing.
+
+    // Idempotent: voting the same option twice is a no-op rather than a
+    // double-count. Cheap fast-path — saves an UpdateItem when the user
+    // re-confirms their existing vote (common when navigating back to a
+    // poll they already voted on).
     if (previousIndex === body.optionIndex) {
       return ok(post);
     }
 
-    const updatedOptions: ClubhousePollOption[] = post.pollOptions.map((opt, i) => {
-      let votes = opt.votes;
-      if (typeof previousIndex === 'number' && previousIndex === i) votes -= 1;
-      if (i === body.optionIndex) votes += 1;
-      return { ...opt, votes: Math.max(0, votes) };
-    });
-    const updatedVotes = {
-      ...(post.pollVotes ?? {}),
-      [authCtx.walletAddress]: body.optionIndex,
-    };
+    // ---- Atomic targeted UpdateItem (with single-retry on guard miss) ----
+    let attempts = 0;
+    let currentPrev = previousIndex;
+    let updatedPost: ClubhousePostItem | undefined;
+    while (true) {
+      attempts++;
+      try {
+        updatedPost = await applyVoteUpdate({
+          drepId,
+          postId,
+          walletAddress: authCtx.walletAddress,
+          newIndex: body.optionIndex,
+          previousIndex: currentPrev,
+        });
+        break;
+      } catch (err) {
+        if (
+          err &&
+          typeof err === 'object' &&
+          (err as { name?: string }).name === 'ConditionalCheckFailedException' &&
+          attempts < 2
+        ) {
+          // Re-read to discover the actual previous value, then retry.
+          const fresh = await getItem<ClubhousePostItem>(tableNames.clubhousePosts, {
+            drepId,
+            postId,
+          });
+          if (!fresh) {
+            // Race: post was deleted between our calls. Surface 404.
+            return notFound('Clubhouse post');
+          }
+          const freshPrev = fresh.pollVotes?.[authCtx.walletAddress];
+          // If the concurrent vote already landed on our desired option,
+          // we're done. Return the fresh post.
+          if (freshPrev === body.optionIndex) {
+            return ok(fresh);
+          }
+          currentPrev = freshPrev;
+          continue;
+        }
+        throw err;
+      }
+    }
 
-    const updated: ClubhousePostItem = {
-      ...post,
-      pollOptions: updatedOptions,
-      pollVotes: updatedVotes,
-      updatedAt: new Date().toISOString(),
-    };
-
-    // Use putItem (not updateItem) — overwrites the whole record so the
-    // write reflects the recomputed tally + the vote map atomically.
-    await putItem(tableNames.clubhousePosts, updated as unknown as Record<string, unknown>);
-
-    return ok(updated);
+    return ok(updatedPost ?? post);
   } catch (err) {
+    if (
+      err &&
+      typeof err === 'object' &&
+      (err as { name?: string }).name === 'ConditionalCheckFailedException'
+    ) {
+      // Out of retries — surface 409 so the caller can refresh + retry.
+      return conflict('Poll vote conflicted with a concurrent write; please retry');
+    }
     console.error('clubhouse/votePoll handler error:', err);
     return handleError(err);
   }
 };
+
+/**
+ * Issue the atomic UpdateItem that flips this wallet's vote. Throws
+ * `ConditionalCheckFailedException` when the guarded preconditions don't
+ * hold (the wallet's previous vote moved under us, or the post was
+ * deleted). The caller decides whether to retry or surface the error.
+ *
+ * Returns the post as DynamoDB reports it post-update (via
+ * `ReturnValues: 'ALL_NEW'`). The shape matches `ClubhousePostItem`.
+ *
+ * # Expression structure
+ *
+ *   - `SET pollVotes.<wallet> = :newIdx, updatedAt = :now` — record the
+ *     vote; idempotent on retry.
+ *   - `ADD pollOptions[newIdx].votes :one` — atomic counter bump for the
+ *     newly-chosen option. DynamoDB's `ADD` on a missing nested attr
+ *     initializes to the operand, so a brand-new poll with `votes: 0`
+ *     remains correct.
+ *   - When `previousIndex !== undefined`: also `ADD pollOptions[prev].votes :negOne`
+ *     to decrement the previous bucket. Both `ADD`s land atomically.
+ *
+ * # Why ConditionExpression on the wallet's previous vote
+ *
+ * Without the guard, the SAME wallet sending two near-simultaneous votes
+ * (e.g. clicked option B before option A's request finished) would land
+ * BOTH ADDs and over-count. With the guard keyed on the wallet's prior
+ * value, the second request fails its condition, falls into the retry,
+ * re-reads, and discovers the correct `previousIndex`.
+ *
+ * Different wallets have INDEPENDENT pollVotes paths; their ADDs on
+ * shared `pollOptions[i].votes` don't conflict — DDB ADD is commutative.
+ */
+async function applyVoteUpdate(opts: {
+  drepId: string;
+  postId: string;
+  walletAddress: string;
+  newIndex: number;
+  previousIndex: number | undefined;
+}): Promise<ClubhousePostItem | undefined> {
+  const now = new Date().toISOString();
+  const names: Record<string, string> = {
+    '#pv': 'pollVotes',
+    '#wallet': opts.walletAddress,
+    '#u': 'updatedAt',
+    '#po': 'pollOptions',
+    '#v': 'votes',
+    '#pk': 'postId',
+  };
+  const values: Record<string, unknown> = {
+    ':newIdx': opts.newIndex,
+    ':now': now,
+    ':one': 1,
+  };
+
+  // Build the ADD clause. DynamoDB requires list indices to be literals
+  // in the expression string — they cannot be parameterized via
+  // ExpressionAttributeValues. We've already validated `opts.newIndex`
+  // and `opts.previousIndex` against `pollOptions.length` upstream.
+  const addParts: string[] = [`#po[${opts.newIndex}].#v :one`];
+  if (opts.previousIndex !== undefined && opts.previousIndex !== opts.newIndex) {
+    addParts.push(`#po[${opts.previousIndex}].#v :negOne`);
+    values[':negOne'] = -1;
+  }
+
+  // Guard the write on the wallet's previous vote being what we read.
+  // Two sub-cases:
+  //   (a) wallet hasn't voted yet → guard `attribute_not_exists(pollVotes.<wallet>)`
+  //   (b) wallet voted before → guard `pollVotes.<wallet> = :prev`
+  // The ConditionExpression also requires the post still exists.
+  let conditionExpression: string;
+  if (opts.previousIndex === undefined) {
+    conditionExpression = 'attribute_exists(#pk) AND attribute_not_exists(#pv.#wallet)';
+  } else {
+    conditionExpression = 'attribute_exists(#pk) AND #pv.#wallet = :prev';
+    values[':prev'] = opts.previousIndex;
+  }
+
+  const result = await docClient.send(
+    new UpdateCommand({
+      TableName: tableNames.clubhousePosts,
+      Key: { drepId: opts.drepId, postId: opts.postId },
+      UpdateExpression: `SET #pv.#wallet = :newIdx, #u = :now ADD ${addParts.join(', ')}`,
+      ConditionExpression: conditionExpression,
+      ExpressionAttributeNames: names,
+      ExpressionAttributeValues: values,
+      ReturnValues: 'ALL_NEW',
+    }),
+  );
+  return result.Attributes as ClubhousePostItem | undefined;
+}

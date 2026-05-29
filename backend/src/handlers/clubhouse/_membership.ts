@@ -11,13 +11,32 @@
  * level posts and replies have identical membership semantics. This
  * helper concentrates the policy so the two handlers can't drift.
  *
- * **Soft-fail on upstream outage:** if BOTH Koios AND Blockfrost are
- * unreachable for the delegation lookup, the helper returns
- * `delegationUnknown=true` and the calling handler falls through to
- * "allow" rather than 503 the surface. The role-holder branch (a DDB
- * Get on `drep_committees`) is unaffected by upstream weather, so
- * role-holders are never locked out. See `lib/recognition.ts` for the
- * same pattern.
+ * **Fail-CLOSED on upstream outage (2026-05-28 SEC-2):** if BOTH Koios
+ * AND Blockfrost are unreachable for the delegation lookup, the helper
+ * returns `delegationUnknown=true` and the calling write handler
+ * REJECTS the request with 503 — uncertainty about delegation MUST NOT
+ * grant access. The role-holder branch (a DDB Get on `drep_committees`)
+ * is unaffected by upstream weather, so role-holders bypass the 503 and
+ * can ALWAYS write in clubhouses they manage even during a Koios+BF
+ * dual-outage.
+ *
+ * **Why this changed (was soft-fail-open prior to 2026-05-28):** Oracle
+ * flagged the previous "allow on dual-upstream-fail" posture as a
+ * fail-open security anti-pattern: an attacker who can degrade the
+ * delegation lookup (or who happens to write during a real Koios outage)
+ * would post into any clubhouse with no membership check. The role-
+ * holder bypass preserves the operational invariant — the DRep and
+ * their committee retain write access during outages — while denying
+ * unauthenticated/unauthorized writers the "the lookup failed, you
+ * win" loophole.
+ *
+ * **UX tradeoff:** during a (rare) dual-upstream outage non-role-
+ * holder delegators see a 503 on post/comment with a "couldn't verify
+ * your delegation right now, please retry" affordance. They can retry
+ * once Koios or Blockfrost is reachable again. Read paths are
+ * unaffected — `lib/recognition.ts` still soft-allows decoration so
+ * the clubhouse stays VISIBLE during an outage; only WRITES require
+ * verified delegation.
  *
  * **Previously (≤ 2026-05-27):** the platform's spec carried "top-level
  * posts are role-only; replies are open to delegators." The 2026-05-28
@@ -41,9 +60,12 @@ export interface MembershipDecision {
    *  DRep (Koios/Blockfrost confirmed). */
   isCurrentDelegator: boolean;
   /** True when neither Koios nor Blockfrost could be reached to resolve
-   *  the current delegation. Callers fall back to "allow" in this case
-   *  so a transient upstream outage doesn't 503 the surface. The
-   *  role-holder branch above still applies. */
+   *  the current delegation. WRITE callers MUST reject with 503 in this
+   *  case (fail-CLOSED — uncertainty about delegation must not grant
+   *  access). The role-holder branch above is the bypass: a caller who
+   *  is a confirmed role-holder (lead/committee/trusted_delegator of
+   *  THIS drep) can write even during a dual-upstream outage because
+   *  the committee Get is a local DDB read with no external dependency. */
   delegationUnknown: boolean;
   /** The committee row for this DRep when one exists. Returned so the
    *  caller can derive role-specific info (e.g. `createPost` uses it
