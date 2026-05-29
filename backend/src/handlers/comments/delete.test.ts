@@ -57,6 +57,14 @@ vi.mock('../../lib/dynamodb', () => ({
   },
 }));
 
+// Stub the audit-log writer — see `lib/audit.test.ts` for its own
+// coverage. Tests in THIS file focus on the comment delete + cascade
+// (and the security-relevant denial audit, which is exercised by
+// the role-guard tests in this file via the existing 403 assertions).
+vi.mock('../../lib/audit', () => ({
+  writeAuditEvent: vi.fn().mockResolvedValue(undefined),
+}));
+
 import { getItem, deleteItem, queryItems } from '../../lib/dynamodb';
 import { handler } from './delete';
 

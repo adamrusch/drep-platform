@@ -52,14 +52,26 @@ vi.mock('../../lib/recognition', () => ({
   lookupCurrentDrep: vi.fn(),
 }));
 
+// The audit-log writer is best-effort and side-channel — the post-write
+// counts in these tests focus on the post-table mutation, not the
+// trailing audit. Stub to a no-op resolver so `mockPut.calls` reflects
+// ONLY the clubhouse_posts write. (The audit module's own behaviour —
+// including the load-bearing "never throws" guarantee — is exercised
+// in `lib/audit.test.ts`.)
+vi.mock('../../lib/audit', () => ({
+  writeAuditEvent: vi.fn().mockResolvedValue(undefined),
+}));
+
 import { getItem, putItem } from '../../lib/dynamodb';
 import { lookupRecognition, lookupCurrentDrep } from '../../lib/recognition';
+import { writeAuditEvent } from '../../lib/audit';
 import { handler } from './createPost';
 
 const mockGet = vi.mocked(getItem);
 const mockPut = vi.mocked(putItem);
 const mockRecognition = vi.mocked(lookupRecognition);
 const mockLookupCurrentDrep = vi.mocked(lookupCurrentDrep);
+const mockAudit = vi.mocked(writeAuditEvent);
 
 // ---- Test fixtures ----
 
@@ -132,6 +144,8 @@ describe('clubhouse/createPost', () => {
     mockPut.mockReset();
     mockRecognition.mockReset();
     mockLookupCurrentDrep.mockReset();
+    mockAudit.mockReset();
+    mockAudit.mockResolvedValue(undefined);
     // Default: recognition succeeds with mock pills.
     mockRecognition.mockResolvedValue({
       stakeAda: '1.0M ₳',

@@ -1,17 +1,17 @@
 /**
  * Tests for the Clubhouse `createComment` handler.
  *
- * # Post-P0-3 dual-write contract (2026-05-28)
+ * # Post-P0-3 Phase 6 write contract (2026-05-28)
  *
- * The handler writes THREE things on a successful comment:
+ * The handler writes TWO things on a successful comment:
  *   (1) New per-row comment to `clubhouse_comments` table — `putItem`
  *       with `attribute_not_exists(commentId)` for idempotency.
  *   (2) Atomic counter bump on the parent post — `updateItem`:
  *         `ADD commentCount :one SET lastReplyAt = :now, updatedAt = :now`.
- *   (3) LEGACY inline append on the post's `comments[]` array —
- *       `updateItem` with `ConditionExpression: updatedAt = :prev`
- *       (and a single retry on conflict). Kept alive during rotation
- *       so the dual-write is a safe rollback target.
+ *
+ * The LEGACY inline append on the post's `comments[]` array was
+ * REMOVED in Phase 6 (this PR). Tests below assert the inline write
+ * is no longer issued — the per-row table is the only source of truth.
  *
  * # Depth guard (Clubhouse: 2 levels)
  *
@@ -27,7 +27,7 @@
  *     comment allowed.
  *   - current delegator → comment allowed.
  *   - both false (definitive) → 403.
- *   - both upstreams failed → soft-allow.
+ *   - dual-upstream outage → 503 (fail-closed; role-holders bypass).
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -59,14 +59,24 @@ vi.mock('../../lib/recognition', () => ({
   lookupCurrentDrep: vi.fn(),
 }));
 
+// Audit-log writes are best-effort and side-channel; stub to no-op so
+// tests can focus on the comment/post mutation behaviour. The audit
+// module's own correctness (including the load-bearing best-effort
+// guarantee) is exercised in `lib/audit.test.ts`.
+vi.mock('../../lib/audit', () => ({
+  writeAuditEvent: vi.fn().mockResolvedValue(undefined),
+}));
+
 import { getItem, putItem, updateItem } from '../../lib/dynamodb';
 import { lookupCurrentDrep } from '../../lib/recognition';
+import { writeAuditEvent } from '../../lib/audit';
 import { handler } from './createComment';
 
 const mockGet = vi.mocked(getItem);
 const mockPut = vi.mocked(putItem);
 const mockUpdate = vi.mocked(updateItem);
 const mockLookup = vi.mocked(lookupCurrentDrep);
+const mockAudit = vi.mocked(writeAuditEvent);
 
 const DREP_ID = 'drep1ygqgayvx8yzsaj9hprja3l6jy3v4px9z3u8uvecuvm3f92ce7mckx';
 const POST_ID = 'auto-ga#abcd#0';
@@ -185,6 +195,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   mockPut.mockResolvedValue(undefined);
   mockUpdate.mockResolvedValue(undefined);
+  mockAudit.mockResolvedValue(undefined);
   // Default to a wallet that IS delegated to this DRep — the easiest
   // baseline that lets the depth-guard tests focus on depth semantics
   // without re-asserting the membership gate.
@@ -256,7 +267,7 @@ function findInlineUpdate(): undefined | {
 }
 
 describe('clubhouse/createComment — depth guard', () => {
-  it('allows top-level comment (no parentCommentId): dual-write fires', async () => {
+  it('allows top-level comment (no parentCommentId): per-row write + counter, NO inline write (Phase 6)', async () => {
     wireDdbMocks({ post: buildPostWithComments([]), committee: buildCommittee() });
 
     const res = (await handler(
@@ -281,14 +292,16 @@ describe('clubhouse/createComment — depth guard', () => {
     const counter = findCounterUpdate();
     expect(counter).toBeDefined();
 
-    // (3) Legacy inline write fired (version-guarded on updatedAt).
-    const inline = findInlineUpdate();
-    expect(inline).toBeDefined();
-    // ConditionExpression uses an alias (#u) — the bare field name
-    // never appears in the expression. Assert the `:prev` value is
-    // present and resolves to the previous post's updatedAt.
-    expect(inline!.conditionExpression).toMatch(/:prev/);
-    expect(inline!.values[':prev']).toBe('2026-05-20T00:00:00.000Z');
+    // (3) NO legacy inline write — Phase 6 cutover removed it. The
+    // helper that detects an inline `:comments` Update must return
+    // undefined. This is the load-bearing assertion that proves the
+    // dual-write is gone.
+    expect(findInlineUpdate()).toBeUndefined();
+    // Defensive: only the counter Update fires on clubhouse_posts now.
+    const postUpdates = mockUpdate.mock.calls.filter(
+      (c) => c[0] === 'test-clubhouse_posts',
+    );
+    expect(postUpdates).toHaveLength(1);
   });
 
   it('allows reply to a top-level comment (depth 1): new row has depth=1', async () => {
@@ -535,15 +548,9 @@ describe('clubhouse/createComment — dual-write semantics', () => {
     // The counter Update is best-effort — a failure here is logged
     // but the user sees a 200 because the per-row comment IS written
     // to clubhouse_comments. The counter will resync on the next
-    // backfill pass.
-    let calls = 0;
-    mockUpdate.mockImplementation(async () => {
-      calls++;
-      // First Update call is the counter ADD — fail it. Subsequent
-      // calls (the legacy inline append) succeed.
-      if (calls === 1) throw new Error('throttled');
-      return undefined;
-    });
+    // backfill pass. Post-Phase 6, the counter ADD is the ONLY post-
+    // table Update, so we just fail every Update call.
+    mockUpdate.mockRejectedValueOnce(new Error('throttled'));
 
     const res = (await handler(
       buildEvent({
@@ -558,31 +565,17 @@ describe('clubhouse/createComment — dual-write semantics', () => {
     expect(findCommentsTablePut()).toBeDefined();
   });
 
-  it('legacy inline write retries ONCE on version conflict, then accepts silent loss', async () => {
-    wireDdbMocks({ post: buildPostWithComments([]), committee: buildCommittee() });
-    // Inline writes are the SECOND and THIRD updateItem calls (after
-    // the counter ADD). Both fail with CCFE — first triggers a
-    // re-read + retry, second confirms the silent-loss branch.
-    let inlineAttempts = 0;
-    mockUpdate.mockImplementation(async (
-      _t: string,
-      _k: Record<string, unknown>,
-      updateExpression: string,
-      _names: Record<string, string>,
-      values: Record<string, unknown>,
-    ) => {
-      const isInline =
-        updateExpression.includes('SET') &&
-        Object.prototype.hasOwnProperty.call(values, ':comments');
-      if (isInline) {
-        inlineAttempts++;
-        // Fail every inline attempt with CCFE.
-        throw Object.assign(new Error('CCFE'), {
-          name: 'ConditionalCheckFailedException',
-        });
-      }
-      // Counter ADD succeeds.
-      return undefined;
+  it('Phase 6: the LEGACY inline write is GONE — zero inline updates issued, even on a busy post', async () => {
+    // Regression guard: the dual-write that landed in the Phases 1–4
+    // PR was REMOVED in Phase 6. This test pins that contract by
+    // counting every UpdateItem that targets `clubhouse_posts` and
+    // asserting exactly ONE (the counter ADD) — never two.
+    wireDdbMocks({
+      post: buildPostWithComments([
+        { commentId: 'old1' },
+        { commentId: 'old2' },
+      ]),
+      committee: buildCommittee(),
     });
 
     const res = (await handler(
@@ -590,15 +583,19 @@ describe('clubhouse/createComment — dual-write semantics', () => {
         drepId: DREP_ID,
         postId: POST_ID,
         walletAddress: WALLET,
-        body: { body: 'racey inline write' },
+        body: { body: 'no inline write should fire here' },
       }),
     )) as APIGatewayProxyResultV2;
 
-    // User still sees success — the per-row write is the
-    // authoritative copy; the legacy inline write is best-effort.
     expect(res).toMatchObject({ statusCode: 200 });
-    // Exactly two inline attempts: initial + one retry after re-read.
-    expect(inlineAttempts).toBe(2);
+    // Counter ADD is the only post-table mutation.
+    expect(findCounterUpdate()).toBeDefined();
+    // No `:comments` SET ever attempted.
+    expect(findInlineUpdate()).toBeUndefined();
+    const postUpdates = mockUpdate.mock.calls.filter(
+      (c) => c[0] === 'test-clubhouse_posts',
+    );
+    expect(postUpdates).toHaveLength(1);
   });
 });
 

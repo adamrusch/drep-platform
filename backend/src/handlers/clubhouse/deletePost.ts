@@ -1,11 +1,17 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
-import { getItem, deleteItem, tableNames } from '../../lib/dynamodb';
-import type { ClubhousePostItem, DRepCommitteeItem } from '../../lib/types';
+import { getItem, deleteItem, queryItems, tableNames } from '../../lib/dynamodb';
+import {
+  clubhouseCommentPostKey,
+  type ClubhouseCommentRowItem,
+  type ClubhousePostItem,
+  type DRepCommitteeItem,
+} from '../../lib/types';
 import {
   extractAuthContext,
   requireOwnerOrCommitteeLead,
 } from '../../middleware/role-guard';
-import { noContent, badRequest, notFound, internalError, handleError } from '../_response';
+import { writeAuditEvent } from '../../lib/audit';
+import { noContent, badRequest, notFound, handleError } from '../_response';
 
 export const handler = async (
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
@@ -58,11 +64,101 @@ export const handler = async (
       return undefined;
     });
 
-    requireOwnerOrCommitteeLead(authCtx, existing.authorWallet, committee);
+    // Wrap the gate so we can audit a denial before letting the
+    // AuthorizationError propagate. Security-relevant rejections are
+    // the rows an incident responder needs to spot cross-committee
+    // moderation attempts.
+    try {
+      requireOwnerOrCommitteeLead(authCtx, existing.authorWallet, committee);
+    } catch (err) {
+      await writeAuditEvent({
+        entityType: 'clubhouse_post',
+        entityId: decodedPostId,
+        eventType: 'clubhouse.post.denied',
+        actorWallet: authCtx.walletAddress,
+        metadata: {
+          surface: 'deletePost',
+          drepId: decodedDrepId,
+          ownerWallet: existing.authorWallet,
+          reason: 'not_owner_or_lead',
+        },
+      });
+      throw err;
+    }
 
     await deleteItem(tableNames.clubhousePosts, {
       drepId: decodedDrepId,
       postId: decodedPostId,
+    });
+
+    // P0-3 Phase 6+ cascade (2026-05-28). Now that comments live in
+    // the per-row `clubhouse_comments` table, deleting a post must
+    // delete its comment rows too — otherwise we orphan rows that
+    // can never be re-attached or surfaced (the post's PK is gone).
+    // Idempotent by construction: re-running a partial delete picks
+    // up whatever rows remain. Best-effort within the cascade: a
+    // single failed comment delete logs + continues so we don't
+    // leave the post un-deleted because one of N comment-row deletes
+    // failed.
+    const postKey = clubhouseCommentPostKey(decodedDrepId, decodedPostId);
+    let cascadeDeleted = 0;
+    let cascadeErrored = 0;
+    try {
+      let lastEvaluatedKey: Record<string, unknown> | undefined;
+      do {
+        const page = await queryItems<ClubhouseCommentRowItem>(
+          tableNames.clubhouseComments,
+          {
+            keyConditionExpression: '#pk = :pk',
+            expressionAttributeNames: { '#pk': 'postKey' },
+            expressionAttributeValues: { ':pk': postKey },
+            ...(lastEvaluatedKey ? { exclusiveStartKey: lastEvaluatedKey } : {}),
+            // Slim projection — we only need the SK to delete.
+            projectionExpression: 'postKey, commentId',
+          },
+        );
+        for (const row of page.items) {
+          try {
+            await deleteItem(tableNames.clubhouseComments, {
+              postKey: row.postKey,
+              commentId: row.commentId,
+            });
+            cascadeDeleted++;
+          } catch (err) {
+            cascadeErrored++;
+            console.warn(
+              `clubhouse/deletePost: failed to delete comment row commentId=${row.commentId} for postKey=${postKey}:`,
+              err,
+            );
+          }
+        }
+        lastEvaluatedKey = page.lastEvaluatedKey;
+      } while (lastEvaluatedKey);
+    } catch (err) {
+      // A Query failure here doesn't roll back the post delete — the
+      // post is gone and re-running the handler (or a future cleanup
+      // sweep) can finish the cascade. Log so the failure is visible.
+      console.warn(
+        `clubhouse/deletePost: comment cascade Query failed for postKey=${postKey}:`,
+        err,
+      );
+    }
+
+    // Best-effort audit AFTER the delete succeeds. `cascadeDeleted`
+    // tells an incident-responder how many comment rows the cascade
+    // removed; combined with the source row's PITR snapshot, this is
+    // enough to reconstruct the pre-delete state.
+    await writeAuditEvent({
+      entityType: 'clubhouse_post',
+      entityId: decodedPostId,
+      eventType: 'clubhouse.post.deleted',
+      actorWallet: authCtx.walletAddress,
+      metadata: {
+        drepId: decodedDrepId,
+        ownerWallet: existing.authorWallet,
+        cascadeDeleted,
+        cascadeErrored,
+      },
     });
 
     return noContent();
