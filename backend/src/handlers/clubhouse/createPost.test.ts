@@ -214,16 +214,60 @@ describe('clubhouse/createPost', () => {
     expect(written['isDRepPost']).toBe(false);
   });
 
-  it('soft-allows when both Koios + Blockfrost are unreachable', async () => {
-    // source=null signals both upstreams failed. We allow the write
-    // rather than 503 — matches the recognition.ts soft-fail pattern.
+  it('fails CLOSED with 503 when both Koios + Blockfrost are unreachable AND caller is not a role-holder', async () => {
+    // source=null signals both upstreams failed. SEC-2 (2026-05-28)
+    // change: this used to soft-allow ("upstream is down but I should
+    // still be able to post"). Oracle flagged that as a fail-open
+    // anti-pattern. The new posture is fail-CLOSED — uncertainty about
+    // delegation must not grant access. Role-holders are unaffected
+    // (separate test below).
     mockGet.mockResolvedValueOnce(buildCommittee() as never);
     mockLookupCurrentDrep.mockResolvedValue({ drepId: null, source: null });
     const event = buildEvent({
       walletAddress: OUTSIDER_WALLET,
       roles: ['delegator'],
       drepId: DREP_ID,
-      body: { body: 'upstream is down but I should still be able to post' },
+      body: { body: 'upstream is down, I should NOT be able to post anonymously' },
+    });
+
+    const res = (await handler(event)) as APIGatewayProxyResultV2;
+    expect(res).toMatchObject({ statusCode: 503 });
+    const parsed = parseResponseBody(res);
+    expect(parsed['message']).toMatch(/verify your delegation|retry/i);
+    expect(parsed['error']).toBe('ServiceUnavailable');
+    // CRITICAL: no write should have happened on the fail-closed path.
+    expect(mockPut).not.toHaveBeenCalled();
+  });
+
+  it('role-holder BYPASS: lead DRep still posts during a dual-upstream outage', async () => {
+    // The fail-closed change above must NOT lock out role-holders. A
+    // lead/committee_member/trusted_delegator is identified via the
+    // local DDB committee Get, which has no upstream dependency — so
+    // they can write even when both Koios and Blockfrost are down.
+    mockGet.mockResolvedValueOnce(buildCommittee() as never);
+    mockLookupCurrentDrep.mockResolvedValue({ drepId: null, source: null });
+    const event = buildEvent({
+      walletAddress: LEAD_WALLET,
+      roles: ['lead_drep'],
+      drepId: DREP_ID,
+      body: { body: 'lead chime-in during a Koios outage' },
+    });
+
+    const res = (await handler(event)) as APIGatewayProxyResultV2;
+    expect(res).toMatchObject({ statusCode: 201 });
+    expect(mockPut).toHaveBeenCalledTimes(1);
+    const written = mockPut.mock.calls[0]![1] as Record<string, unknown>;
+    expect(written['isDRepPost']).toBe(true);
+  });
+
+  it('role-holder BYPASS: committee_member still posts during a dual-upstream outage', async () => {
+    mockGet.mockResolvedValueOnce(buildCommittee() as never);
+    mockLookupCurrentDrep.mockResolvedValue({ drepId: null, source: null });
+    const event = buildEvent({
+      walletAddress: COMMITTEE_MEMBER_WALLET,
+      roles: ['committee_member'],
+      drepId: DREP_ID,
+      body: { body: 'committee member during outage' },
     });
 
     const res = (await handler(event)) as APIGatewayProxyResultV2;
