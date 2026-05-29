@@ -3,6 +3,7 @@ import { ulid } from 'ulid';
 import { putItem, getItem, updateItem, tableNames } from '../../lib/dynamodb';
 import type { DRepCommitteeItem, CommitteeMemberItem } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
+import { writeAuditEvent } from '../../lib/audit';
 import { created, badRequest, conflict, internalError, handleError } from '../_response';
 
 interface RegisterDRepBody {
@@ -76,6 +77,20 @@ export const handler = async (
       { '#roles': 'roles', '#drepId': 'drepId', '#updatedAt': 'updatedAt' },
       { ':roles': Array.from(rolesSet), ':drepId': drepId, ':now': now },
     );
+
+    // Best-effort audit AFTER the committee + role elevation land.
+    // This is one of the load-bearing events for governance forensics —
+    // it ties a wallet to the moment it became a lead DRep, which
+    // gates committee-scoped privileges everywhere else.
+    await writeAuditEvent({
+      entityType: 'drep_committee',
+      entityId: drepId,
+      eventType: 'drep.committee.registered',
+      actorWallet: authCtx.walletAddress,
+      metadata: {
+        leadWallet: authCtx.walletAddress,
+      },
+    });
 
     return created(committee);
   } catch (err) {

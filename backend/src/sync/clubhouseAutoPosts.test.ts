@@ -167,7 +167,11 @@ describe('fanoutAutoPosts', () => {
     expect(sample['body']).toBe('A detailed abstract about this governance action.');
     expect(sample['createdAt']).toBe(NOW);
     expect(sample['updatedAt']).toBe(NOW);
-    expect(sample['comments']).toEqual([]);
+    // P0-3 Phase 6 (2026-05-28): the inline `comments: []` field is
+    // no longer written on new post rows. The denormalized
+    // `commentCount: 0` counter replaces it.
+    expect(sample['comments']).toBeUndefined();
+    expect(sample['commentCount']).toBe(0);
 
     // autoSource shape — abstractFrozenAt MUST equal `now` (frozen at
     // this row's creation moment).

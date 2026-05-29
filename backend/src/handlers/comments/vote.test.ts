@@ -60,6 +60,13 @@ vi.mock('../../lib/recognition', () => ({
   lookupStake: vi.fn(),
 }));
 
+// Stub the audit-log writer — see `lib/audit.test.ts` for its own
+// coverage. Tests in THIS file focus on the vote mutation; the
+// trailing audit write is best-effort and side-channel.
+vi.mock('../../lib/audit', () => ({
+  writeAuditEvent: vi.fn().mockResolvedValue(undefined),
+}));
+
 import { getItem, transactWrite, updateItem } from '../../lib/dynamodb';
 import { lookupStake } from '../../lib/recognition';
 import { handler } from './vote';
