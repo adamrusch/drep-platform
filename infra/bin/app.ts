@@ -5,10 +5,12 @@ import { DatabaseStack } from '../lib/database-stack';
 import { ApiStack } from '../lib/api-stack';
 import { FrontendStack } from '../lib/frontend-stack';
 import { SchedulerStack } from '../lib/scheduler-stack';
+import { assertStage, customDomainFor } from '../lib/stage';
 
 const app = new cdk.App();
 
 const stage = app.node.tryGetContext('stage') as string | undefined ?? 'dev';
+assertStage(stage); // fail fast on a typo'd stage before provisioning anything
 
 const env: cdk.Environment = {
   account: '409410541898',
@@ -16,18 +18,12 @@ const env: cdk.Environment = {
 };
 
 // ---- Custom domain configuration (drep.tools) ----
-// Enabled for all stages currently. Apex + www → frontend; api.drep.tools → API.
-// The hosted zone and ACM certificate are managed manually outside CDK to avoid
-// destruction risk; CDK imports them by ID/ARN.
-const customDomain = {
-  hostedZoneId: 'Z0487212142GV67N7GOFU',
-  zoneName: 'drep.tools',
-  certificateArn:
-    'arn:aws:acm:us-east-1:409410541898:certificate/9b367d8e-f72f-4e69-9f02-0124c70c7149',
-  apexDomain: 'drep.tools',
-  wwwDomain: 'www.drep.tools',
-  apiDomain: 'api.drep.tools',
-};
+// Per-stage: prod/dev → drep.tools, test → test.drep.tools (separate cookie
+// scope). The hosted zone and ACM certificates are managed manually outside
+// CDK to avoid destruction risk; CDK imports them by ID/ARN. The test cert can
+// be supplied via `--context testCertArn=arn:...` until it's the default.
+const testCertArn = app.node.tryGetContext('testCertArn') as string | undefined;
+const customDomain = customDomainFor(stage, { testCertArn });
 
 const databaseStack = new DatabaseStack(app, `DRepPlatform-Database-${stage}`, {
   stage,
