@@ -140,6 +140,18 @@ export const tableNames = {
   ccMembers: `${TABLE_PREFIX}cc_members`,
   auditLog: `${TABLE_PREFIX}audit_log`,
   authNonces: `${TABLE_PREFIX}auth_nonces`,
+  /** Phase 2 committee voting. PK=`voteScope` (`${drepId}#${actionId}`),
+   *  SK=`itemKey` ('PROPOSAL' | 'CAST#<wallet>' | 'RATIONALE#DRAFT|LOCK|FINAL'
+   *  | 'SUBMISSION' | 'COSIGN#<wallet>'). Sparse GSI `open-epochDeadline-index`
+   *  (PK `statusPartition`='OPEN', SK `epochDeadline`) for the open-proposal
+   *  view + deadline sweep. See infra/lib/database-stack.ts. */
+  committeeVotes: `${TABLE_PREFIX}committee_votes`,
+  /** Enforces one-committee-per-wallet (lead OR member) atomically.
+   *  PK=`walletAddress` → {drepId, role}. GSI `drepId-index` lists a
+   *  committee's membership rows. */
+  committeeMembership: `${TABLE_PREFIX}committee_membership`,
+  /** Platform-wide flags. PK=`stateKey` (today: 'SAFETY_MODE'). */
+  platformState: `${TABLE_PREFIX}platform_state`,
 } as const;
 
 export type TableName = keyof typeof tableNames;
