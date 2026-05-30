@@ -4,7 +4,16 @@ import { docClient, getItem, tableNames } from '../../lib/dynamodb';
 import type { ClubhousePostItem } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { writeAuditEvent } from '../../lib/audit';
-import { ok, badRequest, notFound, conflict, handleError } from '../_response';
+import { resolveClubhouseMembership } from './_membership';
+import {
+  ok,
+  badRequest,
+  forbidden,
+  notFound,
+  conflict,
+  serviceUnavailable,
+  handleError,
+} from '../_response';
 
 /**
  * Cast / change a vote on a clubhouse poll.
@@ -113,6 +122,63 @@ export const handler = async (
 
     if (body.optionIndex < 0 || body.optionIndex >= post.pollOptions.length) {
       return badRequest('optionIndex is out of range');
+    }
+
+    // ---- Membership gate (Batch CLUBHOUSE-DELEGATION-GATE, 2026-05-30) ----
+    // Mirrors `createComment.ts` / `createPost.ts` — the Clubhouse is
+    // delegator-scoped, so poll voting must be gated identically. Prior
+    // to this PR `votePoll` had NO delegation check (the SEC-2 batch
+    // wired the gate onto post + comment writes but missed this surface).
+    //
+    // Posture (identical to the comment/post handlers):
+    //   - role-holder (lead / committee_member / trusted_delegator) →
+    //     allow, irrespective of upstream weather (committee Get is a
+    //     local DDB read with no external dependency).
+    //   - confirmed current delegator → allow.
+    //   - confirmed NOT delegated AND NOT a role-holder → 403.
+    //   - delegation unknown (dual-upstream Koios+Blockfrost outage)
+    //     AND NOT a role-holder → 503 (fail-CLOSED — uncertainty about
+    //     delegation MUST NOT grant access).
+    //
+    // The gate runs BEFORE the idempotent same-option short-circuit so
+    // an un-delegated wallet cannot silently re-confirm a prior vote
+    // by re-submitting the same optionIndex. The 3h sweep separately
+    // revokes such votes; this gate prevents NEW activity at cast time.
+    const membership = await resolveClubhouseMembership(authCtx.walletAddress, drepId);
+    if (!membership.isRoleHolder && !membership.isCurrentDelegator) {
+      if (membership.delegationUnknown) {
+        console.warn(
+          `votePoll: 503 rejecting ${authCtx.walletAddress} on drepId=${drepId} postId=${postId} — delegation lookup failed (Koios+Blockfrost both unreachable) and caller is not a role-holder`,
+        );
+        await writeAuditEvent({
+          entityType: 'auth',
+          entityId: authCtx.walletAddress,
+          eventType: 'auth.delegation_unverified',
+          actorWallet: authCtx.walletAddress,
+          metadata: {
+            surface: 'votePoll',
+            drepId,
+            postId,
+          },
+        });
+        return serviceUnavailable(
+          "Couldn't verify your delegation right now, please retry",
+        );
+      }
+      await writeAuditEvent({
+        entityType: 'clubhouse_post',
+        entityId: postId,
+        eventType: 'clubhouse.poll.denied',
+        actorWallet: authCtx.walletAddress,
+        metadata: {
+          surface: 'votePoll',
+          drepId,
+          reason: 'not_member',
+        },
+      });
+      return forbidden(
+        'You must be delegated to this DRep or be a committee member to vote in their clubhouse',
+      );
     }
 
     const previousIndex = post.pollVotes?.[authCtx.walletAddress];

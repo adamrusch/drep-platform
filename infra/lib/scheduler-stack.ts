@@ -422,6 +422,25 @@ export class SchedulerStack extends cdk.Stack {
     databaseStack.commentVotesTable.grantReadWriteData(revalidateCommentStakeRole);
     databaseStack.commentsTable.grantReadWriteData(revalidateCommentStakeRole);
     databaseStack.auditLogTable.grantReadWriteData(revalidateCommentStakeRole);
+    // ---- Batch CLUBHOUSE-DELEGATION-GATE (2026-05-30) ----
+    // The same Lambda now also runs the clubhouse-delegation revoke+
+    // badge phase on the same 3-hour cadence (see
+    // `backend/src/sync/revalidate-comment-stake.ts` —
+    // `runRevalidateClubhouseDelegations`). That phase:
+    //   - Scans `clubhouse_posts` to harvest poll-voter participation,
+    //     then UpdateItems each post to REMOVE the un-delegated wallet's
+    //     pollVotes entry + ADD -1 to the affected pollOptions counter.
+    //   - Scans `clubhouse_comments` to harvest comment authors, then
+    //     UpdateItems each comment row to set
+    //     `authorDelegationActive` (false → badge, true → unbadge).
+    //   - Gets `drep_committees` rows (PK=drepId, SK='COMMITTEE') to
+    //     check the role-holder bypass.
+    // RW on clubhouse_posts + clubhouse_comments; read-only on
+    // drep_committees (the role-holder check is a single GetItem; we
+    // never write the committee row from this Lambda).
+    databaseStack.clubhousePostsTable.grantReadWriteData(revalidateCommentStakeRole);
+    databaseStack.clubhouseCommentsTable.grantReadWriteData(revalidateCommentStakeRole);
+    databaseStack.drepCommitteesTable.grantReadData(revalidateCommentStakeRole);
 
     this.revalidateCommentStakeFn = new lambdaNodejs.NodejsFunction(
       this,

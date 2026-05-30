@@ -64,11 +64,23 @@ vi.mock('../../lib/audit', () => ({
   writeAuditEvent: vi.fn().mockResolvedValue(undefined),
 }));
 
+// Membership gate dependency (Batch CLUBHOUSE-DELEGATION-GATE, 2026-05-30).
+// `votePoll.ts` calls `resolveClubhouseMembership(walletAddress, drepId)`
+// before allowing the vote to land — same posture as the createComment/
+// createPost gates from SEC-2. Default mock returns "delegated to this
+// DRep" so existing concurrency / atomic-write tests stay focused on
+// the mutation behavior rather than re-asserting the gate.
+vi.mock('./_membership', () => ({
+  resolveClubhouseMembership: vi.fn(),
+}));
+
 import { docClient, getItem } from '../../lib/dynamodb';
+import { resolveClubhouseMembership } from './_membership';
 import { handler } from './votePoll';
 
 const mockSend = vi.mocked(docClient.send);
 const mockGet = vi.mocked(getItem);
+const mockMembership = vi.mocked(resolveClubhouseMembership);
 
 const DREP_ID = 'drep1ygqgayvx8yzsaj9hprja3l6jy3v4px9z3u8uvecuvm3f92ce7mckx';
 const POST_ID = 'post-abc';
@@ -131,6 +143,16 @@ beforeEach(() => {
   // Default: every UpdateCommand succeeds and returns an Attributes
   // payload modelled after the input post.
   mockSend.mockResolvedValue({ Attributes: buildPollPost() } as never);
+  // Default: caller is a confirmed current delegator of THIS DRep, so
+  // the membership gate added in Batch CLUBHOUSE-DELEGATION-GATE
+  // (2026-05-30) lets every existing concurrency / atomic-write test
+  // through without special-casing. The dedicated gate-tests below
+  // override per-test.
+  mockMembership.mockResolvedValue({
+    isRoleHolder: false,
+    isCurrentDelegator: true,
+    delegationUnknown: false,
+  });
 });
 
 /** Helper — pull the LAST UpdateCommand input that was issued. */
@@ -555,5 +577,169 @@ describe('clubhouse/votePoll — concurrency (the bug we fixed)', () => {
     )) as APIGatewayProxyResultV2;
 
     expect(res).toMatchObject({ statusCode: 404 });
+  });
+});
+
+/**
+ * Batch CLUBHOUSE-DELEGATION-GATE (2026-05-30) — cast-time membership gate.
+ *
+ * Mirrors the SEC-2 gate on `createPost` / `createComment`. The Clubhouse
+ * is delegator-scoped: only the DRep's committee role-holders OR wallets
+ * currently delegated to THIS DRep may vote on its polls. Prior to this
+ * batch, `votePoll` accepted any authenticated wallet's vote — the gate
+ * existed on post/comment writes only.
+ *
+ * Coverage (mirrors the four `createComment` membership paths):
+ *   - allowed when delegated to this DRep
+ *   - 403 when delegated to a different DRep (confirmed not-member)
+ *   - 503 when delegation lookup failed (dual-upstream outage,
+ *     `delegationUnknown=true`) AND caller is NOT a role-holder
+ *   - role-holder bypass: lead/committee_member can vote even during a
+ *     dual-upstream outage
+ *
+ * The atomic-write tests in the blocks above use a default-passing
+ * membership mock (set in beforeEach) so they don't reassert the gate.
+ */
+describe('clubhouse/votePoll — membership gate (delegation-scoped)', () => {
+  it('allows a wallet currently delegated to THIS DRep (200, write lands)', async () => {
+    mockGet.mockResolvedValue(buildPollPost() as never);
+    mockMembership.mockResolvedValueOnce({
+      isRoleHolder: false,
+      isCurrentDelegator: true,
+      delegationUnknown: false,
+    });
+
+    const res = (await handler(
+      buildEvent({
+        drepId: DREP_ID,
+        postId: POST_ID,
+        walletAddress: WALLET_A,
+        body: { optionIndex: 1 },
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 200 });
+    // Atomic UpdateItem fired — the gate let the vote through.
+    expect(mockSend).toHaveBeenCalledTimes(1);
+  });
+
+  it('REJECTS with 403 a wallet whose delegation is confirmed but to a DIFFERENT DRep / not at all', async () => {
+    // `isCurrentDelegator=false` means we got a CONFIRMED reading and
+    // the wallet does NOT delegate to this DRep. Not a role-holder
+    // either. The Clubhouse is private — block with 403.
+    mockGet.mockResolvedValue(buildPollPost() as never);
+    mockMembership.mockResolvedValueOnce({
+      isRoleHolder: false,
+      isCurrentDelegator: false,
+      delegationUnknown: false,
+    });
+
+    const res = (await handler(
+      buildEvent({
+        drepId: DREP_ID,
+        postId: POST_ID,
+        walletAddress: WALLET_A,
+        body: { optionIndex: 0 },
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 403 });
+    const parsed = JSON.parse((res as { body: string }).body) as {
+      error: string;
+      message: string;
+    };
+    expect(parsed.error).toBe('Forbidden');
+    // CRITICAL: no atomic UpdateItem on the rejection path.
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  it('FAILS CLOSED with 503 when both upstreams are down AND caller is NOT a role-holder', async () => {
+    // Mirrors SEC-2 createComment / createPost: a dual-upstream outage
+    // means we cannot CONFIRM delegation. Fail-CLOSED — uncertainty
+    // about delegation must not grant access. An attacker who can
+    // degrade the lookup must NOT slip a vote through under cover.
+    mockGet.mockResolvedValue(buildPollPost() as never);
+    mockMembership.mockResolvedValueOnce({
+      isRoleHolder: false,
+      isCurrentDelegator: false,
+      delegationUnknown: true,
+    });
+
+    const res = (await handler(
+      buildEvent({
+        drepId: DREP_ID,
+        postId: POST_ID,
+        walletAddress: WALLET_A,
+        body: { optionIndex: 0 },
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 503 });
+    const parsed = JSON.parse((res as { body: string }).body) as {
+      error: string;
+      message: string;
+    };
+    expect(parsed.error).toBe('ServiceUnavailable');
+    expect(parsed.message).toMatch(/verify your delegation|retry/i);
+    // CRITICAL: no atomic UpdateItem on the fail-closed path.
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  it('role-holder BYPASS: a lead/committee_member vote lands even during a dual-upstream outage', async () => {
+    // The fail-closed 503 path MUST NOT lock out role-holders. The
+    // committee Get is a local DDB read with no external dependency,
+    // so a confirmed role-holder is allowed even when
+    // `delegationUnknown=true` (the dual-upstream-outage signal). This
+    // preserves the operational invariant from SEC-2: the DRep and
+    // their committee can ALWAYS participate in clubhouses they
+    // manage, irrespective of Koios/Blockfrost weather.
+    mockGet.mockResolvedValue(buildPollPost() as never);
+    mockMembership.mockResolvedValueOnce({
+      isRoleHolder: true,
+      isCurrentDelegator: false,
+      delegationUnknown: true,
+    });
+
+    const res = (await handler(
+      buildEvent({
+        drepId: DREP_ID,
+        postId: POST_ID,
+        walletAddress: WALLET_A,
+        body: { optionIndex: 2 },
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 200 });
+    // Atomic UpdateItem fired — the bypass let the vote through.
+    expect(mockSend).toHaveBeenCalledTimes(1);
+  });
+
+  it('gate runs BEFORE the idempotent same-option short-circuit (un-delegated wallet cannot silently re-confirm a prior vote)', async () => {
+    // Scenario: a wallet that voted YES three months ago has since
+    // un-delegated. They re-submit the same optionIndex (perhaps the
+    // FE re-fires on load). Without the gate the handler would
+    // short-circuit on `previousIndex === body.optionIndex` and return
+    // 200, leaving stale activity to look fresh. With the gate the
+    // request is rejected before the short-circuit even fires.
+    mockGet.mockResolvedValue(
+      buildPollPost({ pollVotes: { [WALLET_A]: 1 } }) as never,
+    );
+    mockMembership.mockResolvedValueOnce({
+      isRoleHolder: false,
+      isCurrentDelegator: false,
+      delegationUnknown: false,
+    });
+
+    const res = (await handler(
+      buildEvent({
+        drepId: DREP_ID,
+        postId: POST_ID,
+        walletAddress: WALLET_A,
+        body: { optionIndex: 1 }, // SAME as the prior vote
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 403 });
+    expect(mockSend).not.toHaveBeenCalled();
   });
 });
