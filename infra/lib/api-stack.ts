@@ -208,6 +208,9 @@ export class ApiStack extends cdk.Stack {
     const committeeGetVoteFn = fn('CommitteeGetVoteFn', 'handlers/committee/getVote.ts');
     const committeeOpenProposalFn = fn('CommitteeOpenProposalFn', 'handlers/committee/openProposal.ts');
     const committeeCastVoteFn = fn('CommitteeCastVoteFn', 'handlers/committee/castVote.ts');
+    const committeeCloseVoteFn = fn('CommitteeCloseVoteFn', 'handlers/committee/closeVote.ts');
+    const committeeFailVoteFn = fn('CommitteeFailVoteFn', 'handlers/committee/failVote.ts');
+    const committeeWithdrawFn = fn('CommitteeWithdrawFn', 'handlers/committee/withdrawProposal.ts');
 
     // ---- DRep directory handlers (chain-state read; /dreps routes) ----
     // The directory is the global registry of mainnet DReps with their
@@ -411,6 +414,9 @@ export class ApiStack extends cdk.Stack {
     addRoute(apigwv2.HttpMethod.GET, '/committee/{drepId}/votes/{actionId}', committeeGetVoteFn, 'CommitteeGetVote');
     addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/votes', committeeOpenProposalFn, 'CommitteeOpenProposal', true);
     addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/votes/{actionId}/cast', committeeCastVoteFn, 'CommitteeCastVote', true);
+    addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/votes/{actionId}/close', committeeCloseVoteFn, 'CommitteeCloseVote', true);
+    addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/votes/{actionId}/fail', committeeFailVoteFn, 'CommitteeFailVote', true);
+    addRoute(apigwv2.HttpMethod.DELETE, '/committee/{drepId}/votes/{actionId}', committeeWithdrawFn, 'CommitteeWithdraw', true);
 
     // ---- DRep directory routes (chain-state) ----
     addRoute(apigwv2.HttpMethod.GET, '/dreps', drepDirectoryListFn, 'DRepDirectoryList');
