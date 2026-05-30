@@ -60,40 +60,54 @@ export interface SignedMutation {
  * Returns a callback that walks through the mutation-signing flow:
  *
  *   1. POST /auth/mutation-nonce → `{ nonce, message }`
- *   2. Wallet re-enable + `signData(stakeAddress, hex(message))`
- *   3. Returns the triple the backend expects on the next mutation.
+ *   2. Build the plaintext: `buildMessage(nonce)` when supplied (committee
+ *      mutations sign a stage-bound, action-specific message — see
+ *      lib/committeeMessages.ts), else the server's generic `message`.
+ *   3. Wallet re-enable + `signData(stakeAddress, hex(plaintext))`
+ *   4. Returns the triple the backend expects on the next mutation.
+ *
+ * The backend verifier reconstructs the SAME plaintext from the request body
+ * plus its own stage, so issuer and verifier stay byte-identical.
  *
  * Throws (with a user-readable message) on any failure — the caller is
  * expected to show that as an inline error and let the user retry.
  */
-export function useMutationSign(): () => Promise<SignedMutation> {
+export type MutationMessageBuilder = (nonce: string) => string;
+
+export function useMutationSign(): (
+  buildMessage?: MutationMessageBuilder,
+) => Promise<SignedMutation> {
   const walletAddress = useAuthStore((s) => s.walletAddress);
   const walletName = useAuthStore((s) => s.walletName);
 
-  return useCallback(async (): Promise<SignedMutation> => {
-    if (!walletAddress) {
-      throw new Error('Not authenticated — please reconnect your wallet.');
-    }
-    if (!walletName) {
-      throw new Error(
-        'Wallet identity not retained from your last login. Please disconnect and re-connect your wallet, then try again.',
-      );
-    }
+  return useCallback(
+    async (buildMessage?: MutationMessageBuilder): Promise<SignedMutation> => {
+      if (!walletAddress) {
+        throw new Error('Not authenticated — please reconnect your wallet.');
+      }
+      if (!walletName) {
+        throw new Error(
+          'Wallet identity not retained from your last login. Please disconnect and re-connect your wallet, then try again.',
+        );
+      }
 
-    const nonceResp = await post<MutationNonceResponse>('/auth/mutation-nonce');
+      const nonceResp = await post<MutationNonceResponse>('/auth/mutation-nonce');
+      const plaintext = buildMessage ? buildMessage(nonceResp.nonce) : nonceResp.message;
 
-    const api = await reEnableWallet(walletName);
-    const messageHex = toHex(nonceResp.message);
-    const sig = await api.signData(walletAddress, messageHex);
+      const api = await reEnableWallet(walletName);
+      const messageHex = toHex(plaintext);
+      const sig = await api.signData(walletAddress, messageHex);
 
-    if (!sig?.signature || !sig?.key) {
-      throw new Error('Wallet returned an invalid signature.');
-    }
+      if (!sig?.signature || !sig?.key) {
+        throw new Error('Wallet returned an invalid signature.');
+      }
 
-    return {
-      mutationNonce: nonceResp.nonce,
-      mutationSignature: sig.signature,
-      mutationKey: sig.key,
-    };
-  }, [walletAddress, walletName]);
+      return {
+        mutationNonce: nonceResp.nonce,
+        mutationSignature: sig.signature,
+        mutationKey: sig.key,
+      };
+    },
+    [walletAddress, walletName],
+  );
 }
