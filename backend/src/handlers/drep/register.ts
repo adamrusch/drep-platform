@@ -1,10 +1,21 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { ulid } from 'ulid';
-import { putItem, queryItems, updateItem, tableNames } from '../../lib/dynamodb';
-import type { DRepCommitteeItem, CommitteeMemberItem } from '../../lib/types';
+import { getItem, transactWrite, tableNames } from '../../lib/dynamodb';
+import type {
+  DRepCommitteeItem,
+  CommitteeMemberItem,
+  CommitteeMembershipItem,
+  UserItem,
+} from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { writeAuditEvent } from '../../lib/audit';
-import { created, badRequest, conflict, internalError, handleError } from '../_response';
+import {
+  getSafetyMode,
+  isSafetyModeActive,
+  isNewWallet,
+  maybeTripSafetyMode,
+} from '../../lib/safetyMode';
+import { created, badRequest, conflict, forbidden, handleError } from '../_response';
 
 interface RegisterDRepBody {
   committeeName: string;
@@ -36,27 +47,28 @@ export const handler = async (
       return badRequest('description is required');
     }
 
-    // Reject if this wallet already leads a committee.
-    //
-    // NB: committees are keyed by a generated ULID `drepId`, NOT by the lead's
-    // wallet — so the dedup check MUST go through the `leadWallet-index` GSI.
-    // (The previous getItem on {drepId: walletAddress} was a no-op: that PK is
-    // never written, so it never matched and a wallet could register unlimited
-    // committees.) Full "one committee per wallet, total" — including
-    // membership on someone else's committee — is enforced atomically via the
-    // dedicated committee_membership table in a later Phase 2 step.
-    const existingLed = await queryItems(tableNames.drepCommittees, {
-      indexName: 'leadWallet-index',
-      keyConditionExpression: 'leadWallet = :w',
-      expressionAttributeValues: { ':w': authCtx.walletAddress },
-      limit: 1,
-    });
-    if (existingLed.count > 0) {
-      return conflict('You have already registered a DRep committee');
+    const nowMs = Date.now();
+    const now = new Date(nowMs).toISOString();
+
+    // ---- Sybil safety-mode gate ----
+    // While the platform is latched into safety mode (>5 committees created in
+    // a trailing 12h, see lib/safetyMode.ts), a wallet whose first auth was
+    // under 7 days ago cannot create a committee. Established wallets pass.
+    const safety = await getSafetyMode();
+    if (isSafetyModeActive(safety, Math.floor(nowMs / 1000))) {
+      const profile = await getItem<UserItem>(tableNames.users, {
+        walletAddress: authCtx.walletAddress,
+        SK: 'PROFILE',
+      });
+      if (isNewWallet(profile?.createdAt, nowMs)) {
+        return forbidden(
+          'The platform is temporarily in safety mode after a spike in new committees. ' +
+            'Wallets newer than 7 days cannot create a committee right now. Please try again later.',
+        );
+      }
     }
 
     const drepId = ulid();
-    const now = new Date().toISOString();
 
     const leadMember: CommitteeMemberItem = {
       walletAddress: authCtx.walletAddress,
@@ -76,30 +88,67 @@ export const handler = async (
       updatedAt: now,
     };
 
-    await putItem(tableNames.drepCommittees, committee as unknown as Record<string, unknown>);
+    const membershipRow: CommitteeMembershipItem = {
+      walletAddress: authCtx.walletAddress,
+      drepId,
+      role: 'lead',
+      joinedAt: now,
+    };
 
-    // Elevate user role to lead_drep
     const rolesSet = new Set([...authCtx.roles, 'lead_drep']);
-    await updateItem(
-      tableNames.users,
-      { walletAddress: authCtx.walletAddress, SK: 'PROFILE' },
-      'SET #roles = :roles, #drepId = :drepId, #updatedAt = :now',
-      { '#roles': 'roles', '#drepId': 'drepId', '#updatedAt': 'updatedAt' },
-      { ':roles': Array.from(rolesSet), ':drepId': drepId, ':now': now },
-    );
 
-    // Best-effort audit AFTER the committee + role elevation land.
-    // This is one of the load-bearing events for governance forensics —
-    // it ties a wallet to the moment it became a lead DRep, which
-    // gates committee-scoped privileges everywhere else.
+    // Atomic: create the committee, claim the lead's single membership slot
+    // (fails if this wallet already belongs to ANY committee — lead or member),
+    // and elevate the user's role — all-or-nothing. The membership row is the
+    // authoritative "one committee per wallet, total" guard (replacing the
+    // earlier leadWallet-index pre-check, which couldn't see membership on
+    // someone else's committee).
+    try {
+      await transactWrite([
+        {
+          Put: {
+            TableName: tableNames.drepCommittees,
+            Item: committee as unknown as Record<string, unknown>,
+          },
+        },
+        {
+          Put: {
+            TableName: tableNames.committeeMembership,
+            Item: membershipRow as unknown as Record<string, unknown>,
+            ConditionExpression: 'attribute_not_exists(walletAddress)',
+          },
+        },
+        {
+          Update: {
+            TableName: tableNames.users,
+            Key: { walletAddress: authCtx.walletAddress, SK: 'PROFILE' },
+            UpdateExpression: 'SET #roles = :roles, #drepId = :drepId, #updatedAt = :now',
+            ExpressionAttributeNames: { '#roles': 'roles', '#drepId': 'drepId', '#updatedAt': 'updatedAt' },
+            ExpressionAttributeValues: { ':roles': Array.from(rolesSet), ':drepId': drepId, ':now': now },
+          },
+        },
+      ]);
+    } catch (err) {
+      if (err && typeof err === 'object' && (err as { name?: string }).name === 'TransactionCanceledException') {
+        return conflict('This wallet already belongs to a DRep committee');
+      }
+      throw err;
+    }
+
+    // Best-effort: a successful creation may push the trailing-12h count over
+    // the threshold and latch safety mode. Never fails the registration.
+    try {
+      await maybeTripSafetyMode(nowMs);
+    } catch (err) {
+      console.error('register: maybeTripSafetyMode failed (non-fatal):', err);
+    }
+
     await writeAuditEvent({
       entityType: 'drep_committee',
       entityId: drepId,
       eventType: 'drep.committee.registered',
       actorWallet: authCtx.walletAddress,
-      metadata: {
-        leadWallet: authCtx.walletAddress,
-      },
+      metadata: { leadWallet: authCtx.walletAddress },
     });
 
     return created(committee);
