@@ -133,6 +133,10 @@ export class ApiStack extends cdk.Stack {
       databaseStack.ccMembersTable,
       databaseStack.auditLogTable,
       databaseStack.authNoncesTable,
+      // Phase 2 committee voting.
+      databaseStack.committeeVotesTable,
+      databaseStack.committeeMembershipTable,
+      databaseStack.platformStateTable,
     ]) {
       table.grantReadWriteData(lambdaRole);
     }
@@ -195,6 +199,11 @@ export class ApiStack extends cdk.Stack {
     const drepGetFn = fn('DRepGetFn', 'handlers/drep/get.ts');
     const drepRegisterFn = fn('DRepRegisterFn', 'handlers/drep/register.ts');
     const drepUpdateFn = fn('DRepUpdateFn', 'handlers/drep/update.ts');
+
+    // ---- Committee voting handlers (Phase 2) ----
+    const committeeAddMemberFn = fn('CommitteeAddMemberFn', 'handlers/committee/addMember.ts');
+    const committeeRemoveMemberFn = fn('CommitteeRemoveMemberFn', 'handlers/committee/removeMember.ts');
+    const committeeVotingConfigFn = fn('CommitteeVotingConfigFn', 'handlers/committee/updateVotingConfig.ts');
 
     // ---- DRep directory handlers (chain-state read; /dreps routes) ----
     // The directory is the global registry of mainnet DReps with their
@@ -389,6 +398,11 @@ export class ApiStack extends cdk.Stack {
     addRoute(apigwv2.HttpMethod.POST, '/drep', drepRegisterFn, 'DRepRegister', true);
     addRoute(apigwv2.HttpMethod.GET, '/drep/{drepId}', drepGetFn, 'DRepGet');
     addRoute(apigwv2.HttpMethod.PUT, '/drep/{drepId}', drepUpdateFn, 'DRepUpdate', true);
+
+    // ---- Committee voting routes (Phase 2) ----
+    addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/members', committeeAddMemberFn, 'CommitteeAddMember', true);
+    addRoute(apigwv2.HttpMethod.DELETE, '/committee/{drepId}/members/{walletAddress}', committeeRemoveMemberFn, 'CommitteeRemoveMember', true);
+    addRoute(apigwv2.HttpMethod.PUT, '/committee/{drepId}/voting-config', committeeVotingConfigFn, 'CommitteeVotingConfig', true);
 
     // ---- DRep directory routes (chain-state) ----
     addRoute(apigwv2.HttpMethod.GET, '/dreps', drepDirectoryListFn, 'DRepDirectoryList');
