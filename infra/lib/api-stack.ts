@@ -18,6 +18,7 @@ import { Construct } from 'constructs';
 import * as path from 'path';
 import type { DatabaseStack } from './database-stack';
 import type { CustomDomainConfig } from './frontend-stack';
+import { isPersistent } from './stage';
 
 export interface ApiStackProps extends cdk.StackProps {
   stage: string;
@@ -80,7 +81,9 @@ export class ApiStack extends cdk.Stack {
       BLOCKFROST_SECRET_NAME: `drep-platform/${stage}/blockfrost-api-key`,
       CORS_ORIGIN: primaryCorsOrigin,
       CORS_ALLOWED_ORIGINS: allowedOrigins.join(','),
-      ...(customDomain ? { COOKIE_DOMAIN: `.${customDomain.zoneName}` } : {}),
+      // Per-stage cookie scope (e.g. `.test.drep.tools`) so a test session
+      // cookie is never sent to prod's api.drep.tools, and vice versa.
+      ...(customDomain ? { COOKIE_DOMAIN: customDomain.cookieDomain } : {}),
     };
 
     // ---- Shared Lambda execution role ----
@@ -828,7 +831,7 @@ export class ApiStack extends cdk.Stack {
       const wafLogGroup = new logs.LogGroup(this, 'ApiWafLogGroup', {
         logGroupName: `aws-waf-logs-drep-platform-${stage}-api`,
         retention: logs.RetentionDays.ONE_WEEK,
-        removalPolicy: stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+        removalPolicy: isPersistent(stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
       });
 
       const webAcl = new wafv2.CfnWebACL(this, 'ApiWebAcl', {

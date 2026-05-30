@@ -1,6 +1,6 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { ulid } from 'ulid';
-import { putItem, getItem, updateItem, tableNames } from '../../lib/dynamodb';
+import { putItem, queryItems, updateItem, tableNames } from '../../lib/dynamodb';
 import type { DRepCommitteeItem, CommitteeMemberItem } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { writeAuditEvent } from '../../lib/audit';
@@ -36,12 +36,22 @@ export const handler = async (
       return badRequest('description is required');
     }
 
-    // Check if this wallet already leads a committee
-    const existing = await getItem(tableNames.drepCommittees, {
-      drepId: authCtx.walletAddress,
-      SK: 'COMMITTEE',
+    // Reject if this wallet already leads a committee.
+    //
+    // NB: committees are keyed by a generated ULID `drepId`, NOT by the lead's
+    // wallet — so the dedup check MUST go through the `leadWallet-index` GSI.
+    // (The previous getItem on {drepId: walletAddress} was a no-op: that PK is
+    // never written, so it never matched and a wallet could register unlimited
+    // committees.) Full "one committee per wallet, total" — including
+    // membership on someone else's committee — is enforced atomically via the
+    // dedicated committee_membership table in a later Phase 2 step.
+    const existingLed = await queryItems(tableNames.drepCommittees, {
+      indexName: 'leadWallet-index',
+      keyConditionExpression: 'leadWallet = :w',
+      expressionAttributeValues: { ':w': authCtx.walletAddress },
+      limit: 1,
     });
-    if (existing) {
+    if (existingLed.count > 0) {
       return conflict('You have already registered a DRep committee');
     }
 
