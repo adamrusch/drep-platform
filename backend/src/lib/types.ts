@@ -1081,6 +1081,21 @@ export interface ClubhouseCommentRowItem {
    *  on the row so `createComment` doesn't have to walk the whole
    *  thread to enforce the 2-level cap. */
   depth: 0 | 1 | 2;
+  /** Batch CLUBHOUSE-DELEGATION-GATE (2026-05-30).
+   *
+   *  Set to `false` by the 3-hour clubhouse-delegation revalidation
+   *  sweep (`backend/src/sync/revalidate-comment-stake.ts` —
+   *  `runRevalidateClubhouseDelegations`) when the author's wallet is
+   *  confirmed (via Koios `delegated_drep`) to no longer delegate to
+   *  this clubhouse's DRep AND the author is not a committee role-
+   *  holder. The sweep clears it back to `true` if the author re-
+   *  delegates to this DRep (self-healing).
+   *
+   *  Absent / undefined / true all mean "active" — the frontend
+   *  renders the badge strictly on `=== false`. Defaulting to absent
+   *  on first-write avoids a migration; the sweep populates the
+   *  attribute only when it flips. */
+  authorDelegationActive?: boolean;
   [key: string]: unknown;
 }
 

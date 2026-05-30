@@ -44,11 +44,15 @@ vi.mock('../lib/dynamodb', () => ({
   queryItems: vi.fn(),
   transactWrite: vi.fn(),
   updateItem: vi.fn(),
+  getItem: vi.fn(),
   tableNames: {
     comments: 'test-comments',
     commentVotes: 'test-comment_votes',
     commentVoters: 'test-comment_voters',
     auditLog: 'test-audit_log',
+    clubhousePosts: 'test-clubhouse_posts',
+    clubhouseComments: 'test-clubhouse_comments',
+    drepCommittees: 'test-drep_committees',
   },
 }));
 
@@ -62,11 +66,14 @@ import {
   queryItems,
   transactWrite,
   updateItem,
+  getItem,
 } from '../lib/dynamodb';
 import { writeAuditEvent } from '../lib/audit';
 import {
   computeSupportDelta,
   runRevalidateCommentStake,
+  runRevalidateClubhouseDelegations,
+  enumerateClubhouseParticipants,
 } from './revalidate-comment-stake';
 import type { CommentVoterItem } from '../lib/types';
 
@@ -75,6 +82,7 @@ const mockScan = vi.mocked(scanItems);
 const mockQuery = vi.mocked(queryItems);
 const mockTransact = vi.mocked(transactWrite);
 const mockUpdate = vi.mocked(updateItem);
+const mockGetItem = vi.mocked(getItem);
 const mockAudit = vi.mocked(writeAuditEvent);
 
 const STAKE_A = 'stake1a';
@@ -507,5 +515,618 @@ describe('runRevalidateCommentStake — empty registry', () => {
       (c) => (c[0] as { eventType?: string }).eventType === 'comment_vote.revalidate_pass',
     );
     expect(passSummaryCall).toBeDefined();
+  });
+});
+
+// ============================================================
+// Batch CLUBHOUSE-DELEGATION-GATE (2026-05-30) — Phase 2 sweep tests.
+// ============================================================
+//
+// What we lock in:
+//   1. CRITICAL guard: SKIPS revoke/badge on Koios batch failure (the
+//      load-bearing safety invariant — same posture as the stake sweep's
+//      "never zero on lookup failure"). Locked in for both failure
+//      modes: whole-batch throws + wallet missing from response.
+//   2. Confirmed mismatch → revokes poll vote AND badges comment.
+//   3. Confirmed mismatch → role-holder BYPASS retains participation.
+//   4. Re-activation: previously-badged author with re-aligned
+//      delegation gets `authorDelegationActive` cleared back to true.
+//   5. Idempotency: a second pass over the same state issues no extra
+//      writes.
+//   6. Enumeration: posts Scan harvests pollVotes; comments Scan
+//      harvests authorWallet; non-stake addresses are filtered out.
+//
+// Per-record helpers (all keyed by drepId so a single wallet that
+// participates in multiple clubhouses is correctly multi-tracked).
+
+const DREP_A = 'drep1aaa';
+const DREP_B = 'drep1bbb';
+const POST_A = 'post-a';
+const POST_B = 'post-b';
+const POST_KEY_A = `${DREP_A}#${POST_A}`;
+const POST_KEY_B = `${DREP_B}#${POST_B}`;
+
+function makePollPost(opts: {
+  drepId: string;
+  postId: string;
+  pollVotes?: Record<string, number>;
+  pollOptions?: Array<{ id: string; label: string; votes: number }>;
+}): Record<string, unknown> {
+  return {
+    drepId: opts.drepId,
+    postId: opts.postId,
+    pollVotes: opts.pollVotes ?? {},
+    pollOptions: opts.pollOptions ?? [
+      { id: 'a', label: 'Yes', votes: 1 },
+      { id: 'b', label: 'No', votes: 0 },
+    ],
+  };
+}
+
+function makeCommentRow(opts: {
+  postKey: string;
+  commentId: string;
+  drepId: string;
+  authorWallet: string;
+  authorDelegationActive?: boolean;
+}): Record<string, unknown> {
+  return {
+    postKey: opts.postKey,
+    commentId: opts.commentId,
+    drepId: opts.drepId,
+    authorWallet: opts.authorWallet,
+    ...(opts.authorDelegationActive !== undefined
+      ? { authorDelegationActive: opts.authorDelegationActive }
+      : {}),
+  };
+}
+
+/**
+ * Wire the two Scan tables that the sweep's enumeration step issues.
+ * Per-table dispatch keyed on the (mocked) tableName the call carries.
+ */
+function wireClubhouseScans(opts: {
+  posts: Array<Record<string, unknown>>;
+  comments: Array<Record<string, unknown>>;
+}): void {
+  mockScan.mockImplementation(async (tableName: string) => {
+    if (tableName === 'test-clubhouse_posts') {
+      return { items: opts.posts, lastEvaluatedKey: undefined, count: opts.posts.length };
+    }
+    if (tableName === 'test-clubhouse_comments') {
+      return {
+        items: opts.comments,
+        lastEvaluatedKey: undefined,
+        count: opts.comments.length,
+      };
+    }
+    return { items: [], lastEvaluatedKey: undefined, count: 0 };
+  });
+}
+
+/**
+ * Wire the committee Get for the role-holder check. Returns the given
+ * committee row for the named drepId, undefined for everything else.
+ */
+function wireCommitteeGet(opts: {
+  drepId: string;
+  leadWallet?: string;
+  memberWallets?: string[];
+}): void {
+  mockGetItem.mockImplementation(async (tableName: string, key: Record<string, unknown>) => {
+    if (
+      tableName === 'test-drep_committees' &&
+      key['drepId'] === opts.drepId &&
+      key['SK'] === 'COMMITTEE'
+    ) {
+      return {
+        drepId: opts.drepId,
+        SK: 'COMMITTEE',
+        leadWallet: opts.leadWallet ?? 'stake1_someoneelse',
+        committeeName: 'test',
+        description: 'd',
+        members: (opts.memberWallets ?? []).map((w) => ({
+          walletAddress: w,
+          joinedAt: '2026-01-01T00:00:00Z',
+          role: 'committee_member',
+        })),
+        createdAt: '2026-01-01T00:00:00Z',
+        updatedAt: '2026-05-01T00:00:00Z',
+      } as never;
+    }
+    return undefined as never;
+  });
+}
+
+describe('enumerateClubhouseParticipants — enumeration semantics', () => {
+  it('harvests poll voters from clubhouse_posts and comment authors from clubhouse_comments', async () => {
+    wireClubhouseScans({
+      posts: [
+        makePollPost({
+          drepId: DREP_A,
+          postId: POST_A,
+          pollVotes: { [STAKE_A]: 0, [STAKE_B]: 1 },
+        }),
+      ],
+      comments: [
+        makeCommentRow({
+          postKey: POST_KEY_A,
+          commentId: 'c1',
+          drepId: DREP_A,
+          authorWallet: STAKE_C,
+        }),
+      ],
+    });
+
+    const { participants } = await enumerateClubhouseParticipants();
+
+    expect(participants).toHaveLength(3);
+    const byKey = new Map(participants.map((p) => [`${p.drepId}|${p.walletAddress}`, p]));
+    expect(byKey.get(`${DREP_A}|${STAKE_A}`)?.pollVotes).toEqual([
+      { postId: POST_A, optionIndex: 0 },
+    ]);
+    expect(byKey.get(`${DREP_A}|${STAKE_B}`)?.pollVotes).toEqual([
+      { postId: POST_A, optionIndex: 1 },
+    ]);
+    expect(byKey.get(`${DREP_A}|${STAKE_C}`)?.comments).toEqual([
+      { postKey: POST_KEY_A, commentId: 'c1', currentBadgeActive: undefined },
+    ]);
+  });
+
+  it('filters out non-stake (payment-address fallback) entries — counted but skipped', async () => {
+    wireClubhouseScans({
+      posts: [
+        makePollPost({
+          drepId: DREP_A,
+          postId: POST_A,
+          // Payment-address fallback (addr1...) from useWalletAuth — Koios
+          // can't resolve delegation for these, so we skip rather than
+          // mis-attribute.
+          pollVotes: { ['addr1nonstake']: 0, [STAKE_A]: 1 },
+        }),
+      ],
+      comments: [
+        makeCommentRow({
+          postKey: POST_KEY_A,
+          commentId: 'c1',
+          drepId: DREP_A,
+          authorWallet: 'addr1commentauthor',
+        }),
+      ],
+    });
+
+    const { participants, skippedNonStakeAddresses } =
+      await enumerateClubhouseParticipants();
+
+    expect(skippedNonStakeAddresses).toBe(2);
+    // Only STAKE_A made it through.
+    expect(participants).toHaveLength(1);
+    expect(participants[0]!.walletAddress).toBe(STAKE_A);
+  });
+
+  it('a single wallet active in TWO different DReps gets TWO records (one per drepId)', async () => {
+    wireClubhouseScans({
+      posts: [
+        makePollPost({
+          drepId: DREP_A,
+          postId: POST_A,
+          pollVotes: { [STAKE_A]: 0 },
+        }),
+        makePollPost({
+          drepId: DREP_B,
+          postId: POST_B,
+          pollVotes: { [STAKE_A]: 1 },
+        }),
+      ],
+      comments: [],
+    });
+
+    const { participants } = await enumerateClubhouseParticipants();
+
+    expect(participants).toHaveLength(2);
+    const drepIds = participants.map((p) => p.drepId).sort();
+    expect(drepIds).toEqual([DREP_A, DREP_B]);
+    // Both records reference the SAME walletAddress — the scope is
+    // (wallet, drepId), not wallet alone.
+    expect(participants.every((p) => p.walletAddress === STAKE_A)).toBe(true);
+  });
+
+  it('skips poll-vote entries whose optionIndex is out of range vs the current pollOptions list (defensive)', async () => {
+    wireClubhouseScans({
+      posts: [
+        makePollPost({
+          drepId: DREP_A,
+          postId: POST_A,
+          pollOptions: [
+            { id: 'a', label: 'Yes', votes: 0 },
+            { id: 'b', label: 'No', votes: 0 },
+          ],
+          // 5 is out of range vs the 2-option poll above. Skipping
+          // protects against an `pollOptions[5].votes -= 1` corrupting
+          // the tally on a malformed row.
+          pollVotes: { [STAKE_A]: 5, [STAKE_B]: 0 },
+        }),
+      ],
+      comments: [],
+    });
+
+    const { participants } = await enumerateClubhouseParticipants();
+    expect(participants).toHaveLength(1);
+    expect(participants[0]!.walletAddress).toBe(STAKE_B);
+  });
+});
+
+describe('runRevalidateClubhouseDelegations — confirmed mismatch acts (revoke + badge)', () => {
+  it('confirmed mismatched delegation → REVOKES poll vote AND BADGES comment AND fires audit', async () => {
+    // STAKE_A participates in DREP_A's clubhouse (one poll vote, one
+    // comment). Koios confirms they're delegated to DREP_B instead.
+    // STAKE_A is NOT a role-holder of DREP_A's committee. The sweep
+    // must revoke the poll vote AND badge the comment.
+    wireClubhouseScans({
+      posts: [
+        makePollPost({
+          drepId: DREP_A,
+          postId: POST_A,
+          pollVotes: { [STAKE_A]: 0 },
+        }),
+      ],
+      comments: [
+        makeCommentRow({
+          postKey: POST_KEY_A,
+          commentId: 'c1',
+          drepId: DREP_A,
+          authorWallet: STAKE_A,
+        }),
+      ],
+    });
+    // Committee Get for DREP_A returns a committee where STAKE_A is NOT
+    // a member — caller is not a role-holder, sweep should act.
+    wireCommitteeGet({ drepId: DREP_A });
+    mockFetchAccounts.mockResolvedValueOnce([
+      {
+        stake_address: STAKE_A,
+        status: 'registered',
+        delegated_pool: null,
+        delegated_drep: DREP_B, // NOT DREP_A — mismatch
+        total_balance: '1000000000',
+        utxo: '1000000000',
+        rewards: null,
+        withdrawals: null,
+        rewards_available: null,
+        reserves: null,
+        treasury: null,
+      },
+    ]);
+
+    const result = await runRevalidateClubhouseDelegations();
+
+    expect(result.pollVotesRevoked).toBe(1);
+    expect(result.commentsBadged).toBe(1);
+    expect(result.mismatchedRecords).toBe(1);
+    expect(result.walletsUpstreamFailures).toBe(0);
+
+    // The poll-vote revoke is an UpdateItem on clubhouse_posts with
+    // REMOVE pollVotes.<wallet> + ADD pollOptions[0].votes :negOne.
+    const revokeCall = mockUpdate.mock.calls.find(
+      (c) => c[0] === 'test-clubhouse_posts',
+    );
+    expect(revokeCall).toBeDefined();
+    expect(revokeCall![2]).toMatch(/REMOVE.*#pv\.#wallet/);
+    expect(revokeCall![2]).toMatch(/ADD.*#po\[0\]\.#v :negOne/);
+
+    // The badge write is an UpdateItem on clubhouse_comments with
+    // SET authorDelegationActive = false.
+    const badgeCall = mockUpdate.mock.calls.find(
+      (c) => c[0] === 'test-clubhouse_comments',
+    );
+    expect(badgeCall).toBeDefined();
+    expect(badgeCall![2]).toMatch(/SET.*authorDelegationActive|SET #ada/);
+    expect(badgeCall![4]).toMatchObject({ ':v': false });
+
+    // Both audit events fired.
+    const auditEventTypes = mockAudit.mock.calls.map(
+      (c) => (c[0] as { eventType?: string }).eventType,
+    );
+    expect(auditEventTypes).toContain('clubhouse.poll.revoked');
+    expect(auditEventTypes).toContain('clubhouse.comment.badged');
+  });
+
+  it('role-holder BYPASS: a lead/committee_member retains participation even when delegated elsewhere', async () => {
+    // STAKE_A is the lead of DREP_A's committee — they retain access to
+    // their own clubhouse irrespective of where their wallet is
+    // currently delegated. Sweep must NOT revoke / badge.
+    wireClubhouseScans({
+      posts: [
+        makePollPost({
+          drepId: DREP_A,
+          postId: POST_A,
+          pollVotes: { [STAKE_A]: 0 },
+        }),
+      ],
+      comments: [
+        makeCommentRow({
+          postKey: POST_KEY_A,
+          commentId: 'c1',
+          drepId: DREP_A,
+          authorWallet: STAKE_A,
+        }),
+      ],
+    });
+    wireCommitteeGet({ drepId: DREP_A, leadWallet: STAKE_A });
+    mockFetchAccounts.mockResolvedValueOnce([
+      {
+        stake_address: STAKE_A,
+        status: 'registered',
+        delegated_pool: null,
+        delegated_drep: DREP_B,
+        total_balance: '1000000000',
+        utxo: null,
+        rewards: null,
+        withdrawals: null,
+        rewards_available: null,
+        reserves: null,
+        treasury: null,
+      },
+    ]);
+
+    const result = await runRevalidateClubhouseDelegations();
+
+    expect(result.pollVotesRevoked).toBe(0);
+    expect(result.commentsBadged).toBe(0);
+    expect(result.mismatchedRecords).toBe(0);
+    // No revoke/badge UpdateItems issued.
+    expect(
+      mockUpdate.mock.calls.filter(
+        (c) =>
+          c[0] === 'test-clubhouse_posts' || c[0] === 'test-clubhouse_comments',
+      ),
+    ).toHaveLength(0);
+  });
+});
+
+describe('runRevalidateClubhouseDelegations — CRITICAL never-act-on-upstream-failure guard', () => {
+  it('SKIPS revoke/badge on Koios batch throw (whole-batch outage)', async () => {
+    // The load-bearing safety invariant. A Koios outage MUST NOT strip
+    // clubhouse participation across the board — that's worse than
+    // the un-revoked stale vote we're trying to catch.
+    wireClubhouseScans({
+      posts: [
+        makePollPost({
+          drepId: DREP_A,
+          postId: POST_A,
+          pollVotes: { [STAKE_A]: 0, [STAKE_B]: 1 },
+        }),
+      ],
+      comments: [
+        makeCommentRow({
+          postKey: POST_KEY_A,
+          commentId: 'c1',
+          drepId: DREP_A,
+          authorWallet: STAKE_A,
+        }),
+      ],
+    });
+    wireCommitteeGet({ drepId: DREP_A });
+    mockFetchAccounts.mockRejectedValueOnce(
+      new KoiosError('/account_info_cached', 'HTTP 503 Service Unavailable', 503),
+    );
+
+    const result = await runRevalidateClubhouseDelegations();
+
+    expect(result.walletsUpstreamFailures).toBeGreaterThan(0);
+    expect(result.pollVotesRevoked).toBe(0);
+    expect(result.commentsBadged).toBe(0);
+    // CRITICAL: zero UpdateItems against the clubhouse tables.
+    const writesAgainstClubhouseTables = mockUpdate.mock.calls.filter(
+      (c) =>
+        c[0] === 'test-clubhouse_posts' || c[0] === 'test-clubhouse_comments',
+    );
+    expect(writesAgainstClubhouseTables).toHaveLength(0);
+  });
+
+  it('SKIPS revoke/badge on wallet missing from Koios response (partial outage)', async () => {
+    // Koios sometimes omits unregistered / never-staked addresses from
+    // the response. We have no current delegation reading for those —
+    // we must SKIP rather than misinterpret absence as "not delegated."
+    wireClubhouseScans({
+      posts: [
+        makePollPost({
+          drepId: DREP_A,
+          postId: POST_A,
+          pollVotes: { [STAKE_A]: 0 },
+        }),
+      ],
+      comments: [],
+    });
+    wireCommitteeGet({ drepId: DREP_A });
+    // STAKE_A NOT present in the response.
+    mockFetchAccounts.mockResolvedValueOnce([]);
+
+    const result = await runRevalidateClubhouseDelegations();
+
+    expect(result.walletsUpstreamFailures).toBe(1);
+    expect(result.pollVotesRevoked).toBe(0);
+    expect(result.commentsBadged).toBe(0);
+    expect(
+      mockUpdate.mock.calls.filter(
+        (c) =>
+          c[0] === 'test-clubhouse_posts' || c[0] === 'test-clubhouse_comments',
+      ),
+    ).toHaveLength(0);
+  });
+});
+
+describe('runRevalidateClubhouseDelegations — re-activation + idempotency', () => {
+  it('clears a stale `authorDelegationActive=false` badge when the author is delegated again', async () => {
+    // A previously-badged author has re-delegated to THIS drep. The
+    // sweep must clear the badge — keeps the system self-healing.
+    wireClubhouseScans({
+      posts: [],
+      comments: [
+        makeCommentRow({
+          postKey: POST_KEY_A,
+          commentId: 'c1',
+          drepId: DREP_A,
+          authorWallet: STAKE_A,
+          authorDelegationActive: false, // STALE — was badged on a prior pass
+        }),
+      ],
+    });
+    wireCommitteeGet({ drepId: DREP_A });
+    mockFetchAccounts.mockResolvedValueOnce([
+      {
+        stake_address: STAKE_A,
+        status: 'registered',
+        delegated_pool: null,
+        delegated_drep: DREP_A, // RE-DELEGATED — match
+        total_balance: '1000000000',
+        utxo: null,
+        rewards: null,
+        withdrawals: null,
+        rewards_available: null,
+        reserves: null,
+        treasury: null,
+      },
+    ]);
+
+    const result = await runRevalidateClubhouseDelegations();
+
+    expect(result.commentsUnbadged).toBe(1);
+    expect(result.commentsBadged).toBe(0);
+    expect(result.walletsAllAligned).toBe(1);
+    const unbadgeCall = mockUpdate.mock.calls.find(
+      (c) => c[0] === 'test-clubhouse_comments',
+    );
+    expect(unbadgeCall).toBeDefined();
+    expect(unbadgeCall![4]).toMatchObject({ ':v': true });
+    // Audit fired.
+    const auditEventTypes = mockAudit.mock.calls.map(
+      (c) => (c[0] as { eventType?: string }).eventType,
+    );
+    expect(auditEventTypes).toContain('clubhouse.comment.unbadged');
+  });
+
+  it('IDEMPOTENT: skips comments already badged false on a confirmed mismatch (no duplicate badge write)', async () => {
+    // STAKE_A is mismatched AND their comment is already badged
+    // `authorDelegationActive=false` from a previous pass. The sweep
+    // must NOT re-issue the badge write — wasteful, and would risk
+    // duplicate audit events.
+    wireClubhouseScans({
+      posts: [],
+      comments: [
+        makeCommentRow({
+          postKey: POST_KEY_A,
+          commentId: 'c1',
+          drepId: DREP_A,
+          authorWallet: STAKE_A,
+          authorDelegationActive: false, // ALREADY badged from a prior pass
+        }),
+      ],
+    });
+    wireCommitteeGet({ drepId: DREP_A });
+    mockFetchAccounts.mockResolvedValueOnce([
+      {
+        stake_address: STAKE_A,
+        status: 'registered',
+        delegated_pool: null,
+        delegated_drep: DREP_B,
+        total_balance: '1000000000',
+        utxo: null,
+        rewards: null,
+        withdrawals: null,
+        rewards_available: null,
+        reserves: null,
+        treasury: null,
+      },
+    ]);
+
+    const result = await runRevalidateClubhouseDelegations();
+
+    expect(result.commentsBadged).toBe(0);
+    // Idempotency: no extra badge write fired for the already-badged row.
+    const badgeCalls = mockUpdate.mock.calls.filter(
+      (c) => c[0] === 'test-clubhouse_comments',
+    );
+    expect(badgeCalls).toHaveLength(0);
+    // No `clubhouse.comment.badged` audit event for the no-op pass.
+    const auditEventTypes = mockAudit.mock.calls.map(
+      (c) => (c[0] as { eventType?: string }).eventType,
+    );
+    expect(auditEventTypes).not.toContain('clubhouse.comment.badged');
+  });
+
+  it('IDEMPOTENT: poll-vote revoke that races a manual remove (CCFE) returns silently — counted as no-op', async () => {
+    // The revoke is guarded by `pollVotes.<wallet> = :prev`. If a
+    // concurrent write (e.g. the user logged in + un-voted) already
+    // removed the entry, the guard fails CCFE and we treat as already-
+    // done. No write error, no audit event.
+    wireClubhouseScans({
+      posts: [
+        makePollPost({
+          drepId: DREP_A,
+          postId: POST_A,
+          pollVotes: { [STAKE_A]: 0 },
+        }),
+      ],
+      comments: [],
+    });
+    wireCommitteeGet({ drepId: DREP_A });
+    mockFetchAccounts.mockResolvedValueOnce([
+      {
+        stake_address: STAKE_A,
+        status: 'registered',
+        delegated_pool: null,
+        delegated_drep: DREP_B,
+        total_balance: '1000000000',
+        utxo: null,
+        rewards: null,
+        withdrawals: null,
+        rewards_available: null,
+        reserves: null,
+        treasury: null,
+      },
+    ]);
+    // First Update (the poll-vote revoke) hits CCFE → already-removed.
+    mockUpdate.mockImplementation(async (tableName: string) => {
+      if (tableName === 'test-clubhouse_posts') {
+        throw Object.assign(new Error('CCFE'), {
+          name: 'ConditionalCheckFailedException',
+        });
+      }
+      return undefined as never;
+    });
+
+    const result = await runRevalidateClubhouseDelegations();
+
+    expect(result.pollVotesRevoked).toBe(0);
+    expect(result.writeErrors).toBe(0);
+    // No `clubhouse.poll.revoked` audit event for the no-op revoke.
+    const auditEventTypes = mockAudit.mock.calls.map(
+      (c) => (c[0] as { eventType?: string }).eventType,
+    );
+    expect(auditEventTypes).not.toContain('clubhouse.poll.revoked');
+  });
+});
+
+describe('runRevalidateClubhouseDelegations — empty state + summary', () => {
+  it('empty clubhouse state runs cleanly and fires per-pass summary', async () => {
+    wireClubhouseScans({ posts: [], comments: [] });
+    const result = await runRevalidateClubhouseDelegations();
+    expect(result).toMatchObject({
+      participantsScanned: 0,
+      walletsChecked: 0,
+      pollVotesRevoked: 0,
+      commentsBadged: 0,
+      commentsUnbadged: 0,
+    });
+    // Per-pass summary audit fired regardless.
+    const summary = mockAudit.mock.calls.find(
+      (c) =>
+        (c[0] as { eventType?: string }).eventType ===
+        'clubhouse.delegation_sweep_pass',
+    );
+    expect(summary).toBeDefined();
+    // No Koios call — short-circuits.
+    expect(mockFetchAccounts).not.toHaveBeenCalled();
   });
 });
