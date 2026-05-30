@@ -10,6 +10,7 @@ import {
 } from '../../lib/auth';
 import { lookupRecognition, lookupStake } from '../../lib/recognition';
 import { writeAuditEvent } from '../../lib/audit';
+import { upsertCommentVoter } from '../../lib/comment-voters';
 import { created, badRequest, unauthorized, notFound, handleError } from '../_response';
 
 interface CreateCommentBody {
@@ -187,6 +188,18 @@ export const handler = async (
       },
     ]);
 
+    // Best-effort registry upsert for the AUTHOR's implicit seed-upvote
+    // (Batch REVAL, 2026-05-29). The seed vote is a real vote-row on
+    // `comment_votes` (see the transactWrite above), so the author
+    // belongs in `comment_voters` from the moment of comment creation
+    // — otherwise the 3-hourly sweep would miss them until they cast a
+    // separate explicit vote. Same best-effort semantics as the vote
+    // handler: a registry-upsert failure must NEVER fail the comment-
+    // create response.
+    await upsertCommentVoter({
+      stakeAddress: authCtx.walletAddress,
+      lovelace: seedLovelace,
+    });
     // Best-effort audit-log write (Oracle's #1 credibility item, 2026-05-28).
     // Fires AFTER the mutation succeeds — never blocks/fails the response.
     // Metadata is minimal + non-sensitive (IDs only, NOT the comment body).

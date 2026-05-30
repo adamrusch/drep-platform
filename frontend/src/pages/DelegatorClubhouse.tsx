@@ -617,6 +617,20 @@ export function ClubhouseCommentRow({
             <span className="text-[11px] text-[var(--text-tertiary)]">
               {formatRelativeTime(comment.createdAt)}
             </span>
+            {/* Batch CLUBHOUSE-DELEGATION-GATE (2026-05-30). Surfaced
+                ONLY when the 3-hour sweep confirmed the author has
+                un-delegated from this DRep (and isn't a role-holder).
+                Flag, NOT hide — the comment body remains fully
+                visible; readers can weight the signal accordingly. */}
+            {comment.authorDelegationActive === false && (
+              <span
+                className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-token-full bg-[var(--bg-subtle)] text-[var(--text-tertiary)]"
+                title="This wallet is no longer delegated to this DRep. The comment is preserved for context."
+                data-testid="clubhouse-comment-undelegated-badge"
+              >
+                No longer delegated
+              </span>
+            )}
           </div>
           <p className="text-[13px] text-[var(--text-secondary)] whitespace-pre-wrap leading-relaxed mt-0.5">
             {comment.body}

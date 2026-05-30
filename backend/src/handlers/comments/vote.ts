@@ -63,6 +63,7 @@ import type { CommentItem, CommentVoteItem } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { lookupStake } from '../../lib/recognition';
 import { writeAuditEvent } from '../../lib/audit';
+import { upsertCommentVoter } from '../../lib/comment-voters';
 import { ok, badRequest, unauthorized, notFound, conflict, internalError, handleError } from '../_response';
 
 interface VoteBody {
@@ -311,6 +312,26 @@ export const handler = async (
       }
       throw err;
     }
+    // Best-effort registry upsert. The vote-write already succeeded; if
+    // the registry update fails we log + swallow. The next sweep cycle
+    // will still re-weight this wallet's votes correctly because the
+    // per-vote rows are the canonical source — the registry is only
+    // an O(voters) enumeration optimization.
+    //
+    // Why we write the registry on cast/change but NOT on remove (the
+    // earlier `parsed.vote === 'none'` branch returns above): a voter
+    // who removes their vote leaves no per-vote row, so they no longer
+    // contribute to any comment's `supportLovelace`. The registry's
+    // job is "every wallet whose votes the sweep needs to re-weight";
+    // a removed voter has zero rows to re-weight, so dropping their
+    // registry entry would be harmless — but they ARE a real voter,
+    // and we keep them so a future audit ("did this wallet ever
+    // vote?") works without joining through deleted rows. Dropping it
+    // is therefore a non-goal; keeping it is cheap.
+    await upsertCommentVoter({
+      stakeAddress: authCtx.walletAddress,
+      lovelace: newLovelace,
+    });
     // Best-effort audit on cast / change. `priorVote` may be absent
     // (first vote) — the metadata reflects that with `priorVote: null`.
     await writeAuditEvent({

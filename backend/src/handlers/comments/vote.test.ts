@@ -50,6 +50,7 @@ vi.mock('../../lib/dynamodb', () => ({
     governanceVotes: 'test-governance_votes',
     comments: 'test-comments',
     commentVotes: 'test-comment_votes',
+    commentVoters: 'test-comment_voters',
     clubhousePosts: 'test-clubhouse_posts',
     auditLog: 'test-audit_log',
     authNonces: 'test-auth_nonces',
@@ -67,14 +68,26 @@ vi.mock('../../lib/audit', () => ({
   writeAuditEvent: vi.fn().mockResolvedValue(undefined),
 }));
 
+// Batch REVAL (2026-05-29): the vote handler now upserts the voter into
+// the `comment_voters` registry on every successful cast/change. Stub
+// here so tests focused on the vote mutation don't have to thread an
+// extra UpdateItem assertion. `comment-voters.test.ts` covers the
+// upsert path in isolation; the focused tests below that DO want to
+// assert it (registry-upsert wiring) reach for the mock directly.
+vi.mock('../../lib/comment-voters', () => ({
+  upsertCommentVoter: vi.fn().mockResolvedValue(undefined),
+}));
+
 import { getItem, transactWrite, updateItem } from '../../lib/dynamodb';
 import { lookupStake } from '../../lib/recognition';
+import { upsertCommentVoter } from '../../lib/comment-voters';
 import { handler } from './vote';
 
 const mockGet = vi.mocked(getItem);
 const mockTransact = vi.mocked(transactWrite);
 const mockUpdate = vi.mocked(updateItem);
 const mockStake = vi.mocked(lookupStake);
+const mockUpsertVoter = vi.mocked(upsertCommentVoter);
 
 const ACTION_ID = 'aaaaaaaa#0';
 const COMMENT_ID = '01HXMHTEST123ABCDEF';
@@ -139,6 +152,8 @@ describe('comments/vote', () => {
     mockUpdate.mockResolvedValue(undefined);
     mockStake.mockReset();
     mockStake.mockResolvedValue({ lovelace: VOTER_LOVELACE, source: 'koios' });
+    mockUpsertVoter.mockReset();
+    mockUpsertVoter.mockResolvedValue(undefined);
   });
 
   it('rejects anonymous calls with 401', async () => {
@@ -532,5 +547,88 @@ describe('comments/vote', () => {
     expect(res).toMatchObject({ statusCode: 200 });
     // The transactWrite still runs — the migration race is benign.
     expect(mockTransact).toHaveBeenCalledTimes(1);
+  });
+
+  // ---- Batch REVAL (2026-05-29) — registry upsert wiring ----
+
+  it('REVAL: upserts the voter into the comment_voters registry after a successful cast', async () => {
+    mockGet.mockResolvedValueOnce(buildComment(AUTHOR, '5000000000000') as never);
+    mockGet.mockResolvedValueOnce(undefined);
+    mockGet.mockResolvedValueOnce(buildComment(AUTHOR, '7000000000000') as never);
+
+    await handler(
+      buildEvent({
+        walletAddress: VOTER,
+        roles: ['delegator'],
+        actionId: ACTION_ID,
+        commentId: COMMENT_ID,
+        body: { vote: 'up' },
+      }),
+    );
+
+    expect(mockUpsertVoter).toHaveBeenCalledTimes(1);
+    // The lovelace passed in is the snapshot the vote handler just
+    // wrote — the registry stores the same value so the sweep can
+    // cheap-skip until it changes.
+    expect(mockUpsertVoter).toHaveBeenCalledWith({
+      stakeAddress: VOTER,
+      lovelace: VOTER_LOVELACE,
+    });
+  });
+
+  it('REVAL: does NOT upsert the registry on the remove path (vote = none)', async () => {
+    // Prior upvote present → remove. Registry is preserved (we don't
+    // decrement / delete the registry entry — a voter who removes their
+    // vote is still "a known voter" for sweep enumeration purposes).
+    mockGet.mockResolvedValueOnce(buildComment(AUTHOR, '5000000000000') as never);
+    mockGet.mockResolvedValueOnce({
+      commentId: COMMENT_ID,
+      stakeAddress: VOTER,
+      actionId: ACTION_ID,
+      vote: 'up',
+      lovelace: VOTER_LOVELACE,
+      votedAt: '2026-05-25T00:00:00Z',
+    } as never);
+    mockGet.mockResolvedValueOnce(buildComment(AUTHOR, '3000000000000') as never);
+
+    const res = (await handler(
+      buildEvent({
+        walletAddress: VOTER,
+        roles: ['delegator'],
+        actionId: ACTION_ID,
+        commentId: COMMENT_ID,
+        body: { vote: 'none' },
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 200 });
+    expect(mockUpsertVoter).not.toHaveBeenCalled();
+  });
+
+  it('REVAL: registry upsert fires AFTER the vote transactWrite (best-effort, never blocks the mutation)', async () => {
+    // The wiring contract: the registry upsert fires AFTER the
+    // mutation has committed. Even if the registry helper itself ever
+    // failed silently (its own test in `comment-voters.test.ts`
+    // proves it swallows errors), the vote handler MUST NOT block on
+    // it. Verified here by checking the upsert is wired in and the
+    // mutation transactWrite always lands. The best-effort guarantee
+    // is exercised in `comment-voters.test.ts`.
+    mockGet.mockResolvedValueOnce(buildComment(AUTHOR, '5000000000000') as never);
+    mockGet.mockResolvedValueOnce(undefined);
+    mockGet.mockResolvedValueOnce(buildComment(AUTHOR, '7000000000000') as never);
+
+    const res = (await handler(
+      buildEvent({
+        walletAddress: VOTER,
+        roles: ['delegator'],
+        actionId: ACTION_ID,
+        commentId: COMMENT_ID,
+        body: { vote: 'up' },
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 200 });
+    expect(mockTransact).toHaveBeenCalledTimes(1);
+    expect(mockUpsertVoter).toHaveBeenCalledTimes(1);
   });
 });

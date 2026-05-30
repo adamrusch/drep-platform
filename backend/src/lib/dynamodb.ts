@@ -102,8 +102,22 @@ export const tableNames = {
    *  One row per (comment, voter) tuple — recasting overwrites the row. Sum-
    *  on-read aggregation is replaced by a denormalized `supportLovelace`
    *  counter on the comments row, kept consistent via `transactWrite` from
-   *  the vote handler. See `handlers/comments/vote.ts`. */
+   *  the vote handler. See `handlers/comments/vote.ts`.
+   *
+   *  GSI `stakeAddress-commentId-index` (PK=`stakeAddress`, SK=`commentId`,
+   *  projecting `{vote, lovelace, actionId}`) lets the 3-hourly stake
+   *  re-validation sweep enumerate every vote belonging to one wallet
+   *  in a single-partition Query — see `backend/src/sync/revalidate-
+   *  comment-stake.ts` and `infra/lib/database-stack.ts`. */
   commentVotes: `${TABLE_PREFIX}comment_votes`,
+  /** Registry of distinct comment-voting wallets with their last-known
+   *  stake snapshot. Populated upsert-on-vote (atomic `ADD voteCount`
+   *  + `SET lastKnownStake/lastCheckedAt`) from the vote-write paths,
+   *  and consumed by the 3-hourly `revalidate-comment-stake` sync
+   *  Lambda (Batch REVAL, 2026-05-29) to enumerate every voter for
+   *  the Sybil-defense re-weight pass. PK=`stakeAddress`, no SK. See
+   *  `infra/lib/database-stack.ts` for full rationale. */
+  commentVoters: `${TABLE_PREFIX}comment_voters`,
   clubhousePosts: `${TABLE_PREFIX}clubhouse_posts`,
   /** Per-comment rows for the Clubhouse threading surface. Replaces the
    *  legacy inline `clubhouse_posts.comments[]` array (P0-3 migration,

@@ -547,6 +547,21 @@ export interface ClubhouseComment {
    *  (top-level → reply → sub-reply), one deeper than the Public
    *  Comments surface. */
   parentCommentId?: string;
+  /** Batch CLUBHOUSE-DELEGATION-GATE (2026-05-30).
+   *
+   *  False when the 3-hour clubhouse-delegation revalidation sweep
+   *  confirmed (via Koios `account_info_cached.delegated_drep`) that
+   *  the author's wallet is no longer delegated to THIS clubhouse's
+   *  DRep AND the author is not a committee role-holder. Renders a
+   *  subtle "no longer delegated to this DRep" badge next to the
+   *  author header; the comment body stays fully visible (flag, not
+   *  hide — per owner decision).
+   *
+   *  Absent / undefined / `true` means "active" — the comment renders
+   *  with no badge. The sweep is self-healing: a previously-badged
+   *  author who re-delegates to this DRep has the flag cleared back
+   *  to `true` on the next pass. */
+  authorDelegationActive?: boolean;
 }
 
 /**

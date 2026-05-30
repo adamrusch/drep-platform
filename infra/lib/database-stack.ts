@@ -14,6 +14,7 @@ export class DatabaseStack extends cdk.Stack {
   public readonly governanceVotesTable: dynamodb.Table;
   public readonly commentsTable: dynamodb.Table;
   public readonly commentVotesTable: dynamodb.Table;
+  public readonly commentVotersTable: dynamodb.Table;
   public readonly clubhousePostsTable: dynamodb.Table;
   public readonly clubhouseCommentsTable: dynamodb.Table;
   public readonly poolMetadataTable: dynamodb.Table;
@@ -292,6 +293,93 @@ export class DatabaseStack extends cdk.Stack {
       removalPolicy: props.stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
+    // GSI: enumerate every vote belonging to one wallet across all comments.
+    //
+    // **Why this exists (2026-05-29, Batch REVAL):** the comment-vote stake
+    // re-validation pass needs to read every active vote for one wallet
+    // (so it can re-weight them when the wallet's current stake has
+    // moved). The primary key is (commentId, stakeAddress) — Query on
+    // commentId returns all voters for one comment, NOT all comments for
+    // one voter. A Scan-with-FilterExpression would pay for reading
+    // every vote row on the table to filter; a GSI partitioned on
+    // stakeAddress turns it into a single-partition Query per wallet.
+    //
+    // **Sort key:** `commentId` lets the sweep iterate one wallet's
+    // votes in any order — there's no time-ordering requirement for
+    // re-weighting, but having `commentId` as the SK lets the GSI
+    // double as a unique-key index (a wallet votes at most once per
+    // comment, and the GSI key tuple matches the primary table's
+    // (commentId, stakeAddress) reversed).
+    //
+    // **Projection:** only `vote` (up/down) and `lovelace` (the
+    // snapshotted weight). The re-weight math needs both — `vote`
+    // signs the delta, `lovelace` provides the old snapshot to
+    // subtract from. We also project `actionId` because the re-weight
+    // counter update keys the comment row on (actionId, commentId).
+    // Everything else (`votedAt`, `voterDisplayName`) is omitted to
+    // keep the index storage small (~50B/row × ~few thousand votes =
+    // pennies/month).
+    this.commentVotesTable.addGlobalSecondaryIndex({
+      indexName: 'stakeAddress-commentId-index',
+      partitionKey: { name: 'stakeAddress', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'commentId', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.INCLUDE,
+      nonKeyAttributes: ['vote', 'lovelace', 'actionId'],
+    });
+
+    // ---- comment_voters ----
+    // Registry of every stake address that has ever voted on a comment,
+    // with their last-known stake snapshot. Populated upsert-on-vote
+    // from the create + vote handlers, and read by the 3-hourly
+    // `revalidate-comment-stake` Lambda to enumerate every voter for a
+    // cheap "did this wallet's stake change?" sweep.
+    //
+    // **Why this exists (2026-05-29, Batch REVAL):** the re-validation
+    // pass needs to know "every wallet that has ever voted" so it can
+    // re-check their current stake on Koios. Walking `comment_votes`
+    // for this is wasteful — the table grows linearly in (comments ×
+    // voters) but the distinct-voter set is much smaller. Materializing
+    // the distinct set into a per-voter registry makes the sweep
+    // O(voters) instead of O(votes). The `lastKnownStake` snapshot
+    // lets the sweep cheap-skip wallets whose Koios `total_balance`
+    // exactly matches the previous reading — only the changed wallets
+    // pay for the per-vote re-weight transaction.
+    //
+    // **PK:** `stakeAddress` — the natural key for "one voter, all
+    // their bookkeeping." No SK (one row per voter); the table is
+    // effectively a key-value store.
+    //
+    // **Attributes:**
+    //   - `lastKnownStake` (string, stringified BigInt lovelace) — the
+    //     wallet's `total_balance` at the last sweep reading. Stored as
+    //     string for back-compat with the existing vote-row snapshot
+    //     shape (which is also a string); the sweep BigInt-compares it.
+    //   - `lastCheckedAt` (ISO-8601) — when the sweep last reconciled
+    //     this wallet. Informational; the sweep doesn't use it for
+    //     ordering today but it surfaces for incident-debugging.
+    //   - `voteCount` (number, monotonic) — atomically ADDed on every
+    //     vote-write so the registry has a denormalized "this wallet
+    //     has voted N times on the platform" count for future audit /
+    //     leaderboard UI. Not used by the sweep math.
+    //
+    // **Capacity:** at mainnet steady-state we expect ~thousands of
+    // distinct voters; the registry is one row per. ~100B/row × 10k =
+    // 1MB. Sweep reads via paginated Scan (1MB pages, single-digit
+    // pages typical). Cost is pennies/month.
+    //
+    // PITR on (consistent with every other DDB table). RETAIN on prod
+    // — a registry-row loss would let a wallet's votes drift away from
+    // their current stake until the next vote re-creates the registry
+    // entry, which is a soft data-quality bug worth being recoverable
+    // from PITR.
+    this.commentVotersTable = new dynamodb.Table(this, 'CommentVotersTable', {
+      tableName: `${this.tablePrefix}comment_voters`,
+      partitionKey: { name: 'stakeAddress', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: props.stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
     // ---- clubhouse_posts ----
     this.clubhousePostsTable = new dynamodb.Table(this, 'ClubhousePostsTable', {
       tableName: `${this.tablePrefix}clubhouse_posts`,
@@ -465,6 +553,7 @@ export class DatabaseStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'GovernanceVotesTableName', { value: this.governanceVotesTable.tableName, exportName: `${props.stage}-GovernanceVotesTableName` });
     new cdk.CfnOutput(this, 'CommentsTableName', { value: this.commentsTable.tableName, exportName: `${props.stage}-CommentsTableName` });
     new cdk.CfnOutput(this, 'CommentVotesTableName', { value: this.commentVotesTable.tableName, exportName: `${props.stage}-CommentVotesTableName` });
+    new cdk.CfnOutput(this, 'CommentVotersTableName', { value: this.commentVotersTable.tableName, exportName: `${props.stage}-CommentVotersTableName` });
     new cdk.CfnOutput(this, 'ClubhousePostsTableName', { value: this.clubhousePostsTable.tableName, exportName: `${props.stage}-ClubhousePostsTableName` });
     new cdk.CfnOutput(this, 'ClubhouseCommentsTableName', { value: this.clubhouseCommentsTable.tableName, exportName: `${props.stage}-ClubhouseCommentsTableName` });
     new cdk.CfnOutput(this, 'PoolMetadataTableName', { value: this.poolMetadataTable.tableName, exportName: `${props.stage}-PoolMetadataTableName` });

@@ -121,3 +121,76 @@ describe('ClubhouseCommentRow — depth cap', () => {
     expect(queryByText('Reply')).toBeNull();
   });
 });
+
+/**
+ * Batch CLUBHOUSE-DELEGATION-GATE (2026-05-30) — comment badge tests.
+ *
+ * The 3-hour clubhouse-delegation sweep sets
+ * `authorDelegationActive: false` on `clubhouse_comments` rows whose
+ * author has un-delegated from the clubhouse's DRep. The frontend
+ * renders a subtle "No longer delegated" badge in the comment header
+ * — the comment body stays fully visible (flag, NOT hide; per the
+ * owner's locked decision). The badge is rendered strictly on the
+ * exact `=== false` value so existing rows (absent / `true` /
+ * `undefined`) render unchanged.
+ */
+describe('ClubhouseCommentRow — delegation-active badge', () => {
+  const repliesByParent = new Map<string, ClubhouseComment[]>();
+  const currentWallet = 'addr1q9currentwallet';
+  const drepId = 'drep1ygqgayvx8yzsaj9hprja3l6jy3v4px9z3u8uvecuvm3f92ce7mckx';
+  const postId = 'auto-ga#abc123';
+
+  it('renders the "No longer delegated" badge when authorDelegationActive === false', () => {
+    const { queryByTestId, queryByText } = render(
+      <MemoryRouter>
+        <ClubhouseCommentRow
+          comment={makeComment({ authorDelegationActive: false })}
+          depth={0}
+          drepId={drepId}
+          postId={postId}
+          currentWallet={currentWallet}
+          repliesByParent={repliesByParent}
+        />
+      </MemoryRouter>,
+    );
+    expect(queryByTestId('clubhouse-comment-undelegated-badge')).toBeInTheDocument();
+    expect(queryByText(/no longer delegated/i)).toBeInTheDocument();
+    // CRITICAL: the comment body MUST still render — flag, NOT hide.
+    expect(queryByText('Hello clubhouse.')).toBeInTheDocument();
+  });
+
+  it('does NOT render the badge when authorDelegationActive is absent (default = active)', () => {
+    const { queryByTestId } = render(
+      <MemoryRouter>
+        <ClubhouseCommentRow
+          comment={makeComment()}
+          depth={0}
+          drepId={drepId}
+          postId={postId}
+          currentWallet={currentWallet}
+          repliesByParent={repliesByParent}
+        />
+      </MemoryRouter>,
+    );
+    expect(queryByTestId('clubhouse-comment-undelegated-badge')).toBeNull();
+  });
+
+  it('does NOT render the badge when authorDelegationActive === true (re-activated)', () => {
+    // After the sweep finds a re-aligned wallet, the row gets
+    // `authorDelegationActive: true` back. The frontend must NOT
+    // render the badge in that case.
+    const { queryByTestId } = render(
+      <MemoryRouter>
+        <ClubhouseCommentRow
+          comment={makeComment({ authorDelegationActive: true })}
+          depth={0}
+          drepId={drepId}
+          postId={postId}
+          currentWallet={currentWallet}
+          repliesByParent={repliesByParent}
+        />
+      </MemoryRouter>,
+    );
+    expect(queryByTestId('clubhouse-comment-undelegated-badge')).toBeNull();
+  });
+});
