@@ -847,13 +847,68 @@ export interface CommentVoteItem {
   vote: 'up' | 'down';
   /** Snapshot of the voter's wallet stake in lovelace at vote time,
    *  stringified BigInt. Signed by the `vote` field — sum-on-read is
-   *  `vote === 'up' ? +lovelace : -lovelace`. */
+   *  `vote === 'up' ? +lovelace : -lovelace`.
+   *
+   *  Mutable: re-weighted by the 3-hourly `revalidate-comment-stake`
+   *  sync (Batch REVAL, 2026-05-29) when the voter's wallet stake has
+   *  changed since the prior reading. The sweep overwrites this field
+   *  with the new `total_balance` and paired-atomically mutates the
+   *  parent comment's `supportLovelace` by the delta. See the sync's
+   *  module header for the full re-weight formula and the "never zero
+   *  on lookup failure" guard. */
   lovelace: string;
   votedAt: string;
   /** Optional cache of voter display name, populated best-effort at vote
    *  time. The frontend doesn't render the vote list, so this is purely
    *  for a future audit / leaderboard UI. */
   voterDisplayName?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * One row of `comment_voters` — the registry that lets the 3-hourly
+ * `revalidate-comment-stake` sweep enumerate every distinct voting
+ * wallet in O(voters) rather than walking the full `comment_votes`
+ * table.
+ *
+ * PK=`stakeAddress`, no SK. Maintained by the vote-write paths
+ * (`comments/vote.ts` + `comments/create.ts`'s seed-upvote) via atomic
+ * `ADD voteCount :one SET lastKnownStake = :s, lastCheckedAt = :now`
+ * — best-effort (a registry-upsert failure must NEVER fail the
+ * underlying vote write). Re-validated by the sync's `lastKnownStake`
+ * compare against the live `total_balance`.
+ *
+ * # Why `lastKnownStake` is stringified
+ *
+ * Same reason as `CommentVoteItem.lovelace` — lovelace can exceed
+ * `Number.MAX_SAFE_INTEGER` (45×10^9 ADA = 4.5×10^16 lovelace), so we
+ * carry the string and convert to `bigint` at use-time. Comparing
+ * "did this wallet's stake change?" is a BigInt equality check; the
+ * string form survives DynamoDB round-trip without `wrapNumbers`
+ * special-casing.
+ */
+export interface CommentVoterItem {
+  /** PK — bech32 `stake1...` (the voter wallet). */
+  stakeAddress: string;
+  /** Snapshot of the wallet's `total_balance` (lovelace, stringified
+   *  BigInt) from the last successful upstream reading. The sweep
+   *  compares the live Koios `total_balance` to this value; equal =
+   *  cheap-skip (no re-weight needed). Updated AFTER a successful
+   *  re-weight transaction, OR on every vote-write (the vote handler
+   *  already has a fresh snapshot in hand).
+   *
+   *  Stringified BigInt for the same precision-preservation reason as
+   *  `CommentVoteItem.lovelace`. Defaults to `'0'` on first-write when
+   *  the upstream returned null (unregistered wallet). */
+  lastKnownStake: string;
+  /** ISO-8601 of the most recent upsert. Informational. */
+  lastCheckedAt: string;
+  /** Monotonic counter of votes this wallet has cast on the platform.
+   *  Atomically incremented via `ADD :one` on every vote-write (cast +
+   *  recast — NOT decremented on a `vote: 'none'` remove, since the
+   *  voter is still "active" in the registry). Useful for future audit
+   *  / leaderboard surfaces; the sweep itself doesn't consume it. */
+  voteCount: number;
   [key: string]: unknown;
 }
 
@@ -1026,6 +1081,21 @@ export interface ClubhouseCommentRowItem {
    *  on the row so `createComment` doesn't have to walk the whole
    *  thread to enforce the 2-level cap. */
   depth: 0 | 1 | 2;
+  /** Batch CLUBHOUSE-DELEGATION-GATE (2026-05-30).
+   *
+   *  Set to `false` by the 3-hour clubhouse-delegation revalidation
+   *  sweep (`backend/src/sync/revalidate-comment-stake.ts` —
+   *  `runRevalidateClubhouseDelegations`) when the author's wallet is
+   *  confirmed (via Koios `delegated_drep`) to no longer delegate to
+   *  this clubhouse's DRep AND the author is not a committee role-
+   *  holder. The sweep clears it back to `true` if the author re-
+   *  delegates to this DRep (self-healing).
+   *
+   *  Absent / undefined / true all mean "active" — the frontend
+   *  renders the badge strictly on `=== false`. Defaulting to absent
+   *  on first-write avoids a migration; the sweep populates the
+   *  attribute only when it flips. */
+  authorDelegationActive?: boolean;
   [key: string]: unknown;
 }
 
