@@ -10,7 +10,11 @@ export type UserRole =
   | 'delegator'
   | 'committee_member'
   | 'lead_drep'
-  | 'trusted_delegator';
+  | 'trusted_delegator'
+  // Platform operator. Not self-serve: seeded via the admin-bootstrap secret on
+  // first auth, then granted/revoked by existing platform_admins. Gates
+  // safety-mode clears and future moderation. See handlers/admin/.
+  | 'platform_admin';
 
 export type GovernanceActionType =
   | 'ParameterChange'
@@ -701,6 +705,193 @@ export interface CommitteeMemberItem {
   displayName?: string;
   joinedAt: string;
   role: 'lead_drep' | 'committee_member' | 'trusted_delegator';
+}
+
+// ============================================================
+// Phase 2 — committee voting
+// ============================================================
+
+/** The DRep's official position a proposal asks the committee to adopt. */
+export type CommitteePosition = 'Yes' | 'No' | 'Abstain';
+/** How a committee member votes on a proposal. */
+export type CommitteeCastVote = 'Agree' | 'Disagree' | 'Abstain';
+export type CommitteeProposalStatus =
+  | 'open'
+  | 'passed'
+  | 'failed'
+  | 'withdrawn'
+  | 'epoch_finalized';
+/** Who may author a committee's rationale (lead chooses per committee). */
+export type RationaleMode = 'lead' | 'assigned' | 'collaborative';
+
+/** A fresh CIP-30 (CIP-8 COSE_Sign1) signature captured for a mutation.
+ *  `signedMessage` is the exact plaintext signed so a reviewer can
+ *  independently re-verify. Stage is embedded in the message (not here). */
+export interface CommitteeSignature {
+  mutationNonce: string;
+  mutationSignature: string;
+  mutationKey: string;
+  signedMessage: string;
+}
+
+/** SK='PROPOSAL' — the single proposal per (committee, action). */
+export interface CommitteeVoteProposalItem {
+  voteScope: string; // `${drepId}#${actionId}`
+  itemKey: 'PROPOSAL';
+  drepId: string;
+  actionId: string;
+  proposedPosition: CommitteePosition;
+  proposerWallet: string;
+  proposerSignature: CommitteeSignature;
+  status: CommitteeProposalStatus;
+  /** Snapshotted from VOTING_CONFIG at open time — a mid-vote config change
+   *  does NOT retroactively re-threshold an in-flight proposal. */
+  thresholdPct: number;
+  quorum: number;
+  /** Copied from governance_actions so the deadline sweep needs no join.
+   *  Also the sparse-GSI sort key. */
+  epochDeadline: number;
+  /** Sparse GSI partition: 'OPEN' while open, REMOVED on any terminal state. */
+  statusPartition?: 'OPEN';
+  openedAt: string;
+  closedAt?: string;
+  closedByWallet?: string;
+  closedReason?: 'manual_pass' | 'manual_fail' | 'withdrawn' | 'epoch_deadline';
+  /** Tally snapshot stamped at close/finalize for historical display. */
+  finalTally?: CommitteeTallySnapshot;
+  [key: string]: unknown;
+}
+
+export interface CommitteeTallySnapshot {
+  agreeCount: number;
+  disagreeCount: number;
+  abstainCount: number;
+  activePool: number;
+  agreePct: number;
+}
+
+/** SK='CAST#<wallet>' — latest cast per voter (overwritten on re-vote). */
+export interface CommitteeVoteCastItem {
+  voteScope: string;
+  itemKey: string; // `CAST#${walletAddress}`
+  drepId: string;
+  actionId: string;
+  voterWallet: string;
+  vote: CommitteeCastVote;
+  votedAt: string;
+  changeCount: number;
+  signature: CommitteeSignature;
+  [key: string]: unknown;
+}
+
+/** SK='RATIONALE#DRAFT' — collaborative working draft (CIP-100/108 fields). */
+export interface CommitteeRationaleDraftItem {
+  voteScope: string;
+  itemKey: 'RATIONALE#DRAFT';
+  drepId: string;
+  actionId: string;
+  rationaleStatement: string;
+  summary?: string;
+  precedentDiscussion?: string;
+  counterargumentDiscussion?: string;
+  conclusion?: string;
+  internalVote?: {
+    constitutional?: number;
+    unconstitutional?: number;
+    abstain?: number;
+    didNotVote?: number;
+  };
+  references?: Array<{ '@type'?: string; label: string; uri: string }>;
+  authors?: Array<{ name: string; witness?: Record<string, unknown> }>;
+  /** Optimistic-concurrency token (If-Match). */
+  updatedAt: string;
+  editorTimeline?: Array<{ wallet: string; editedAt: string }>;
+  [key: string]: unknown;
+}
+
+/** SK='RATIONALE#LOCK' — pessimistic edit lock for collaborative mode. */
+export interface CommitteeRationaleLockItem {
+  voteScope: string;
+  itemKey: 'RATIONALE#LOCK';
+  editorWallet: string;
+  acquiredAt: string;
+  lastHeartbeat: string;
+  /** Epoch seconds; lock auto-expires after 20 min of no heartbeat. */
+  expiresAt: number;
+  [key: string]: unknown;
+}
+
+/** SK='RATIONALE#FINAL' — locked rationale + canonical anchor + IPFS URI. */
+export interface CommitteeRationaleFinalItem {
+  voteScope: string;
+  itemKey: 'RATIONALE#FINAL';
+  drepId: string;
+  actionId: string;
+  /** Canonical CIP-100/108 JSON (sorted keys) that was hashed + pinned. */
+  canonicalJson: string;
+  anchorHash: string; // blake2b-256 hex of canonicalJson bytes
+  hashAlgorithm: 'blake2b-256';
+  ipfsUri?: string; // ipfs://<cid> once pinned
+  ipfsCid?: string;
+  finalizedBy: string;
+  finalizedAt: string;
+  [key: string]: unknown;
+}
+
+/** SK='SUBMISSION' — on-chain vote receipt. */
+export interface CommitteeSubmissionItem {
+  voteScope: string;
+  itemKey: 'SUBMISSION';
+  drepId: string;
+  actionId: string;
+  position: CommitteePosition;
+  anchorHash?: string;
+  anchorUrl?: string;
+  txHash: string;
+  broadcastStage: string; // 'prod' — test never broadcasts
+  submittedBy: string;
+  submittedAt: string;
+  rationaleOverridden?: boolean; // submitted without a rationale via override
+  [key: string]: unknown;
+}
+
+/** SK='VOTING_CONFIG' on drep_committees — lead-configured voting rules. */
+export interface VotingConfigItem {
+  drepId: string;
+  SK: 'VOTING_CONFIG';
+  /** Supermajority threshold applied to the non-abstaining pool. 51..100. */
+  thresholdPct: number;
+  /** Minimum non-abstaining voters before a proposal can resolve. */
+  quorum: number;
+  rationaleMode: RationaleMode;
+  /** Wallet of the assigned author when rationaleMode==='assigned'. */
+  assignedEditor?: string;
+  setBy: string;
+  setAt: string;
+  history?: Array<{ thresholdPct: number; rationaleMode: RationaleMode; wallet: string; at: string }>;
+  [key: string]: unknown;
+}
+
+/** committee_membership table — one row per wallet, total. */
+export interface CommitteeMembershipItem {
+  walletAddress: string;
+  drepId: string;
+  role: 'lead' | 'member';
+  joinedAt: string;
+  [key: string]: unknown;
+}
+
+/** platform_state table — PK stateKey='SAFETY_MODE'. */
+export interface PlatformSafetyModeItem {
+  stateKey: 'SAFETY_MODE';
+  active: boolean;
+  triggeredAt?: string;
+  /** Epoch seconds; the latch auto-clears after 72h unless an admin clears it. */
+  expiresAt?: number;
+  triggeredByCount?: number;
+  clearedBy?: string;
+  clearedAt?: string;
+  [key: string]: unknown;
 }
 
 export interface GovernanceActionItem {
