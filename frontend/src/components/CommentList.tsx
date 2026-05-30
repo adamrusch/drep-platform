@@ -166,6 +166,17 @@ function CommentRow({
         }
       })()
     : 'neutral';
+  // "N wallets" — promoted from the hover-tooltip detail to a co-equal
+  // part of the visible badge (Batch REVAL, 2026-05-29). Exposes
+  // concentration: "5 wallets · 2M ₳" reads very differently from
+  // "200 wallets · 2M ₳", and the move-and-revote Sybil vector becomes
+  // visible-by-default rather than buried in a tooltip.
+  //
+  // We use upvoteCount as the "backing wallet count" because the
+  // primary signal is "how many distinct wallets are SUPPORTING this
+  // comment." Downvotes are a separate dimension surfaced in the
+  // tooltip (kept) and via the supportLovelace tone (already rendered).
+  const walletCount = comment.upvoteCount ?? 0;
 
   return (
     <div
@@ -240,6 +251,18 @@ function CommentRow({
             title={`Support Level: ${supportDisplay} (${comment.upvoteCount ?? 0} up, ${comment.downvoteCount ?? 0} down)`}
           >
             {supportDisplay}
+          </span>
+          {/* "N wallets" — co-equal display alongside the support stake
+              badge. Reveals concentration at a glance — "5 wallets · 2M ₳"
+              vs "200 wallets · 2M ₳" tells a very different story about
+              whether stake is genuinely broad-based or Sybil-amplified.
+              Tooltip retains the full up/down breakdown. */}
+          <span
+            className="text-xs font-medium tabular-nums text-[var(--text-tertiary)] px-1"
+            title={`${walletCount} backing wallet${walletCount === 1 ? '' : 's'} (upvotes); ${comment.downvoteCount ?? 0} downvote${(comment.downvoteCount ?? 0) === 1 ? '' : 's'}`}
+            data-testid="comment-wallet-count"
+          >
+            · {walletCount} {walletCount === 1 ? 'wallet' : 'wallets'}
           </span>
           <button
             type="button"

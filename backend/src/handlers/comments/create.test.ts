@@ -43,6 +43,7 @@ vi.mock('../../lib/dynamodb', () => ({
     governanceVotes: 'test-governance_votes',
     comments: 'test-comments',
     commentVotes: 'test-comment_votes',
+    commentVoters: 'test-comment_voters',
     clubhousePosts: 'test-clubhouse_posts',
     auditLog: 'test-audit_log',
     authNonces: 'test-auth_nonces',
@@ -52,6 +53,16 @@ vi.mock('../../lib/dynamodb', () => ({
 vi.mock('../../lib/recognition', () => ({
   lookupRecognition: vi.fn(),
   lookupStake: vi.fn(),
+}));
+
+// Batch REVAL (2026-05-29): the create handler now upserts the author
+// (via the implicit seed-upvote) into the `comment_voters` registry.
+// Stub the upsert at the module boundary so existing tests don't have
+// to thread the side-effect through. `comment-voters.test.ts` covers
+// the upsert in isolation; the registry-wiring test below verifies
+// the create handler does call it.
+vi.mock('../../lib/comment-voters', () => ({
+  upsertCommentVoter: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('../../lib/auth', async () => {
@@ -69,6 +80,7 @@ vi.mock('../../lib/auth', async () => {
 import { getItem, transactWrite, putItem } from '../../lib/dynamodb';
 import { lookupRecognition, lookupStake } from '../../lib/recognition';
 import { validateMutationNonce, verifyWalletSignature } from '../../lib/auth';
+import { upsertCommentVoter } from '../../lib/comment-voters';
 import { handler } from './create';
 
 const mockGet = vi.mocked(getItem);
@@ -78,6 +90,7 @@ const mockRecognition = vi.mocked(lookupRecognition);
 const mockStake = vi.mocked(lookupStake);
 const mockNonce = vi.mocked(validateMutationNonce);
 const mockSig = vi.mocked(verifyWalletSignature);
+const mockUpsertVoter = vi.mocked(upsertCommentVoter);
 
 const ACTION_ID = 'aaaaaaaa#0';
 const WALLET = 'stake1uyvjdz9rxsfsmv44rtk75k2rqyqskrga96dgdfrqjvjjpwsefcjnp';
@@ -133,6 +146,8 @@ describe('comments/create', () => {
     mockNonce.mockResolvedValue({ valid: true });
     mockSig.mockReset();
     mockSig.mockReturnValue({ valid: true });
+    mockUpsertVoter.mockReset();
+    mockUpsertVoter.mockResolvedValue(undefined);
   });
 
   it('writes the comment + seed vote atomically with the correct lovelace snapshot', async () => {
@@ -390,5 +405,31 @@ describe('comments/create', () => {
     // The failure was logged (via console.warn) but swallowed.
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+
+  // ---- Batch REVAL (2026-05-29) — registry upsert wiring ----
+
+  it('REVAL: upserts the author into the comment_voters registry after a successful create (seed-upvote)', async () => {
+    mockGet.mockResolvedValueOnce({ actionId: ACTION_ID, SK: 'ACTION' } as never);
+
+    const res = (await handler(
+      buildEvent({
+        walletAddress: WALLET,
+        roles: ['delegator'],
+        actionId: ACTION_ID,
+        body: validBody,
+      }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 201 });
+    // The author becomes a voter via the implicit seed-upvote; the
+    // registry must carry them from the moment of creation so the
+    // 3-hourly sweep doesn't miss them until they cast an explicit
+    // separate vote.
+    expect(mockUpsertVoter).toHaveBeenCalledTimes(1);
+    expect(mockUpsertVoter).toHaveBeenCalledWith({
+      stakeAddress: WALLET,
+      lovelace: STAKE_LOVELACE,
+    });
   });
 });

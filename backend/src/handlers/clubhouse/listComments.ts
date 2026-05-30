@@ -84,6 +84,13 @@ export const handler = async (
     // type is the legacy inline shape; preserving it keeps the
     // listComments response interchangeable with the inline-array
     // fallback during rotation.
+    //
+    // `authorDelegationActive` (Batch CLUBHOUSE-DELEGATION-GATE,
+    // 2026-05-30) is surfaced ONLY when explicitly false — the absent
+    // / true / undefined case all mean "active" on the frontend and
+    // omitting the field saves wire bytes for the vast majority of
+    // rows. The frontend renders the "no longer delegated" badge
+    // strictly on `authorDelegationActive === false`.
     const responseItems = items.map((row) => ({
       commentId: row.commentId,
       authorWallet: row.authorWallet,
@@ -91,6 +98,9 @@ export const handler = async (
       createdAt: row.createdAt,
       ...(row.authorDisplayName ? { authorDisplayName: row.authorDisplayName } : {}),
       ...(row.parentCommentId ? { parentCommentId: row.parentCommentId } : {}),
+      ...(row.authorDelegationActive === false
+        ? { authorDelegationActive: false as const }
+        : {}),
     }));
 
     return ok({ items: responseItems });
