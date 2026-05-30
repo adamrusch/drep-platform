@@ -106,13 +106,19 @@ import {
   type KoiosAccountInfo,
 } from '../lib/koios';
 import {
+  getItem,
   queryItems,
   scanItems,
   transactWrite,
   tableNames,
   updateItem,
+  type QueryResult,
 } from '../lib/dynamodb';
-import type { CommentVoteItem, CommentVoterItem } from '../lib/types';
+import type {
+  CommentVoteItem,
+  CommentVoterItem,
+  DRepCommitteeItem,
+} from '../lib/types';
 import { writeAuditEvent } from '../lib/audit';
 
 /** Koios `account_info_cached` accepts up to 100 stake addresses per
@@ -621,12 +627,738 @@ async function writePassSummary(result: RevalidateCommentStakeResult): Promise<v
   });
 }
 
+// ============================================================
+// Batch CLUBHOUSE-DELEGATION-GATE (2026-05-30)
+// Phase 2: revoke poll votes + badge comments for un-delegated wallets.
+// ============================================================
+//
+// # The gap this phase closes
+//
+// The clubhouse is delegator-scoped. The cast-time membership gate
+// (`createPost.ts` / `createComment.ts` / `votePoll.ts` — the last
+// added in this same batch) blocks NEW writes from wallets that aren't
+// currently delegated. But nothing reaches BACK to participation that
+// landed BEFORE the wallet un-delegated:
+//
+//   - Polls: the wallet's vote stays in `pollVotes`, still counted in
+//     the option tally. Looks like an active delegator's voice.
+//   - Comments: the wallet's `clubhouse_comments` rows stay visible
+//     verbatim — no signal that the author no longer participates in
+//     this DRep's clubhouse.
+//
+// # What this sweep does
+//
+// Every 3 hours (same cadence + same Lambda as the stake-reweight phase
+// above), enumerate every wallet that's currently participating in any
+// clubhouse, batch-look-up their current `delegated_drep` via Koios,
+// and for each wallet whose CONFIRMED delegation has moved away from
+// that clubhouse's DRep (and who isn't a committee role-holder):
+//
+//   - Revoke their poll votes — atomic
+//     `REMOVE pollVotes.#wallet ADD pollOptions[idx].votes :negOne`
+//     on each affected post. Idempotent: already-removed = no-op.
+//   - Badge their comments — set
+//     `authorDelegationActive: false` on each `clubhouse_comments` row.
+//     The frontend renders a subtle "no longer delegated" badge; the
+//     comment stays visible (flag, not hide — per owner decision).
+//
+// Re-activation: a previously-badged wallet found delegated again has
+// the badge CLEARED (`authorDelegationActive` set back to true). Keeps
+// the system self-healing without a separate "unbadge" sweep.
+//
+// # CRITICAL guard (same as the stake-reweight phase above)
+//
+// **NEVER revoke or badge on an upstream-read failure or a missing
+// account row.** Only act on a CONFIRMED `delegated_drep` reading that
+// mismatches. A Koios outage MUST NOT strip everyone's clubhouse
+// participation — that's worse than the gap this sweep is trying to
+// close. Confirmation comes from a non-throwing batch + a present row
+// in the response (Koios omits unregistered/never-staked addresses;
+// those count as upstream failures, not as "confirmed undelegated").
+//
+// Locked in by `revalidate-comment-stake.test.ts` —
+// `"clubhouse sweep: SKIPS revoke/badge on Koios batch failure"` and
+// `"clubhouse sweep: SKIPS revoke/badge on missing-from-response"`.
+//
+// # Enumeration strategy
+//
+// Two populations need enumeration:
+//   (a) poll voters — keys of `pollVotes` maps on every poll-typed
+//       row in `clubhouse_posts`.
+//   (b) comment authors — `authorWallet` on every `clubhouse_comments`
+//       row.
+//
+// At today's scale (~7,360 posts, ~0 comments) a Scan over each table
+// projects only the columns we need (drepId + postId + pollVotes for
+// posts; postKey + commentId + drepId + authorWallet for comments) and
+// completes in a single sub-second pass per table. We add NO GSI — at
+// this scale the per-Scan RCU cost is pennies/cycle. Documented as a
+// scale-watch comment so a future operator knows when to revisit.
+//
+// # Audit
+//
+//   - One `clubhouse.poll.revoked` event per (wallet, post) pair whose
+//     vote was actually removed (metadata: drepId, postId, optionIndex,
+//     priorDelegatedTo).
+//   - One `clubhouse.comment.badged` event per (wallet, comment) pair
+//     whose `authorDelegationActive` flipped to false.
+//   - One `clubhouse.comment.unbadged` event per pair flipped BACK to
+//     true.
+//   - One per-pass `clubhouse.delegation_sweep_pass` summary at end.
+//
+// All best-effort — audit failures never block the underlying revoke /
+// badge write.
+
+/** Slim projection used by the clubhouse-posts Scan in the sweep. We
+ *  only need `drepId` + `postId` (for the targeted UpdateItem keys) +
+ *  `pollVotes` + `pollOptions` (to know which option to decrement for
+ *  each revoked vote). Type / authorWallet are NOT needed — the sweep
+ *  acts on poll-type posts (filtered post-projection by presence of
+ *  `pollVotes`). */
+interface PollPostSlim {
+  drepId: string;
+  postId: string;
+  pollVotes?: Record<string, number>;
+  /** Present only on poll-typed posts. We use it for length-bounds
+   *  defense on the option index we read from `pollVotes`. */
+  pollOptions?: Array<{ id: string; label: string; votes: number }>;
+  [key: string]: unknown;
+}
+
+/** Slim projection used by the clubhouse-comments Scan. */
+interface ClubhouseCommentSlim {
+  postKey: string;
+  commentId: string;
+  drepId: string;
+  authorWallet: string;
+  authorDelegationActive?: boolean;
+  [key: string]: unknown;
+}
+
+/** Per-(wallet, drepId) participation record. One wallet can participate
+ *  in multiple DReps' clubhouses; we lift the (wallet, drepId) pair as
+ *  the per-record key so each delegation check applies to the right
+ *  scope. */
+interface ParticipantRecord {
+  walletAddress: string;
+  drepId: string;
+  /** Poll votes this wallet has cast in THIS DRep's clubhouse. */
+  pollVotes: Array<{ postId: string; optionIndex: number }>;
+  /** Comment rows authored by this wallet in THIS DRep's clubhouse. */
+  comments: Array<{ postKey: string; commentId: string; currentBadgeActive: boolean | undefined }>;
+}
+
+export interface RevalidateClubhouseDelegationResult {
+  /** Distinct (wallet, drepId) participation pairs enumerated this pass. */
+  participantsScanned: number;
+  /** Distinct wallets enumerated (a single wallet can participate in
+   *  multiple DReps' clubhouses; this counts wallets, not pairs). */
+  walletsChecked: number;
+  /** Wallets where the upstream lookup failed (Koios batch threw, or the
+   *  wallet was missing from the response). SKIPPED — no revoke / badge
+   *  applied. Counted distinct-wallet. */
+  walletsUpstreamFailures: number;
+  /** Wallets whose CONFIRMED `delegated_drep` matched every clubhouse
+   *  they participate in — nothing to do for them. */
+  walletsAllAligned: number;
+  /** (wallet, drepId) pairs where confirmed delegation MISMATCHES and the
+   *  wallet is NOT a role-holder of THAT drep — these are the records the
+   *  sweep acted on. */
+  mismatchedRecords: number;
+  /** Poll votes successfully revoked. */
+  pollVotesRevoked: number;
+  /** Clubhouse comments newly badged `authorDelegationActive: false`. */
+  commentsBadged: number;
+  /** Clubhouse comments newly UN-badged (flipped back to active) —
+   *  re-activation when a previously-mismatched wallet is found
+   *  delegated again. */
+  commentsUnbadged: number;
+  /** Per-write failures (any DDB error other than the expected idempotent
+   *  CCFE on already-revoked poll votes). Logged + counted, not retried. */
+  writeErrors: number;
+}
+
+function emptyClubhouseResult(): RevalidateClubhouseDelegationResult {
+  return {
+    participantsScanned: 0,
+    walletsChecked: 0,
+    walletsUpstreamFailures: 0,
+    walletsAllAligned: 0,
+    mismatchedRecords: 0,
+    pollVotesRevoked: 0,
+    commentsBadged: 0,
+    commentsUnbadged: 0,
+    writeErrors: 0,
+  };
+}
+
+/**
+ * Enumerate every poll-vote / comment-author participation in every
+ * clubhouse. Returns one `ParticipantRecord` per distinct (wallet, drepId)
+ * pair — even a single wallet that participates in three different
+ * DReps' clubhouses gets three records, each scoped to one drepId so
+ * the delegation check applies to the right target.
+ *
+ * # Why a Scan (not a GSI) at current scale
+ *
+ * Two tables in play:
+ *   - `clubhouse_posts`: ~7,360 rows steady-state. We need a one-shot
+ *     pass to harvest every `pollVotes` map. A Scan projects only
+ *     `drepId + postId + pollVotes + pollOptions` and runs sub-second.
+ *   - `clubhouse_comments`: ~0 rows in prod today. Trivial.
+ * Steady-state growth tracks the platform's active-clubhouse count.
+ * When this exceeds the ~100k row tier a Scan-per-3h becomes notable
+ * cost, we revisit. Until then a GSI introduces write amplification
+ * (every comment write costs +1 GSI write) for no read benefit.
+ *
+ * # Defensive filtering
+ *
+ *   - posts: only rows whose `pollVotes` has at least one entry contribute.
+ *   - comments: every row's `authorWallet` contributes.
+ *   - non-stake addresses (`addr1...` payment-address fallbacks from
+ *     `useWalletAuth`) are SKIPPED — Koios `account_info_cached` only
+ *     accepts stake addresses, so we cannot resolve their delegation
+ *     anyway. Logged so an operator can investigate if the count is
+ *     non-zero on a future cycle.
+ */
+export async function enumerateClubhouseParticipants(): Promise<{
+  participants: ParticipantRecord[];
+  skippedNonStakeAddresses: number;
+}> {
+  // (drepId|wallet) → record map for accumulation.
+  const byKey = new Map<string, ParticipantRecord>();
+  let skippedNonStakeAddresses = 0;
+
+  function getOrCreate(walletAddress: string, drepId: string): ParticipantRecord {
+    const k = `${drepId}|${walletAddress}`;
+    let rec = byKey.get(k);
+    if (!rec) {
+      rec = { walletAddress, drepId, pollVotes: [], comments: [] };
+      byKey.set(k, rec);
+    }
+    return rec;
+  }
+
+  // ---- Pass 1: clubhouse_posts → poll voters ----
+  // Project only the columns we need. The Scan iterates the full table
+  // (PAY_PER_REQUEST tables bill on bytes returned, not on full row
+  // size, so projection materially reduces cost).
+  let cursor: Record<string, unknown> | undefined;
+  let pages = 0;
+  do {
+    pages += 1;
+    const postsPage = await scanItems<PollPostSlim>(tableNames.clubhousePosts, {
+      projectionExpression: '#d, #p, #pv, #po',
+      expressionAttributeNames: {
+        '#d': 'drepId',
+        '#p': 'postId',
+        '#pv': 'pollVotes',
+        '#po': 'pollOptions',
+      },
+      ...(cursor ? { exclusiveStartKey: cursor } : {}),
+    });
+    for (const row of postsPage.items) {
+      if (!row.pollVotes) continue;
+      const optionCount = row.pollOptions?.length ?? 0;
+      for (const [wallet, optionIdx] of Object.entries(row.pollVotes)) {
+        if (typeof optionIdx !== 'number' || !Number.isInteger(optionIdx)) {
+          // Defensive: bad data — skip.
+          continue;
+        }
+        if (optionCount > 0 && (optionIdx < 0 || optionIdx >= optionCount)) {
+          // Defensive: option-index out of range vs the current
+          // pollOptions list. Skip rather than risk corrupting the
+          // tally with an invalid `pollOptions[idx]` decrement.
+          continue;
+        }
+        if (!wallet.startsWith('stake')) {
+          skippedNonStakeAddresses += 1;
+          continue;
+        }
+        getOrCreate(wallet, row.drepId).pollVotes.push({
+          postId: row.postId,
+          optionIndex: optionIdx,
+        });
+      }
+    }
+    cursor = postsPage.lastEvaluatedKey;
+  } while (cursor);
+  console.log(
+    `revalidate-clubhouse-delegations: scanned clubhouse_posts in ${pages} page(s)`,
+  );
+
+  // ---- Pass 2: clubhouse_comments → comment authors ----
+  cursor = undefined;
+  pages = 0;
+  do {
+    pages += 1;
+    const commentsPage: QueryResult<ClubhouseCommentSlim> = await scanItems<ClubhouseCommentSlim>(
+      tableNames.clubhouseComments,
+      {
+        projectionExpression: '#pk, #cid, #d, #aw, #ada',
+        expressionAttributeNames: {
+          '#pk': 'postKey',
+          '#cid': 'commentId',
+          '#d': 'drepId',
+          '#aw': 'authorWallet',
+          '#ada': 'authorDelegationActive',
+        },
+        ...(cursor ? { exclusiveStartKey: cursor } : {}),
+      },
+    );
+    for (const row of commentsPage.items) {
+      if (!row.authorWallet) continue;
+      if (!row.authorWallet.startsWith('stake')) {
+        skippedNonStakeAddresses += 1;
+        continue;
+      }
+      getOrCreate(row.authorWallet, row.drepId).comments.push({
+        postKey: row.postKey,
+        commentId: row.commentId,
+        currentBadgeActive: row.authorDelegationActive,
+      });
+    }
+    cursor = commentsPage.lastEvaluatedKey;
+  } while (cursor);
+  console.log(
+    `revalidate-clubhouse-delegations: scanned clubhouse_comments in ${pages} page(s)`,
+  );
+
+  return {
+    participants: Array.from(byKey.values()),
+    skippedNonStakeAddresses,
+  };
+}
+
+/**
+ * Check whether `walletAddress` is a committee role-holder for `drepId`.
+ * Single local DDB Get on `drep_committees` — no upstream dependency,
+ * cached per-pass via the calling context.
+ *
+ * Returns `false` on a Get failure (defensive — same posture as
+ * `_membership.ts`: a committee-Get failure should NOT promote a caller
+ * to role-holder).
+ */
+async function isCommitteeRoleHolder(
+  walletAddress: string,
+  drepId: string,
+): Promise<boolean> {
+  let committee: DRepCommitteeItem | undefined;
+  try {
+    committee = await getItem<DRepCommitteeItem>(tableNames.drepCommittees, {
+      drepId,
+      SK: 'COMMITTEE',
+    });
+  } catch (err) {
+    console.warn(
+      `revalidate-clubhouse-delegations: committee Get failed for ${drepId}:`,
+      err,
+    );
+    return false;
+  }
+  if (!committee) return false;
+  if (committee.leadWallet === walletAddress) return true;
+  if (Array.isArray(committee.members)) {
+    return committee.members.some((m) => m.walletAddress === walletAddress);
+  }
+  return false;
+}
+
+/**
+ * Revoke a single poll vote atomically. Idempotent: if a concurrent
+ * write has already removed the entry (e.g. the wallet logged in and
+ * un-voted manually), the conditional `pollVotes.#wallet = :prev` guard
+ * fails with CCFE — we swallow the CCFE and treat the revoke as
+ * already-done.
+ *
+ * # Expression structure (mirrors `votePoll.ts` atomic-write pattern)
+ *
+ *   REMOVE pollVotes.<wallet>
+ *   ADD pollOptions[idx].votes :negOne
+ *
+ * Guard: `attribute_exists(postId) AND pollVotes.<wallet> = :prev`. If
+ * the post was deleted between our Scan and this UpdateItem, the
+ * `attribute_exists(postId)` half fails; we count as a write error and
+ * continue (the next pass won't see the orphan because the post is gone).
+ */
+async function revokePollVote(opts: {
+  drepId: string;
+  postId: string;
+  walletAddress: string;
+  optionIndex: number;
+}): Promise<{ revoked: boolean; idempotentNoOp: boolean }> {
+  const names: Record<string, string> = {
+    '#pv': 'pollVotes',
+    '#wallet': opts.walletAddress,
+    '#po': 'pollOptions',
+    '#v': 'votes',
+    '#pk': 'postId',
+    '#u': 'updatedAt',
+  };
+  const values: Record<string, unknown> = {
+    ':prev': opts.optionIndex,
+    ':negOne': -1,
+    ':now': new Date().toISOString(),
+  };
+  try {
+    await updateItem(
+      tableNames.clubhousePosts,
+      { drepId: opts.drepId, postId: opts.postId },
+      `REMOVE #pv.#wallet SET #u = :now ADD #po[${opts.optionIndex}].#v :negOne`,
+      names,
+      values,
+      'attribute_exists(#pk) AND #pv.#wallet = :prev',
+    );
+    return { revoked: true, idempotentNoOp: false };
+  } catch (err) {
+    if (
+      err &&
+      typeof err === 'object' &&
+      (err as { name?: string }).name === 'ConditionalCheckFailedException'
+    ) {
+      // Already revoked OR post deleted — either way, nothing for us
+      // to do. Idempotent no-op.
+      return { revoked: false, idempotentNoOp: true };
+    }
+    throw err;
+  }
+}
+
+/**
+ * Set `authorDelegationActive` on a comment row to the given boolean.
+ * No guard — idempotent re-runs just re-write the same value. Best-effort
+ * — failures bubble up to the caller's error counter.
+ */
+async function setCommentDelegationActive(opts: {
+  postKey: string;
+  commentId: string;
+  active: boolean;
+}): Promise<void> {
+  await updateItem(
+    tableNames.clubhouseComments,
+    { postKey: opts.postKey, commentId: opts.commentId },
+    'SET #ada = :v',
+    { '#ada': 'authorDelegationActive' },
+    { ':v': opts.active },
+  );
+}
+
+/**
+ * Run the clubhouse delegation re-validation pass.
+ *
+ * Order of operations:
+ *   1. Enumerate every (wallet, drepId) clubhouse participation pair.
+ *   2. Group by wallet so one Koios batch call per ≤100 wallets covers
+ *      every clubhouse they're in.
+ *   3. For each wallet with a CONFIRMED reading:
+ *        - For each (wallet, drepId) pair where the wallet's confirmed
+ *          `delegated_drep` !== drepId AND the wallet is not a role-
+ *          holder of THAT drepId: revoke each pollVote + badge each
+ *          comment in that scope.
+ *        - For each pair where delegation IS aligned: clear the badge
+ *          on any comment currently carrying `authorDelegationActive=
+ *          false` (re-activation).
+ *   4. Wallets that didn't respond (batch threw, missing from response)
+ *      are SKIPPED across ALL clubhouses they're in — their participation
+ *      is NOT touched. Counted under `walletsUpstreamFailures`.
+ */
+export async function runRevalidateClubhouseDelegations(): Promise<RevalidateClubhouseDelegationResult> {
+  const result = emptyClubhouseResult();
+
+  // ---- Step 1: enumerate ----
+  let participants: ParticipantRecord[];
+  let skippedNonStakeAddresses: number;
+  try {
+    const enumeration = await enumerateClubhouseParticipants();
+    participants = enumeration.participants;
+    skippedNonStakeAddresses = enumeration.skippedNonStakeAddresses;
+  } catch (err) {
+    console.error('revalidate-clubhouse-delegations: enumeration failed:', err);
+    await writeClubhousePassSummary(result);
+    return result;
+  }
+  result.participantsScanned = participants.length;
+  if (skippedNonStakeAddresses > 0) {
+    console.warn(
+      `revalidate-clubhouse-delegations: skipped ${skippedNonStakeAddresses} non-stake address(es) (Koios can't resolve delegation for these)`,
+    );
+  }
+
+  if (participants.length === 0) {
+    console.log(
+      'revalidate-clubhouse-delegations: nothing to do (no clubhouse participation)',
+    );
+    await writeClubhousePassSummary(result);
+    return result;
+  }
+
+  // ---- Step 2: group by wallet for batch lookups ----
+  const byWallet = new Map<string, ParticipantRecord[]>();
+  for (const p of participants) {
+    let arr = byWallet.get(p.walletAddress);
+    if (!arr) {
+      arr = [];
+      byWallet.set(p.walletAddress, arr);
+    }
+    arr.push(p);
+  }
+  const wallets = Array.from(byWallet.keys());
+  result.walletsChecked = wallets.length;
+
+  // ---- Step 3: batched Koios lookups ----
+  for (let i = 0; i < wallets.length; i += KOIOS_ACCOUNT_BATCH_SIZE) {
+    const batchWallets = wallets.slice(i, i + KOIOS_ACCOUNT_BATCH_SIZE);
+    let accounts: KoiosAccountInfo[] = [];
+    let batchFailed = false;
+    try {
+      accounts = await fetchAccountInfoBatch(batchWallets);
+    } catch (err) {
+      if (err instanceof KoiosError) {
+        console.warn(
+          `revalidate-clubhouse-delegations: Koios batch ${i}-${i + batchWallets.length} failed: ${err.message}`,
+        );
+      } else {
+        console.warn(
+          `revalidate-clubhouse-delegations: Koios batch ${i}-${i + batchWallets.length} threw unexpected error:`,
+          err,
+        );
+      }
+      batchFailed = true;
+    }
+
+    if (batchFailed) {
+      // SKIP every wallet in this batch across every clubhouse they're
+      // in. This is the load-bearing correctness invariant — a Koios
+      // outage MUST NOT strip clubhouse participation.
+      result.walletsUpstreamFailures += batchWallets.length;
+      continue;
+    }
+
+    const accountByAddress = new Map<string, KoiosAccountInfo>();
+    for (const a of accounts) {
+      if (typeof a.stake_address === 'string') {
+        accountByAddress.set(a.stake_address, a);
+      }
+    }
+
+    for (const wallet of batchWallets) {
+      const account = accountByAddress.get(wallet);
+      if (!account) {
+        // Missing from response — we do NOT know this wallet's current
+        // delegation. SKIP across every clubhouse they're in.
+        result.walletsUpstreamFailures += 1;
+        continue;
+      }
+      const currentDrep = account.delegated_drep; // string|null per Koios spec
+
+      // For each (wallet, drepId) pair this wallet has, decide aligned
+      // vs mismatch vs role-holder-bypass.
+      const records = byWallet.get(wallet) ?? [];
+      let allAlignedForThisWallet = true;
+      for (const rec of records) {
+        const aligned = currentDrep === rec.drepId;
+        if (aligned) {
+          // RE-ACTIVATION: this wallet is currently delegated to THIS
+          // DRep. Clear any stale `authorDelegationActive=false` badge
+          // on their comments. (Poll votes are not badged — they were
+          // either revoked or still present; re-vote needs the user to
+          // cast actively, so we don't auto-restore revoked votes.)
+          for (const c of rec.comments) {
+            if (c.currentBadgeActive === false) {
+              try {
+                await setCommentDelegationActive({
+                  postKey: c.postKey,
+                  commentId: c.commentId,
+                  active: true,
+                });
+                result.commentsUnbadged += 1;
+                await writeAuditEvent({
+                  entityType: 'clubhouse_comment',
+                  entityId: c.commentId,
+                  eventType: 'clubhouse.comment.unbadged',
+                  actorWallet: '_revalidate-clubhouse-sweep',
+                  metadata: {
+                    drepId: rec.drepId,
+                    walletAddress: wallet,
+                    reason: 'delegation_re_aligned',
+                  },
+                });
+              } catch (err) {
+                console.error(
+                  `revalidate-clubhouse-delegations: unbadge failed postKey=${c.postKey} commentId=${c.commentId}:`,
+                  err,
+                );
+                result.writeErrors += 1;
+              }
+            }
+          }
+          continue;
+        }
+        // Misaligned. Before acting, check role-holder bypass — the
+        // committee Get is a local DDB read with no upstream dependency,
+        // so role-holders are protected even during outage cycles
+        // (though we're past the upstream-fail skip by this point).
+        const isRoleHolder = await isCommitteeRoleHolder(wallet, rec.drepId);
+        if (isRoleHolder) {
+          // Bypass — role-holders ALWAYS retain access to clubhouses
+          // they manage, irrespective of delegation drift.
+          continue;
+        }
+        // Confirmed mismatch + not a role-holder → act.
+        allAlignedForThisWallet = false;
+        result.mismatchedRecords += 1;
+
+        // ---- Revoke poll votes ----
+        for (const pv of rec.pollVotes) {
+          try {
+            const outcome = await revokePollVote({
+              drepId: rec.drepId,
+              postId: pv.postId,
+              walletAddress: wallet,
+              optionIndex: pv.optionIndex,
+            });
+            if (outcome.revoked) {
+              result.pollVotesRevoked += 1;
+              await writeAuditEvent({
+                entityType: 'clubhouse_post',
+                entityId: pv.postId,
+                eventType: 'clubhouse.poll.revoked',
+                actorWallet: '_revalidate-clubhouse-sweep',
+                metadata: {
+                  drepId: rec.drepId,
+                  walletAddress: wallet,
+                  optionIndex: pv.optionIndex,
+                  currentDelegatedTo: currentDrep,
+                },
+              });
+            }
+          } catch (err) {
+            console.error(
+              `revalidate-clubhouse-delegations: revokePollVote failed drepId=${rec.drepId} postId=${pv.postId} wallet=${wallet}:`,
+              err,
+            );
+            result.writeErrors += 1;
+          }
+        }
+
+        // ---- Badge comments ----
+        for (const c of rec.comments) {
+          // Idempotent: skip if already badged.
+          if (c.currentBadgeActive === false) continue;
+          try {
+            await setCommentDelegationActive({
+              postKey: c.postKey,
+              commentId: c.commentId,
+              active: false,
+            });
+            result.commentsBadged += 1;
+            await writeAuditEvent({
+              entityType: 'clubhouse_comment',
+              entityId: c.commentId,
+              eventType: 'clubhouse.comment.badged',
+              actorWallet: '_revalidate-clubhouse-sweep',
+              metadata: {
+                drepId: rec.drepId,
+                walletAddress: wallet,
+                currentDelegatedTo: currentDrep,
+              },
+            });
+          } catch (err) {
+            console.error(
+              `revalidate-clubhouse-delegations: badge failed postKey=${c.postKey} commentId=${c.commentId}:`,
+              err,
+            );
+            result.writeErrors += 1;
+          }
+        }
+      }
+      if (allAlignedForThisWallet) {
+        result.walletsAllAligned += 1;
+      }
+    }
+  }
+
+  await writeClubhousePassSummary(result);
+
+  console.log(
+    `revalidate-clubhouse-delegations: pass complete — ` +
+      `participants=${result.participantsScanned} wallets=${result.walletsChecked} ` +
+      `aligned=${result.walletsAllAligned} mismatched=${result.mismatchedRecords} ` +
+      `upstreamFailures=${result.walletsUpstreamFailures} ` +
+      `revoked=${result.pollVotesRevoked} badged=${result.commentsBadged} ` +
+      `unbadged=${result.commentsUnbadged} errors=${result.writeErrors}`,
+  );
+  return result;
+}
+
+async function writeClubhousePassSummary(
+  result: RevalidateClubhouseDelegationResult,
+): Promise<void> {
+  await writeAuditEvent({
+    entityType: 'system',
+    entityId: 'revalidate-clubhouse-delegations',
+    eventType: 'clubhouse.delegation_sweep_pass',
+    actorWallet: '_revalidate-clubhouse-sweep',
+    metadata: {
+      participantsScanned: result.participantsScanned,
+      walletsChecked: result.walletsChecked,
+      walletsUpstreamFailures: result.walletsUpstreamFailures,
+      walletsAllAligned: result.walletsAllAligned,
+      mismatchedRecords: result.mismatchedRecords,
+      pollVotesRevoked: result.pollVotesRevoked,
+      commentsBadged: result.commentsBadged,
+      commentsUnbadged: result.commentsUnbadged,
+      writeErrors: result.writeErrors,
+    },
+  });
+}
+
 /**
  * EventBridge scheduled handler. Cadence: every 3 hours.
+ *
+ * Runs BOTH the stake re-weight phase (Batch REVAL, 2026-05-29) and the
+ * clubhouse-delegation revoke+badge phase (Batch CLUBHOUSE-DELEGATION-
+ * GATE, 2026-05-30) in sequence on the same schedule.
+ *
+ * Why same Lambda + same schedule:
+ *   - Both phases issue batched Koios `/account_info_cached` calls on
+ *     overlapping (often the same) wallet sets — colocating amortizes
+ *     the cold-start + connection overhead.
+ *   - One alarm to manage instead of two.
+ *   - Phase isolation: if the clubhouse phase throws, the stake phase
+ *     has already completed and committed; if the stake phase throws,
+ *     the clubhouse phase still runs (try/catch per phase).
  */
 export const handler = async (
   _event: ScheduledEvent,
   _context: Context,
-): Promise<RevalidateCommentStakeResult> => {
-  return runRevalidateCommentStake();
+): Promise<{
+  stake: RevalidateCommentStakeResult;
+  clubhouse: RevalidateClubhouseDelegationResult;
+}> => {
+  // Each phase isolates its own failures so a hard error in one does
+  // not skip the other. Both return "empty result" defaults on the
+  // hardest error paths (already covered inside the runners), so the
+  // outer try/catch here is belt-and-suspenders.
+  let stake: RevalidateCommentStakeResult;
+  try {
+    stake = await runRevalidateCommentStake();
+  } catch (err) {
+    console.error(
+      'revalidate-comment-stake: hard failure in stake reweight phase:',
+      err,
+    );
+    stake = emptyResult();
+  }
+  let clubhouse: RevalidateClubhouseDelegationResult;
+  try {
+    clubhouse = await runRevalidateClubhouseDelegations();
+  } catch (err) {
+    console.error(
+      'revalidate-comment-stake: hard failure in clubhouse-delegation phase:',
+      err,
+    );
+    clubhouse = emptyClubhouseResult();
+  }
+  return { stake, clubhouse };
 };
