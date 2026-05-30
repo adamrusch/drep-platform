@@ -5,7 +5,13 @@ import {
   validateMutationNonce,
   verifyWalletSignature,
 } from '../../lib/auth';
-import type { DRepCommitteeItem, VotingConfigItem } from '../../lib/types';
+import type {
+  DRepCommitteeItem,
+  VotingConfigItem,
+  CommitteeVoteProposalItem,
+  CommitteeVoteCastItem,
+  GovernanceActionItem,
+} from '../../lib/types';
 
 /** The deploy stage, embedded in committee signed messages (see
  *  lib/committeeMessages.ts). Defaults to 'dev' for local/test runs. */
@@ -116,6 +122,47 @@ export function signatureSnapshot(
     mutationKey: sig.mutationKey,
     signedMessage,
   };
+}
+
+export function voteScopeOf(drepId: string, actionId: string): string {
+  return `${drepId}#${actionId}`;
+}
+
+export async function loadGovernanceAction(
+  actionId: string,
+): Promise<GovernanceActionItem | undefined> {
+  return getItem<GovernanceActionItem>(tableNames.governanceActions, {
+    actionId,
+    SK: 'ACTION',
+  });
+}
+
+export async function loadProposal(
+  voteScope: string,
+): Promise<CommitteeVoteProposalItem | undefined> {
+  return getItem<CommitteeVoteProposalItem>(tableNames.committeeVotes, {
+    voteScope,
+    itemKey: 'PROPOSAL',
+  });
+}
+
+/** All rows in a vote partition (proposal + casts + rationale + submission). */
+export async function loadVoteScopeItems(
+  voteScope: string,
+): Promise<Array<Record<string, unknown>>> {
+  const res = await queryItems<Record<string, unknown>>(tableNames.committeeVotes, {
+    keyConditionExpression: 'voteScope = :vs',
+    expressionAttributeValues: { ':vs': voteScope },
+  });
+  return res.items;
+}
+
+export function castRowsFrom(
+  items: Array<Record<string, unknown>>,
+): CommitteeVoteCastItem[] {
+  return items.filter(
+    (i) => typeof i['itemKey'] === 'string' && (i['itemKey'] as string).startsWith('CAST#'),
+  ) as CommitteeVoteCastItem[];
 }
 
 /** Count this committee's currently-open proposals (for config-change warnings). */

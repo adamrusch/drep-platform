@@ -584,6 +584,16 @@ export class DatabaseStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
+    // List every proposal for one committee, newest-first. `openedAt` is set
+    // ONLY on PROPOSAL rows, so this GSI is naturally sparse — CAST and
+    // RATIONALE rows (which carry drepId but no openedAt) are not indexed.
+    this.committeeVotesTable.addGlobalSecondaryIndex({
+      indexName: 'drepId-openedAt-index',
+      partitionKey: { name: 'drepId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'openedAt', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
     // ---- committee_membership (Phase 2) ----
     // Enforces "one committee per wallet, total" (lead OR member). PK=walletAddress
     // with a conditional Put (attribute_not_exists) makes the uniqueness atomic
