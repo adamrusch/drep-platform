@@ -24,6 +24,7 @@ export class SchedulerStack extends cdk.Stack {
   public readonly powerHistorySyncFn: lambdaNodejs.NodejsFunction;
   public readonly poolMetadataSyncFn: lambdaNodejs.NodejsFunction;
   public readonly ccMembersSyncFn: lambdaNodejs.NodejsFunction;
+  public readonly revalidateCommentStakeFn: lambdaNodejs.NodejsFunction;
 
   constructor(scope: Construct, id: string, props: SchedulerStackProps) {
     super(scope, id, props);
@@ -378,6 +379,101 @@ export class SchedulerStack extends cdk.Stack {
       exportName: `${stage}-CCMembersSyncFnArn`,
     });
 
+    // ---- Comment-vote stake re-validation Lambda (Batch REVAL, 2026-05-29) ----
+    //
+    // Sybil defense: every 3 hours, re-check each voting wallet's current
+    // stake via Koios `/account_info_cached.total_balance` and re-weight
+    // any votes whose snapshot no longer matches. Collapses the
+    // "move-and-revote" inflation vector — see
+    // `backend/src/sync/revalidate-comment-stake.ts` module header for
+    // the full design + the critical "never zero on lookup failure"
+    // correctness invariant.
+    //
+    // # Role
+    //
+    // Reads + writes both `comment_voters` (the registry that lets the
+    // sweep enumerate distinct voters) and `comment_votes` (per-vote
+    // snapshots that the sweep overwrites with the fresh stake reading)
+    // and `comments` (the parent comment row whose `supportLovelace`
+    // counter is atomically ADDed by the signed re-weight delta).
+    // Also writes the `audit_log` table (best-effort per-pass + per-
+    // wallet events).
+    //
+    // # Memory + timeout
+    //
+    // 1024MB / 5 min mirrors the directory sync's budget — the sweep is
+    // O(voters) Koios calls × O(votes_per_voter) DDB transactWrites.
+    // At today's scale (zero voters) the runtime is sub-second; at
+    // steady state (~10k voters) it's ~30s wall-clock dominated by
+    // Koios batch calls. 5 min absorbs Koios rate-limit backoff.
+    const revalidateCommentStakeRole = new iam.Role(
+      this,
+      'RevalidateCommentStakeRole',
+      {
+        assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+        managedPolicies: [
+          iam.ManagedPolicy.fromAwsManagedPolicyName(
+            'service-role/AWSLambdaBasicExecutionRole',
+          ),
+        ],
+      },
+    );
+    databaseStack.commentVotersTable.grantReadWriteData(revalidateCommentStakeRole);
+    databaseStack.commentVotesTable.grantReadWriteData(revalidateCommentStakeRole);
+    databaseStack.commentsTable.grantReadWriteData(revalidateCommentStakeRole);
+    databaseStack.auditLogTable.grantReadWriteData(revalidateCommentStakeRole);
+
+    this.revalidateCommentStakeFn = new lambdaNodejs.NodejsFunction(
+      this,
+      'RevalidateCommentStakeFn',
+      {
+        functionName: `drep-platform-${stage}-revalidate-comment-stake-sync`,
+        entry: path.join(backendDir, 'src/sync/revalidate-comment-stake.ts'),
+        handler: 'handler',
+        runtime: lambda.Runtime.NODEJS_20_X,
+        architecture: lambda.Architecture.ARM_64,
+        memorySize: 1024,
+        timeout: cdk.Duration.minutes(5),
+        role: revalidateCommentStakeRole,
+        environment: {
+          DYNAMODB_TABLE_PREFIX: `drep-platform-${stage}-`,
+          CARDANO_NETWORK: stage === 'staging' ? 'preprod' : 'mainnet',
+        },
+        bundling: {
+          minify: true,
+          sourceMap: false,
+          target: 'es2022',
+          externalModules: ['@aws-sdk/*'],
+          forceDockerBundling: false,
+        },
+        depsLockFilePath: path.join(backendDir, 'package-lock.json'),
+      },
+    );
+
+    const revalidateCommentStakeRule = new events.Rule(
+      this,
+      'RevalidateCommentStakeRule',
+      {
+        ruleName: `drep-platform-${stage}-revalidate-comment-stake-sync`,
+        description:
+          'Triggers comment-vote stake re-validation sweep every 3 hours (Sybil defense)',
+        schedule: events.Schedule.rate(cdk.Duration.hours(3)),
+        enabled: true,
+      },
+    );
+
+    revalidateCommentStakeRule.addTarget(
+      new eventsTargets.LambdaFunction(this.revalidateCommentStakeFn, {
+        retryAttempts: 1,
+        maxEventAge: cdk.Duration.hours(2),
+      }),
+    );
+
+    new cdk.CfnOutput(this, 'RevalidateCommentStakeFnArn', {
+      value: this.revalidateCommentStakeFn.functionArn,
+      exportName: `${stage}-RevalidateCommentStakeFnArn`,
+    });
+
     // ---- CloudWatch alarms on sync Lambda errors (Batch F #20, 2026-05-27) ----
     //
     // One alarm per sync Lambda. Today if `governance-intake` or
@@ -464,5 +560,10 @@ export class SchedulerStack extends cdk.Stack {
     buildErrorsAlarm('PowerHistorySyncErrorsAlarm', this.powerHistorySyncFn, 'drep-power-history');
     buildErrorsAlarm('PoolMetadataSyncErrorsAlarm', this.poolMetadataSyncFn, 'pool-metadata');
     buildErrorsAlarm('CCMembersSyncErrorsAlarm', this.ccMembersSyncFn, 'cc-members');
+    buildErrorsAlarm(
+      'RevalidateCommentStakeErrorsAlarm',
+      this.revalidateCommentStakeFn,
+      'revalidate-comment-stake',
+    );
   }
 }

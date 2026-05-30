@@ -105,6 +105,12 @@ export class ApiStack extends cdk.Stack {
       databaseStack.governanceVotesTable,
       databaseStack.commentsTable,
       databaseStack.commentVotesTable,
+      // Comment-voter registry (Batch REVAL, 2026-05-29). Vote handlers
+      // upsert (`ADD voteCount :one SET lastKnownStake/lastCheckedAt`)
+      // on every successful vote-write so the 3-hourly stake re-validation
+      // sweep has an O(voters) enumeration target. Best-effort write
+      // — failure here must never fail the underlying vote mutation.
+      databaseStack.commentVotersTable,
       databaseStack.clubhousePostsTable,
       // Per-comment rows for the Clubhouse threading surface — the
       // P0-3 migration (2026-05-28) split comments off the post row.
