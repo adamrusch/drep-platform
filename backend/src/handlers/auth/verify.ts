@@ -11,7 +11,8 @@ import {
 import { getItem, putItem, tableNames } from '../../lib/dynamodb';
 import { _invalidateForStake } from '../../lib/recognition';
 import { writeAuditEvent } from '../../lib/audit';
-import type { UserItem, SessionType } from '../../lib/types';
+import type { UserItem, SessionType, UserRole } from '../../lib/types';
+import { isBootstrapAdmin } from '../../lib/platformAdmin';
 import { ok, badRequest, unauthorized, internalError } from '../_response';
 
 interface VerifyRequestBody {
@@ -80,7 +81,13 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
 
     // 4. Issue JWT
     const roles = existing?.roles as string[] | undefined;
-    const typedRoles = (roles ?? ['delegator']) as Array<'guest' | 'delegator' | 'committee_member' | 'lead_drep' | 'trusted_delegator'>;
+    const typedRoles: UserRole[] = (roles ?? ['delegator']) as UserRole[];
+    // Bootstrap platform admins: seed wallets become platform_admin at login so
+    // the role is in the JWT (and thus /auth/me + the FE nav). Persisted on the
+    // user row below so it survives even if the wallet later leaves the seed.
+    if (isBootstrapAdmin(walletAddress) && !typedRoles.includes('platform_admin')) {
+      typedRoles.push('platform_admin');
+    }
     const { token, expiresAt } = await issueJWT(walletAddress, typedRoles, sessionType, existing?.drepId as string | undefined);
 
     const userItem: UserItem = {
