@@ -18,10 +18,11 @@ const env: cdk.Environment = {
 };
 
 // ---- Custom domain configuration (drep.tools) ----
-// Per-stage: prod/dev → drep.tools, test → test.drep.tools (separate cookie
-// scope). The hosted zone and ACM certificates are managed manually outside
-// CDK to avoid destruction risk; CDK imports them by ID/ARN. The test cert can
-// be supplied via `--context testCertArn=arn:...` until it's the default.
+// Per-stage: prod → drep.tools, test → test.drep.tools (separate cookie scope),
+// dev → undefined (raw CloudFront/API URLs, no custom domain). The hosted zone
+// and ACM certificates are managed manually outside CDK to avoid destruction
+// risk; CDK imports them by ID/ARN. The test cert can be supplied via
+// `--context testCertArn=arn:...` until it's the default.
 const testCertArn = app.node.tryGetContext('testCertArn') as string | undefined;
 const customDomain = customDomainFor(stage, { testCertArn });
 

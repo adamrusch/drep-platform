@@ -7,8 +7,13 @@ import type { CustomDomainConfig } from './frontend-stack';
  * throwaway-policy production table.
  */
 
-/** All recognised deployment stages. Anything else is a typo. */
-export const STAGES = ['dev', 'test', 'staging', 'prod'] as const;
+/** All recognised deployment stages. Anything else is a typo.
+ *  Only `test` and `prod` have a real custom-domain config (see
+ *  `customDomainFor`); `dev` deploys on raw CloudFront/API-Gateway URLs. A
+ *  `staging` stage was removed — it shared prod's `drep.tools` domain config,
+ *  so `--context stage=staging` would have collided with prod's Route53/cookies.
+ *  Reintroduce it only alongside its own domain block. */
+export const STAGES = ['dev', 'test', 'prod'] as const;
 export type Stage = (typeof STAGES)[number];
 
 /** Throw early on an unknown stage so `--context stage=prdo` can't deploy. */
@@ -49,13 +54,16 @@ const ZONE_NAME = 'drep.tools';
 
 /**
  * Per-stage custom-domain config. `test` lives at test.drep.tools with its own
- * cookie scope so its sessions can never bleed onto prod. dev + prod are
- * behaviour-preserving — byte-identical to the pre-refactor hardcoded block.
+ * cookie scope so its sessions can never bleed onto prod; `prod` owns the apex
+ * drep.tools. `dev` (and any other stage) returns `undefined` — it deploys on
+ * the raw CloudFront/API-Gateway URLs with NO custom domain, so a dev deploy can
+ * never bind or shadow prod's drep.tools records. Both the API and frontend
+ * stacks treat `customDomain` as optional and guard every use.
  */
 export function customDomainFor(
   stage: string,
   opts: { testCertArn?: string } = {},
-): CustomDomainConfig {
+): CustomDomainConfig | undefined {
   if (stage === 'test') {
     return {
       hostedZoneId: HOSTED_ZONE_ID,
@@ -67,13 +75,16 @@ export function customDomainFor(
       cookieDomain: '.test.drep.tools',
     };
   }
-  return {
-    hostedZoneId: HOSTED_ZONE_ID,
-    zoneName: ZONE_NAME,
-    certificateArn: PROD_CERTIFICATE_ARN,
-    apexDomain: 'drep.tools',
-    wwwDomain: 'www.drep.tools',
-    apiDomain: 'api.drep.tools',
-    cookieDomain: '.drep.tools',
-  };
+  if (stage === 'prod') {
+    return {
+      hostedZoneId: HOSTED_ZONE_ID,
+      zoneName: ZONE_NAME,
+      certificateArn: PROD_CERTIFICATE_ARN,
+      apexDomain: 'drep.tools',
+      wwwDomain: 'www.drep.tools',
+      apiDomain: 'api.drep.tools',
+      cookieDomain: '.drep.tools',
+    };
+  }
+  return undefined;
 }
