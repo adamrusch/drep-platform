@@ -97,6 +97,10 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
       bio: existing?.bio,
       socialLinks: existing?.socialLinks,
       roles: typedRoles,
+      // Preserve the registered-DRep link across re-logins. Without this, the
+      // full-row putItem below drops drepId and unlinks the user from their
+      // committee (FE then shows them as a non-member).
+      drepId: existing?.drepId,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
       sessionTokenHash: hashValue(token),
