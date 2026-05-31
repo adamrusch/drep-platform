@@ -85,6 +85,10 @@ export class ApiStack extends cdk.Stack {
       BLOCKFROST_SECRET_NAME: `drep-platform/${stage}/blockfrost-api-key`,
       CORS_ORIGIN: primaryCorsOrigin,
       CORS_ALLOWED_ORIGINS: allowedOrigins.join(','),
+      // Break-glass seed for platform_admin (comma-separated wallets). Supply
+      // via `--context adminBootstrapWallets=addr1...,addr1...`. Empty by default.
+      ADMIN_BOOTSTRAP_WALLETS:
+        (this.node.tryGetContext('adminBootstrapWallets') as string | undefined) ?? '',
       // Per-stage cookie scope (e.g. `.test.drep.tools`) so a test session
       // cookie is never sent to prod's api.drep.tools, and vice versa.
       ...(customDomain ? { COOKIE_DOMAIN: customDomain.cookieDomain } : {}),
@@ -144,6 +148,22 @@ export class ApiStack extends cdk.Stack {
     // Grant Secrets Manager read
     jwtSecret.grantRead(lambdaRole);
     blockfrostSecret.grantRead(lambdaRole);
+
+    // Per-DRep IPFS keys (opt-in, encrypted). Handlers create/read/update
+    // secrets under drep-platform/{stage}/drep-ipfs/*. Scoped to that prefix.
+    lambdaRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'secretsmanager:CreateSecret',
+          'secretsmanager:PutSecretValue',
+          'secretsmanager:GetSecretValue',
+          'secretsmanager:DescribeSecret',
+        ],
+        resources: [
+          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:drep-platform/${stage}/drep-ipfs/*`,
+        ],
+      }),
+    );
 
     // ---- Common Lambda props ----
     const commonLambdaProps: Omit<lambdaNodejs.NodejsFunctionProps, 'entry'> = {
@@ -217,6 +237,13 @@ export class ApiStack extends cdk.Stack {
     const committeeHeartbeatRationaleFn = fn('CommitteeHeartbeatRationaleFn', 'handlers/committee/heartbeatRationale.ts');
     const committeeReleaseRationaleFn = fn('CommitteeReleaseRationaleFn', 'handlers/committee/releaseRationale.ts');
     const committeeFinalizeRationaleFn = fn('CommitteeFinalizeRationaleFn', 'handlers/committee/finalizeRationale.ts');
+    const committeeIpfsKeyFn = fn('CommitteeIpfsKeyFn', 'handlers/committee/ipfsKey.ts');
+    const committeePinRationaleFn = fn('CommitteePinRationaleFn', 'handlers/committee/pinRationale.ts');
+
+    // ---- Platform admin handlers (Phase 2) ----
+    const adminGetSafetyModeFn = fn('AdminGetSafetyModeFn', 'handlers/admin/getSafetyMode.ts');
+    const adminClearSafetyModeFn = fn('AdminClearSafetyModeFn', 'handlers/admin/clearSafetyMode.ts');
+    const adminSetRoleFn = fn('AdminSetRoleFn', 'handlers/admin/setRole.ts');
 
     // ---- DRep directory handlers (chain-state read; /dreps routes) ----
     // The directory is the global registry of mainnet DReps with their
@@ -429,6 +456,15 @@ export class ApiStack extends cdk.Stack {
     addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/votes/{actionId}/rationale/lock/heartbeat', committeeHeartbeatRationaleFn, 'CommitteeHeartbeatRationale', true);
     addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/votes/{actionId}/rationale/lock/release', committeeReleaseRationaleFn, 'CommitteeReleaseRationale', true);
     addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/votes/{actionId}/rationale/finalize', committeeFinalizeRationaleFn, 'CommitteeFinalizeRationale', true);
+    addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/votes/{actionId}/rationale/pin', committeePinRationaleFn, 'CommitteePinRationale', true);
+    addRoute(apigwv2.HttpMethod.GET, '/committee/{drepId}/ipfs-key', committeeIpfsKeyFn, 'CommitteeIpfsKeyGet', true);
+    addRoute(apigwv2.HttpMethod.PUT, '/committee/{drepId}/ipfs-key', committeeIpfsKeyFn, 'CommitteeIpfsKeyPut', true);
+
+    // ---- Platform admin routes (Phase 2) ----
+    addRoute(apigwv2.HttpMethod.GET, '/admin/safety-mode', adminGetSafetyModeFn, 'AdminGetSafetyMode', true);
+    addRoute(apigwv2.HttpMethod.POST, '/admin/safety-mode/clear', adminClearSafetyModeFn, 'AdminClearSafetyMode', true);
+    addRoute(apigwv2.HttpMethod.POST, '/admin/roles/{walletAddress}', adminSetRoleFn, 'AdminGrantRole', true);
+    addRoute(apigwv2.HttpMethod.DELETE, '/admin/roles/{walletAddress}', adminSetRoleFn, 'AdminRevokeRole', true);
 
     // ---- DRep directory routes (chain-state) ----
     addRoute(apigwv2.HttpMethod.GET, '/dreps', drepDirectoryListFn, 'DRepDirectoryList');
