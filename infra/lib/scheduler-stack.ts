@@ -25,6 +25,7 @@ export class SchedulerStack extends cdk.Stack {
   public readonly poolMetadataSyncFn: lambdaNodejs.NodejsFunction;
   public readonly ccMembersSyncFn: lambdaNodejs.NodejsFunction;
   public readonly revalidateCommentStakeFn: lambdaNodejs.NodejsFunction;
+  public readonly committeeEpochSweepFn: lambdaNodejs.NodejsFunction;
 
   constructor(scope: Construct, id: string, props: SchedulerStackProps) {
     super(scope, id, props);
@@ -493,6 +494,68 @@ export class SchedulerStack extends cdk.Stack {
       exportName: `${stage}-RevalidateCommentStakeFnArn`,
     });
 
+    // ---- Committee epoch-deadline sweep (Phase 2) ----
+    // Hourly finalize of open committee proposals whose action's voting window
+    // has closed (epoch deadline passed or GA terminal). Koios `/tip` only —
+    // no Blockfrost secret needed, but we grant it for the fallback path.
+    const committeeEpochSweepRole = new iam.Role(this, 'CommitteeEpochSweepRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+      ],
+    });
+    databaseStack.committeeVotesTable.grantReadWriteData(committeeEpochSweepRole);
+    databaseStack.governanceActionsTable.grantReadData(committeeEpochSweepRole);
+    databaseStack.auditLogTable.grantReadWriteData(committeeEpochSweepRole);
+    blockfrostSecret.grantRead(committeeEpochSweepRole);
+
+    this.committeeEpochSweepFn = new lambdaNodejs.NodejsFunction(this, 'CommitteeEpochSweepFn', {
+      functionName: `drep-platform-${stage}-committee-epoch-sweep`,
+      entry: path.join(backendDir, 'src/sync/committee-epoch-sweep.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      memorySize: 512,
+      timeout: cdk.Duration.minutes(2),
+      role: committeeEpochSweepRole,
+      environment: {
+        DYNAMODB_TABLE_PREFIX: `drep-platform-${stage}-`,
+        CARDANO_NETWORK: stage === 'staging' ? 'preprod' : 'mainnet',
+        BLOCKFROST_BASE_URL:
+          stage === 'staging'
+            ? 'https://cardano-preprod.blockfrost.io/api/v0'
+            : 'https://cardano-mainnet.blockfrost.io/api/v0',
+        BLOCKFROST_SECRET_NAME: `drep-platform/${stage}/blockfrost-api-key`,
+      },
+      bundling: {
+        minify: true,
+        sourceMap: false,
+        target: 'es2022',
+        externalModules: ['@aws-sdk/*'],
+        nodeModules: ['@emurgo/cardano-serialization-lib-nodejs', 'blake2b'],
+        forceDockerBundling: false,
+      },
+      depsLockFilePath: path.join(backendDir, 'package-lock.json'),
+    });
+
+    const committeeEpochSweepRule = new events.Rule(this, 'CommitteeEpochSweepRule', {
+      ruleName: `drep-platform-${stage}-committee-epoch-sweep`,
+      description: 'Finalizes open committee proposals past their voting deadline (hourly)',
+      schedule: events.Schedule.rate(cdk.Duration.hours(1)),
+      enabled: true,
+    });
+    committeeEpochSweepRule.addTarget(
+      new eventsTargets.LambdaFunction(this.committeeEpochSweepFn, {
+        retryAttempts: 1,
+        maxEventAge: cdk.Duration.hours(2),
+      }),
+    );
+
+    new cdk.CfnOutput(this, 'CommitteeEpochSweepFnArn', {
+      value: this.committeeEpochSweepFn.functionArn,
+      exportName: `${stage}-CommitteeEpochSweepFnArn`,
+    });
+
     // ---- CloudWatch alarms on sync Lambda errors (Batch F #20, 2026-05-27) ----
     //
     // One alarm per sync Lambda. Today if `governance-intake` or
@@ -584,5 +647,6 @@ export class SchedulerStack extends cdk.Stack {
       this.revalidateCommentStakeFn,
       'revalidate-comment-stake',
     );
+    buildErrorsAlarm('CommitteeEpochSweepErrorsAlarm', this.committeeEpochSweepFn, 'committee-epoch-sweep');
   }
 }
