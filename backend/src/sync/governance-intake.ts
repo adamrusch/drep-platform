@@ -227,8 +227,30 @@ const ITEM_CONCURRENCY = 4;
  *       `cd7bccf0e4` still has the right bytes.
  * Bumping the version forces all rows to re-run cold enrichment so the
  * new recovery paths land on the next sync.
+ *
+ * v13 → v14: anchorless-row self-heal. A row whose FIRST cold enrichment
+ *       missed the on-chain anchor pointer (Koios down that cycle, or it
+ *       returned a transient null `meta_url`) was locked into
+ *       `metadataSource='none'` forever: active proposals get frequent
+ *       warm-path vote updates that bump `lastSyncedAt`, so the 24h
+ *       freshness window never elapsed and the cold path never re-ran.
+ *       The UI then shows "(No off-chain metadata)" for a GA that DOES have
+ *       an anchor on-chain. Fix: `isEnrichmentFresh` now forces re-enrichment
+ *       of anchorless ACTIVE proposals on a short (1h) cadence until the
+ *       anchor resolves. The version bump also backfills every existing row
+ *       once on the next sync.
  */
-const ENRICHMENT_VERSION = 13;
+const ENRICHMENT_VERSION = 14;
+
+/**
+ * Shorter re-enrichment cadence for ACTIVE proposals that still have no
+ * off-chain anchor captured. Lets a row that missed its anchor on the first
+ * (or a transiently-degraded) cold pass keep retrying until Koios serves the
+ * `meta_url`, instead of being frozen by the 24h window that warm-path vote
+ * updates keep alive. Bounded to anchorless active rows, so genuinely
+ * anchor-free or completed proposals don't churn.
+ */
+const ENRICHMENT_ANCHORLESS_RETRY_MS = 60 * 60 * 1000; // 1 hour
 
 /**
  * Deep equality on two governance action rows, ignoring the volatile
@@ -274,6 +296,20 @@ function isEnrichmentFresh(existing: GovernanceActionItem | undefined, now: numb
   const lastSync = existing.lastSyncedAt
     ? new Date(existing.lastSyncedAt as string).getTime()
     : 0;
+
+  // Anchorless ACTIVE proposals: an earlier cold pass failed to capture the
+  // off-chain anchor pointer (no anchorUrl AND metadataSource 'none'). Because
+  // active proposals get frequent warm-path vote updates that refresh
+  // `lastSyncedAt`, the normal 24h window would never elapse and the row would
+  // stay "(No off-chain metadata)" permanently even though the anchor is on
+  // chain. Retry these on a short cadence until the anchor resolves. Scoped to
+  // active rows so genuinely anchor-free or completed proposals don't churn.
+  const metadataSource = (existing['metadataSource'] as string | undefined) ?? 'none';
+  const anchorMissing = metadataSource === 'none' && !existing['anchorUrl'];
+  if (anchorMissing && existing['status'] === 'active') {
+    return now - lastSync < ENRICHMENT_ANCHORLESS_RETRY_MS;
+  }
+
   return now - lastSync < ENRICHMENT_TTL_MS;
 }
 
@@ -608,10 +644,15 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
           // On a quiet cycle (no status churn, votes identical) this used
           // to write all ~109 rows every minute = ~66k WCU/hr. Now we only
           // write when something a downstream reader actually cares about
-          // changed. `lastSyncedAt` is no longer load-bearing for the
-          // enrichment-fresh check on the hot path: the freshness window
-          // is governed by `ENRICHMENT_VERSION` matching, and the cold
-          // path resets the timestamp the next time it runs anyway.
+          // changed.
+          //
+          // NOTE: `lastSyncedAt` IS load-bearing for `isEnrichmentFresh` (it
+          // gates the 24h window). When votes/status DO change, the Put below
+          // bumps `lastSyncedAt`, which keeps an active proposal's freshness
+          // window alive indefinitely — so a row that was cold-enriched once
+          // with a missing anchor never re-enriches on the normal path. The
+          // anchorless-active short-retry branch in `isEnrichmentFresh` is the
+          // escape hatch that lets those rows self-heal.
           if (governanceItemsEqualIgnoringSync(existing as GovernanceActionItem, updated)) {
             result.skipped++;
             // Record the transition pair even on no-op cycles — if the
