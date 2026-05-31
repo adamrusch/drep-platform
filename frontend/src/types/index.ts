@@ -400,6 +400,12 @@ export interface UserProfile {
    * this wallet back?" use `delegatedToDrepId`, NOT this field.
    */
   drepId?: string;
+  /** True when this wallet is a registered DRep (leads a committee). */
+  isDRep?: boolean;
+  /** The DRep's on-chain name, when isDRep. */
+  drepName?: string;
+  /** Effective display name (profile name → DRep name) computed server-side. */
+  resolvedDisplayName?: string;
   /**
    * Live on-chain delegation: the DRep this wallet's stake currently
    * delegates voting power to. Read live by `/auth/me` from Koios
