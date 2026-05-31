@@ -90,6 +90,24 @@ const ClubhouseLanding = lazy(() =>
 const DRepDirectoryPage = lazy(() =>
   import('@/pages/DRepDirectoryPage').then((m) => ({ default: m.DRepDirectoryPage })),
 );
+const CommitteeLanding = lazy(() =>
+  import('@/pages/CommitteeLanding').then((m) => ({ default: m.CommitteeLanding })),
+);
+const CommitteeVoteList = lazy(() =>
+  import('@/pages/CommitteeVoteList').then((m) => ({ default: m.CommitteeVoteList })),
+);
+const CommitteeVoteRoom = lazy(() =>
+  import('@/pages/CommitteeVoteRoom').then((m) => ({ default: m.CommitteeVoteRoom })),
+);
+const RationaleEditorPage = lazy(() =>
+  import('@/pages/RationaleEditorPage').then((m) => ({ default: m.RationaleEditorPage })),
+);
+const RationalesPage = lazy(() =>
+  import('@/pages/RationalesPage').then((m) => ({ default: m.RationalesPage })),
+);
+const AdminPanel = lazy(() =>
+  import('@/pages/AdminPanel').then((m) => ({ default: m.AdminPanel })),
+);
 
 /**
  * Suspense fallback rendered while a lazy page chunk is fetching.
@@ -244,25 +262,27 @@ function App(): React.ReactElement {
                     route picks the right DRep clubhouse for the signed-in
                     user (or shows a Discover CTA for guests). */}
                 <Route path="/clubhouse" element={<ClubhouseLanding />} />
+                {/* DRep committees — order matters: most specific first. */}
                 <Route
-                  path="/committee"
+                  path="/committee/:drepId/votes/:actionId/rationale"
+                  element={<RationaleEditorPage />}
+                />
+                <Route
+                  path="/committee/:drepId/votes/:actionId"
+                  element={<CommitteeVoteRoom />}
+                />
+                <Route path="/committee/:drepId" element={<CommitteeVoteList />} />
+                <Route path="/committee" element={<CommitteeLanding />} />
+                <Route
+                  path="/admin"
                   element={
-                    <ComingSoon
-                      title="DRep Committees"
-                      description="Coordination committees for DReps and their trusted delegators — committee membership, lead-DRep roles, and cross-DRep collaboration. Coming soon."
-                    />
+                    <RoleGuard requiredRoles={['platform_admin']} redirectTo="/">
+                      <AdminPanel />
+                    </RoleGuard>
                   }
                 />
                 <Route path="/dreps" element={<DRepDirectoryPage />} />
-                <Route
-                  path="/rationales"
-                  element={
-                    <ComingSoon
-                      title="Rationales"
-                      description="Browse vote rationales from active DReps and committee members. Coming soon."
-                    />
-                  }
-                />
+                <Route path="/rationales" element={<RationalesPage />} />
                 <Route
                   path="/notifications"
                   element={
