@@ -12,6 +12,8 @@ import {
 } from '@/hooks/useCommitteeVotes';
 import { VoteTallyDonut } from '@/components/committee/VoteTallyDonut';
 import { CastVotePanel } from '@/components/committee/CastVotePanel';
+import { SubmitVotePanel } from '@/components/committee/SubmitVotePanel';
+import { isTestStage } from '@/lib/stage';
 
 function shortWallet(w: string): string {
   return w.length > 16 ? `${w.slice(0, 10)}…${w.slice(-6)}` : w;
@@ -51,6 +53,11 @@ export function CommitteeVoteRoom(): React.ReactElement {
 
   return (
     <div className="space-y-4">
+      {isTestStage() && (
+        <div className="rounded-token-md border border-[var(--border-strong)] bg-[var(--bg-muted)] px-3 py-2 text-[12.5px] text-[var(--text-secondary)]">
+          <strong className="text-[var(--text-primary)]">TEST environment</strong> — connected to mainnet for read-only validation. On-chain vote submission is disabled here; votes must be submitted from production.
+        </div>
+      )}
       <div className="flex items-center justify-between">
         <Link to={`/committee/${encodeURIComponent(drepId)}`} className="text-[13px] text-[var(--brand-primary)] hover:underline">
           ← Committee proposals
@@ -119,6 +126,10 @@ export function CommitteeVoteRoom(): React.ReactElement {
             </p>
           </CardContent>
         </Card>
+      )}
+
+      {proposal.status === 'passed' && isMember && (
+        <SubmitVotePanel drepId={drepId} actionId={actionId} />
       )}
 
       <Card>
