@@ -24,6 +24,21 @@ export function useRegisterCommittee() {
   });
 }
 
+/** Link the connected wallet to its on-chain DRep (no committee required) so the
+ *  user is recognized as a DRep across the platform. CIP-95 key (proves control)
+ *  or pasted drep id (verified registered). */
+export function useLinkDrep() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { drepKey?: string; drepId?: string }) =>
+      post<{ drepId: string; drepName?: string }>('/drep/link', vars),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['auth', 'me'] });
+      void qc.invalidateQueries({ queryKey: ['profile'] });
+    },
+  });
+}
+
 export function useAddCommitteeMember(drepId: string) {
   const sign = useMutationSign();
   const wallet = useAuthStore((s) => s.walletAddress);
