@@ -6,6 +6,7 @@ import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as route53Targets from 'aws-cdk-lib/aws-route53-targets';
 import { Construct } from 'constructs';
+import { isPersistent } from './stage';
 
 export interface CustomDomainConfig {
   hostedZoneId: string;
@@ -14,6 +15,9 @@ export interface CustomDomainConfig {
   apexDomain: string;
   wwwDomain: string;
   apiDomain: string;
+  /** Cookie Domain attribute for session cookies. Scoped per stage (e.g.
+   *  `.test.drep.tools`) so a test session cookie can never be sent to prod. */
+  cookieDomain: string;
 }
 
 export interface FrontendStackProps extends cdk.StackProps {
@@ -36,9 +40,9 @@ export class FrontendStack extends cdk.Stack {
       bucketName: `drep-platform-${stage}-frontend-${this.account}`,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       websiteIndexDocument: undefined, // OAC, not website hosting
-      removalPolicy: stage === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: stage !== 'prod',
-      versioned: stage === 'prod',
+      removalPolicy: isPersistent(stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: !isPersistent(stage),
+      versioned: isPersistent(stage),
       encryption: s3.BucketEncryption.S3_MANAGED,
     });
 
