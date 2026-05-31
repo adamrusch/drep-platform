@@ -12,8 +12,15 @@ import type {
   CommitteeVoteCastItem,
   CommitteeProposalStatus,
   CommitteeTallySnapshot,
+  CommitteeRationaleDraftItem,
+  CommitteeRationaleLockItem,
+  CommitteeRationaleFinalItem,
+  RationaleMode,
   GovernanceActionItem,
 } from '../../lib/types';
+
+/** A collaborative edit lock auto-expires after 20 min of no heartbeat. */
+export const RATIONALE_LOCK_TTL_SEC = 20 * 60;
 
 /** The deploy stage, embedded in committee signed messages (see
  *  lib/committeeMessages.ts). Defaults to 'dev' for local/test runs. */
@@ -128,6 +135,85 @@ export function signatureSnapshot(
 
 export function voteScopeOf(drepId: string, actionId: string): string {
   return `${drepId}#${actionId}`;
+}
+
+export async function loadRationaleDraft(
+  voteScope: string,
+): Promise<CommitteeRationaleDraftItem | undefined> {
+  return getItem<CommitteeRationaleDraftItem>(tableNames.committeeVotes, {
+    voteScope, itemKey: 'RATIONALE#DRAFT',
+  });
+}
+
+export async function loadRationaleLock(
+  voteScope: string,
+): Promise<CommitteeRationaleLockItem | undefined> {
+  return getItem<CommitteeRationaleLockItem>(tableNames.committeeVotes, {
+    voteScope, itemKey: 'RATIONALE#LOCK',
+  });
+}
+
+export async function loadRationaleFinal(
+  voteScope: string,
+): Promise<CommitteeRationaleFinalItem | undefined> {
+  return getItem<CommitteeRationaleFinalItem>(tableNames.committeeVotes, {
+    voteScope, itemKey: 'RATIONALE#FINAL',
+  });
+}
+
+export function isLockHeldBy(
+  lock: CommitteeRationaleLockItem | undefined,
+  wallet: string,
+  nowSec: number,
+): boolean {
+  return Boolean(lock && lock.editorWallet === wallet && lock.expiresAt > nowSec);
+}
+
+export function isLockActive(
+  lock: CommitteeRationaleLockItem | undefined,
+  nowSec: number,
+): boolean {
+  return Boolean(lock && lock.expiresAt > nowSec);
+}
+
+/**
+ * Mode-aware rationale edit authorization. Returns null when allowed, or a
+ * { code, message } describing the rejection.
+ *   - 'lead'         → only the lead may edit.
+ *   - 'assigned'     → the assigned editor (or the lead) may edit.
+ *   - 'collaborative'→ any member may edit, but only while holding the lock.
+ */
+export function checkRationaleEditAuth(
+  walletAddress: string,
+  committee: DRepCommitteeItem,
+  mode: RationaleMode,
+  assignedEditor: string | undefined,
+  lock: CommitteeRationaleLockItem | undefined,
+  nowSec: number,
+): { code: 403 | 409; message: string } | null {
+  const isLead = committee.leadWallet === walletAddress;
+  const isMember = isLead || (committee.members?.some((m) => m.walletAddress === walletAddress) ?? false);
+  if (!isMember) return { code: 403, message: 'You are not a member of this committee' };
+
+  if (mode === 'lead') {
+    return isLead ? null : { code: 403, message: 'Only the lead DRep may edit this rationale' };
+  }
+  if (mode === 'assigned') {
+    return isLead || walletAddress === assignedEditor
+      ? null
+      : { code: 403, message: 'Only the assigned editor or the lead DRep may edit this rationale' };
+  }
+  // collaborative
+  if (!isLockHeldBy(lock, walletAddress, nowSec)) {
+    const holder = isLockActive(lock, nowSec) ? lock?.editorWallet : undefined;
+    return {
+      code: 409,
+      message: holder
+        ? `${holder} is currently editing this rationale. Try again when they're done.`
+        : 'Open the rationale for editing first (acquire the edit lock).',
+    };
+  }
+  return null;
 }
 
 export async function loadGovernanceAction(
