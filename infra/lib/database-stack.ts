@@ -22,6 +22,10 @@ export class DatabaseStack extends cdk.Stack {
   public readonly ccMembersTable: dynamodb.Table;
   public readonly auditLogTable: dynamodb.Table;
   public readonly authNoncesTable: dynamodb.Table;
+  // ---- Phase 2: committee voting ----
+  public readonly committeeVotesTable: dynamodb.Table;
+  public readonly committeeMembershipTable: dynamodb.Table;
+  public readonly platformStateTable: dynamodb.Table;
 
   private readonly tablePrefix: string;
 
@@ -546,6 +550,70 @@ export class DatabaseStack extends cdk.Stack {
       removalPolicy: isPersistent(props.stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
+    // ---- committee_votes (Phase 2) ----
+    // One partition per (committee, governance action): PK=`${drepId}#${actionId}`.
+    // Co-locates the single proposal, every member's latest cast, the rationale
+    // draft/lock/final, and the on-chain submission receipt under one voteScope,
+    // so the vote-room read is a single Query. SK alphabet:
+    //   'PROPOSAL'              — the one proposal (putItemIfAbsent → 409 = one-at-a-time)
+    //   'CAST#<wallet>'         — latest cast per voter (carries the CIP-30 signature)
+    //   'RATIONALE#DRAFT'       — collaborative draft
+    //   'RATIONALE#LOCK'        — pessimistic edit lock {editorWallet, expiresAt}
+    //   'RATIONALE#FINAL'       — locked rationale + canonical anchor hash + IPFS URI
+    //   'SUBMISSION'            — on-chain receipt {txHash, broadcastStage}
+    //   'COSIGN#<wallet>'       — reserved for future multisig (additive)
+    this.committeeVotesTable = new dynamodb.Table(this, 'CommitteeVotesTable', {
+      tableName: `${this.tablePrefix}committee_votes`,
+      partitionKey: { name: 'voteScope', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'itemKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: isPersistent(props.stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
+    // Sparse index of OPEN proposals only. `statusPartition` ('OPEN') is set
+    // exclusively on the PROPOSAL row while status==='open' and REMOVED on any
+    // terminal transition, so the index naturally shrinks to live proposals.
+    // Drives the "all open proposals" admin view and the hourly deadline sweep
+    // (Query by statusPartition, range on epochDeadline). Mirrors the
+    // lastVoted-index sparse pattern on drep_directory.
+    this.committeeVotesTable.addGlobalSecondaryIndex({
+      indexName: 'open-epochDeadline-index',
+      partitionKey: { name: 'statusPartition', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'epochDeadline', type: dynamodb.AttributeType.NUMBER },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    // ---- committee_membership (Phase 2) ----
+    // Enforces "one committee per wallet, total" (lead OR member). PK=walletAddress
+    // with a conditional Put (attribute_not_exists) makes the uniqueness atomic
+    // across register / add-member. drepId-index lists/cleans a committee's
+    // membership rows on teardown.
+    this.committeeMembershipTable = new dynamodb.Table(this, 'CommitteeMembershipTable', {
+      tableName: `${this.tablePrefix}committee_membership`,
+      partitionKey: { name: 'walletAddress', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: isPersistent(props.stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+    this.committeeMembershipTable.addGlobalSecondaryIndex({
+      indexName: 'drepId-index',
+      partitionKey: { name: 'drepId', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    // ---- platform_state (Phase 2) ----
+    // Tiny singleton-row table for platform-wide flags. Today: the Sybil
+    // safety-mode latch (PK stateKey='SAFETY_MODE' → {active, triggeredAt,
+    // expiresAt, clearedBy}). PITR on; no GSI.
+    this.platformStateTable = new dynamodb.Table(this, 'PlatformStateTable', {
+      tableName: `${this.tablePrefix}platform_state`,
+      partitionKey: { name: 'stateKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: isPersistent(props.stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
     // ---- Outputs ----
     new cdk.CfnOutput(this, 'UsersTableName', { value: this.usersTable.tableName, exportName: `${props.stage}-UsersTableName` });
     new cdk.CfnOutput(this, 'DRepCommitteesTableName', { value: this.drepCommitteesTable.tableName, exportName: `${props.stage}-DRepCommitteesTableName` });
@@ -561,5 +629,8 @@ export class DatabaseStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'CCMembersTableName', { value: this.ccMembersTable.tableName, exportName: `${props.stage}-CCMembersTableName` });
     new cdk.CfnOutput(this, 'AuditLogTableName', { value: this.auditLogTable.tableName, exportName: `${props.stage}-AuditLogTableName` });
     new cdk.CfnOutput(this, 'AuthNoncesTableName', { value: this.authNoncesTable.tableName, exportName: `${props.stage}-AuthNoncesTableName` });
+    new cdk.CfnOutput(this, 'CommitteeVotesTableName', { value: this.committeeVotesTable.tableName, exportName: `${props.stage}-CommitteeVotesTableName` });
+    new cdk.CfnOutput(this, 'CommitteeMembershipTableName', { value: this.committeeMembershipTable.tableName, exportName: `${props.stage}-CommitteeMembershipTableName` });
+    new cdk.CfnOutput(this, 'PlatformStateTableName', { value: this.platformStateTable.tableName, exportName: `${props.stage}-PlatformStateTableName` });
   }
 }
