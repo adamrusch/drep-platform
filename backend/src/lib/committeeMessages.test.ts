@@ -25,6 +25,20 @@ describe('committeeMessages (golden — issuer and verifier must agree byte-for-
     );
   });
 
+  it('submit-receipt message binds the txHash', () => {
+    expect(committeeMessages.submitReceipt('prod', 'drep1', 'act#0', 'abc123', N, W)).toBe(
+      'drep-platform committee submit-receipt [v1] (stage=prod):\n\n' +
+        `Wallet: ${W}\nCommittee: drep1\nAction: act#0\nTxHash: abc123\nNonce: ${N}`,
+    );
+  });
+
+  it('ipfs-key message binds the committee', () => {
+    expect(committeeMessages.ipfsKey('test', 'drep1', N, W)).toBe(
+      'drep-platform committee ipfs-key [v1] (stage=test):\n\n' +
+        `Wallet: ${W}\nCommittee: drep1\nNonce: ${N}`,
+    );
+  });
+
   it('embeds the stage so a test signature cannot verify on prod', () => {
     const onTest = committeeMessages.cast('test', 'd', 'a', 'Agree', N, W);
     const onProd = committeeMessages.cast('prod', 'd', 'a', 'Agree', N, W);
