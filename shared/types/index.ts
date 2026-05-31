@@ -8,7 +8,8 @@ export type UserRole =
   | 'delegator'
   | 'committee_member'
   | 'lead_drep'
-  | 'trusted_delegator';
+  | 'trusted_delegator'
+  | 'platform_admin';
 
 export type GovernanceActionType =
   | 'ParameterChange'

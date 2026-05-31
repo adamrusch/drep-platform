@@ -847,6 +847,10 @@ export interface CommitteeSubmissionItem {
   position: CommitteePosition;
   anchorHash?: string;
   anchorUrl?: string;
+  /** Snapshot of the finalized canonical CIP-100/108 bytes that hash to
+   *  `anchorHash`. Frozen here so the submission record verifies against the
+   *  on-chain anchor independently of the (now-locked) RATIONALE#FINAL row. */
+  canonicalJson?: string;
   txHash: string;
   broadcastStage: string; // 'prod' — test never broadcasts
   submittedBy: string;
