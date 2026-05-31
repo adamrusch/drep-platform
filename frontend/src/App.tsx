@@ -87,6 +87,9 @@ const ComingSoon = lazy(() =>
 const ClubhouseLanding = lazy(() =>
   import('@/pages/ClubhouseLanding').then((m) => ({ default: m.ClubhouseLanding })),
 );
+const CommitteeVoteRoom = lazy(() =>
+  import('@/pages/CommitteeVoteRoom').then((m) => ({ default: m.CommitteeVoteRoom })),
+);
 const DRepDirectoryPage = lazy(() =>
   import('@/pages/DRepDirectoryPage').then((m) => ({ default: m.DRepDirectoryPage })),
 );
@@ -244,6 +247,10 @@ function App(): React.ReactElement {
                     route picks the right DRep clubhouse for the signed-in
                     user (or shows a Discover CTA for guests). */}
                 <Route path="/clubhouse" element={<ClubhouseLanding />} />
+                <Route
+                  path="/committee/:drepId/votes/:actionId"
+                  element={<CommitteeVoteRoom />}
+                />
                 <Route
                   path="/committee"
                   element={
