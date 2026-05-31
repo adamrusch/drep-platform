@@ -1,9 +1,10 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { get } from '@/lib/api';
 import { formatRelativeTime, formatWalletAddress } from '@/lib/utils';
-import type { UserProfile } from '@/types';
+import { useDelegationHistory } from '@/hooks/useDelegationHistory';
+import type { UserProfile, DelegationRecord } from '@/types';
 
 /**
  * Public profile page for any wallet address.
@@ -147,49 +148,147 @@ export function PublicProfilePage(): React.ReactElement {
         </section>
       )}
 
-      {/* Delegation history */}
-      {profile.delegationHistory && profile.delegationHistory.length > 0 && (
-        <section className="card">
-          <div className="card__header">
-            <h2 className="card__title">Delegation History</h2>
-          </div>
-          <div className="card__body">
-            <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-              {profile.delegationHistory.map((record, idx) => (
-                <li
-                  key={`${record.drepId}-${record.epochStart}-${idx}`}
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    padding: 'var(--s-3) 0',
-                    borderBottom:
-                      idx < (profile.delegationHistory?.length ?? 0) - 1
-                        ? '1px solid var(--border-subtle)'
-                        : 'none',
-                  }}
-                >
-                  <div>
-                    <Link
-                      to={`/drep/${record.drepId}`}
-                      className="text-sm font-medium hover:underline"
-                    >
-                      {record.drepName ?? formatWalletAddress(record.drepId, 10)}
-                    </Link>
-                    <div className="text-xs text-muted-foreground">
-                      Epoch {record.epochStart}
-                      {record.epochEnd ? ` – ${record.epochEnd}` : ' – present'}
-                    </div>
-                  </div>
-                  <span className="text-xs text-muted-foreground">
-                    {formatRelativeTime(record.delegatedAt)}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        </section>
-      )}
+      {/* Delegation history — lazy-loaded via /profile/{wallet}/delegation-history.
+       *  Renders the live on-chain delegation (currentDrepId) above the stored
+       *  history list. The disclosure stays collapsed by default; the query
+       *  only fires when expanded. */}
+      <DelegationHistorySection walletAddress={profile.walletAddress} />
     </div>
+  );
+}
+
+/** Lazy-loaded delegation-history disclosure. Defers the network call until
+ *  the user expands the `<details>` so the public profile stays cheap. */
+function DelegationHistorySection({
+  walletAddress,
+}: {
+  walletAddress: string;
+}): React.ReactElement {
+  const [open, setOpen] = useState(false);
+  const { data, isLoading, isError, error } = useDelegationHistory(walletAddress, {
+    enabled: open,
+  });
+
+  const records: DelegationRecord[] = React.useMemo(() => {
+    if (!data?.delegationHistory) return [];
+    // Sort newest-first by delegatedAt; tolerate missing/invalid dates by
+    // pushing them to the end deterministically.
+    return [...data.delegationHistory].sort((a, b) => {
+      const ta = Date.parse(a.delegatedAt);
+      const tb = Date.parse(b.delegatedAt);
+      if (Number.isNaN(ta) && Number.isNaN(tb)) return 0;
+      if (Number.isNaN(ta)) return 1;
+      if (Number.isNaN(tb)) return -1;
+      return tb - ta;
+    });
+  }, [data]);
+
+  return (
+    <section className="card">
+      <details
+        open={open}
+        onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
+      >
+        <summary
+          className="card__header"
+          style={{ cursor: 'pointer', listStyle: 'none' }}
+        >
+          <h2 className="card__title">Delegation history</h2>
+          <span
+            aria-hidden
+            className="text-xs"
+            style={{ color: 'var(--text-secondary)' }}
+          >
+            {open ? 'Hide' : 'Show'}
+          </span>
+        </summary>
+        <div className="card__body">
+          {isLoading && (
+            <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>
+              Loading delegation history…
+            </p>
+          )}
+          {isError && (
+            <p className="text-sm" style={{ color: 'var(--danger)' }}>
+              Could not load delegation history.
+              {(error as { message?: string } | null)?.message
+                ? ` ${(error as { message?: string }).message}`
+                : ''}
+            </p>
+          )}
+          {!isLoading && !isError && data && (
+            <>
+              {/* Live on-chain delegation — distinct from the stored history. */}
+              <p
+                className="text-sm"
+                style={{
+                  marginBottom: 'var(--s-3)',
+                  color: 'var(--text-primary)',
+                }}
+              >
+                {data.currentDrepId ? (
+                  <>
+                    Currently delegating to:{' '}
+                    <Link
+                      to={`/drep/${encodeURIComponent(data.currentDrepId)}`}
+                      className="font-mono hover:underline"
+                      style={{ color: 'var(--brand-primary)' }}
+                    >
+                      {formatWalletAddress(data.currentDrepId, 10)}
+                    </Link>
+                  </>
+                ) : (
+                  <span style={{ color: 'var(--text-secondary)' }}>
+                    No current delegation found.
+                  </span>
+                )}
+              </p>
+              {records.length === 0 ? (
+                <p
+                  className="text-sm"
+                  style={{ color: 'var(--text-secondary)' }}
+                >
+                  No prior delegation records.
+                </p>
+              ) : (
+                <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                  {records.map((record, idx) => (
+                    <li
+                      key={`${record.drepId}-${record.epochStart}-${idx}`}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        padding: 'var(--s-3) 0',
+                        borderBottom:
+                          idx < records.length - 1
+                            ? '1px solid var(--border-subtle)'
+                            : 'none',
+                      }}
+                    >
+                      <div>
+                        <Link
+                          to={`/drep/${encodeURIComponent(record.drepId)}`}
+                          className="text-sm font-medium hover:underline"
+                        >
+                          {record.drepName ?? formatWalletAddress(record.drepId, 10)}
+                        </Link>
+                        <div className="text-xs text-muted-foreground">
+                          Epoch {record.epochStart}
+                          {record.epochEnd ? ` – ${record.epochEnd}` : ' – present'}
+                        </div>
+                      </div>
+                      <span className="text-xs text-muted-foreground">
+                        {formatRelativeTime(record.delegatedAt)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          )}
+        </div>
+      </details>
+    </section>
   );
 }
