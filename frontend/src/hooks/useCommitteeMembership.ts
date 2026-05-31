@@ -13,8 +13,14 @@ const enc = encodeURIComponent;
  *  re-login. Returns the created committee (incl. its generated drepId). */
 export function useRegisterCommittee() {
   return useMutation({
-    mutationFn: (vars: { committeeName: string; description: string }) =>
-      post<{ drepId: string; committeeName: string }>('/drep', vars),
+    mutationFn: (vars: {
+      committeeName: string;
+      description: string;
+      /** CIP-95 DRep public key (hex) — backend derives + proves the drep id. */
+      drepKey?: string;
+      /** Or a pasted registered drep id (verified registered on-chain). */
+      drepId?: string;
+    }) => post<{ drepId: string; committeeName: string }>('/drep', vars),
   });
 }
 
