@@ -76,7 +76,12 @@ export async function put<T>(url: string, body?: unknown): Promise<T> {
   return response.data.data;
 }
 
-export async function del<T = void>(url: string): Promise<T> {
-  const response = await apiClient.delete<{ data: T }>(url);
+export async function del<T = void>(url: string, body?: unknown): Promise<T> {
+  // Some mutations (committee withdraw / member removal) are DELETE with a
+  // re-sign body — axios carries a DELETE body via the `data` config key.
+  const response = await apiClient.delete<{ data: T }>(
+    url,
+    body !== undefined ? { data: body } : undefined,
+  );
   return response.data.data;
 }
