@@ -1,7 +1,6 @@
-import { useQuery, useMutation } from '@tanstack/react-query';
-import { get, post } from '@/lib/api';
-import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
-import { queryClient } from '@/lib/api';
+import { useQuery } from '@tanstack/react-query';
+import { get } from '@/lib/api';
+import { useIsAuthenticated } from '@/stores/authStore';
 import type { UserProfile } from '@/types';
 
 export function useMe() {
@@ -15,35 +14,7 @@ export function useMe() {
   });
 }
 
-export function useRefreshSession() {
-  const { refreshExpiry } = useAuthStore();
-
-  return useMutation({
-    mutationFn: () =>
-      post<{ walletAddress: string; expiresAt: string; sessionType: string }>('/auth/refresh'),
-    onSuccess: (data) => {
-      refreshExpiry(data.expiresAt);
-    },
-  });
-}
-
-export function useLogout() {
-  const { clearAuth } = useAuthStore();
-
-  return useMutation({
-    mutationFn: async () => {
-      await fetch('/api/auth/session', { method: 'DELETE', credentials: 'include' });
-    },
-    onSettled: () => {
-      clearAuth();
-      queryClient.clear();
-    },
-  });
-}
-
-export function useMutationNonce() {
-  return useMutation({
-    mutationFn: () =>
-      post<{ nonce: string; message: string; expiresAt: string }>('/auth/mutation-nonce'),
-  });
-}
+// NOTE: session refresh, logout, and mutation-nonce live in the flows that
+// actually own them — `useWalletAuth` (logout → DELETE /auth/session) and
+// `useMutationSign` (POST /auth/mutation-nonce). Earlier duplicate hooks here
+// were dead code (one even hit a wrong `/api/` prefix); removed 2026-05-31.

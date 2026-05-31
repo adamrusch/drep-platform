@@ -1,5 +1,5 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
-import { putItem, tableNames } from '../../lib/dynamodb';
+import { transactWrite, tableNames } from '../../lib/dynamodb';
 import type { CommitteeRationaleFinalItem } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { writeAuditEvent } from '../../lib/audit';
@@ -84,7 +84,35 @@ export const handler = async (
       finalizedBy: authCtx.walletAddress,
       finalizedAt: now,
     };
-    await putItem(tableNames.committeeVotes, final as unknown as Record<string, unknown>);
+    // Finalize is re-runnable BEFORE submission (fix a typo, re-lock) but MUST
+    // be frozen once an on-chain SUBMISSION receipt exists — otherwise the FINAL
+    // row's canonicalJson/anchorHash could drift away from what mainnet's anchor
+    // hash references, producing content that no longer verifies against chain.
+    // Atomic: a ConditionCheck that SUBMISSION does not exist, gating the Put.
+    try {
+      await transactWrite([
+        {
+          ConditionCheck: {
+            TableName: tableNames.committeeVotes,
+            Key: { voteScope, itemKey: 'SUBMISSION' },
+            ConditionExpression: 'attribute_not_exists(itemKey)',
+          },
+        },
+        {
+          Put: {
+            TableName: tableNames.committeeVotes,
+            Item: final as unknown as Record<string, unknown>,
+          },
+        },
+      ]);
+    } catch (err) {
+      if (err && typeof err === 'object' && (err as { name?: string }).name === 'TransactionCanceledException') {
+        return conflict(
+          'This vote has already been submitted on-chain; its rationale is locked and can no longer be re-finalized.',
+        );
+      }
+      throw err;
+    }
 
     await writeAuditEvent({
       entityType: 'committee_vote',

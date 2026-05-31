@@ -74,11 +74,10 @@ export class ApiStack extends cdk.Stack {
       // never verify on prod (see backend/src/lib/committeeMessages.ts). Also
       // gates prod-only on-chain broadcast.
       STAGE: stage,
-      CARDANO_NETWORK: stage === 'staging' ? 'preprod' : 'mainnet',
-      BLOCKFROST_BASE_URL:
-        stage === 'staging'
-          ? 'https://cardano-preprod.blockfrost.io/api/v0'
-          : 'https://cardano-mainnet.blockfrost.io/api/v0',
+      // All live stages (dev/test/prod) run against mainnet — `test` is a
+      // mainnet test environment, not a preprod one.
+      CARDANO_NETWORK: 'mainnet',
+      BLOCKFROST_BASE_URL: 'https://cardano-mainnet.blockfrost.io/api/v0',
       SES_FROM_ADDRESS: 'notifications@drep-platform.io',
       SES_REGION: 'us-east-1',
       JWT_SECRET_NAME: `drep-platform/${stage}/jwt-secret`,

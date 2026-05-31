@@ -86,10 +86,12 @@ export const handler = async (
         walletAddress: authCtx.walletAddress,
         roles: authCtx.roles,
         // Response field name kept as `drepId` (the public API surface
-        // consumed by the SPA's auth store) but sourced from the
-        // semantically clearer `registeredDrepId` JWT claim. See
-        // `lib/auth.ts` for the JWT field rename and rollout window.
-        drepId: authCtx.registeredDrepId,
+        // consumed by the SPA's auth store). Prefer the LIVE value from the
+        // users row over the JWT claim: linking a DRep (`/drep/link`, auto-link,
+        // or committee register) writes `users.drepId` but does NOT re-issue the
+        // session JWT, so `authCtx.registeredDrepId` is stale until re-auth.
+        // Reading the row (already fetched above) reflects the link immediately.
+        drepId: user.drepId ?? authCtx.registeredDrepId,
         // `delegatedToDrepId` is the live on-chain delegation. See the
         // file-header comment for why this is a separate field from
         // `drepId` and which one each UX surface should consume.
