@@ -39,11 +39,10 @@ export function isPersistent(stage: string): boolean {
 // drep.tools hosted zone — to avoid destruction risk. CDK imports them by ARN.
 const PROD_CERTIFICATE_ARN =
   'arn:aws:acm:us-east-1:REDACTED_ACCOUNT_ID:certificate/9b367d8e-f72f-4e69-9f02-0124c70c7149';
-// TODO(test-stage): the test.drep.tools certificate must be issued before the
-// first `cdk deploy --context stage=test`. It is overridable via
-// `--context testCertArn=arn:...` so `cdk synth` never blocks on it.
-const TEST_CERTIFICATE_ARN_PLACEHOLDER =
-  'arn:aws:acm:us-east-1:REDACTED_ACCOUNT_ID:certificate/REPLACE_WITH_TEST_CERT_ARN';
+// ACM cert for test.drep.tools + www + api (us-east-1, DNS-validated in the
+// drep.tools zone). Issued 2026-05-30. Overridable via `--context testCertArn=`.
+const TEST_CERTIFICATE_ARN =
+  'arn:aws:acm:us-east-1:REDACTED_ACCOUNT_ID:certificate/b252b08e-d328-4ec2-804e-623eed1b7ef1';
 
 const HOSTED_ZONE_ID = 'Z0487212142GV67N7GOFU';
 const ZONE_NAME = 'drep.tools';
@@ -61,7 +60,7 @@ export function customDomainFor(
     return {
       hostedZoneId: HOSTED_ZONE_ID,
       zoneName: ZONE_NAME,
-      certificateArn: opts.testCertArn ?? TEST_CERTIFICATE_ARN_PLACEHOLDER,
+      certificateArn: opts.testCertArn ?? TEST_CERTIFICATE_ARN,
       apexDomain: 'test.drep.tools',
       wwwDomain: 'www.test.drep.tools',
       apiDomain: 'api.test.drep.tools',
