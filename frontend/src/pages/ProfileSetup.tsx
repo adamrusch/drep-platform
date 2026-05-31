@@ -6,6 +6,7 @@ import { useMe } from '@/hooks/useAuth';
 import { useAuthStore } from '@/stores/authStore';
 import { useUiStore } from '@/stores/uiStore';
 import { useLinkDrep } from '@/hooks/useCommitteeMembership';
+import { pasteDrepLinkAllowed } from '@/lib/stage';
 import type { UserProfile } from '@/types';
 
 export function ProfileSetup(): React.ReactElement {
@@ -172,20 +173,24 @@ function DrepLinkSection({ currentDrepId }: { currentDrepId?: string }): React.R
             Link your registered DRep to be recognized as one (no committee needed). Your name defaults to your DRep name unless you set one above.
           </p>
           <div className="flex flex-wrap gap-2">
-            <input
-              value={drepId}
-              onChange={(e) => setDrepId(e.target.value)}
-              placeholder="drep1…"
-              className="flex-1 min-w-[220px] rounded-md border border-[var(--border-default)] bg-[var(--bg-canvas)] px-3 py-1.5 text-[12.5px] font-mono"
-            />
-            <button
-              type="button"
-              disabled={!/^drep1[0-9a-z]{10,}$/.test(drepId.trim()) || link.isPending}
-              onClick={linkPasted}
-              className="rounded-md bg-primary text-primary-foreground px-3 py-1.5 text-[12.5px] font-medium disabled:opacity-50"
-            >
-              {link.isPending ? 'Linking…' : 'Link'}
-            </button>
+            {pasteDrepLinkAllowed() && (
+              <>
+                <input
+                  value={drepId}
+                  onChange={(e) => setDrepId(e.target.value)}
+                  placeholder="drep1…"
+                  className="flex-1 min-w-[220px] rounded-md border border-[var(--border-default)] bg-[var(--bg-canvas)] px-3 py-1.5 text-[12.5px] font-mono"
+                />
+                <button
+                  type="button"
+                  disabled={!/^drep1[0-9a-z]{10,}$/.test(drepId.trim()) || link.isPending}
+                  onClick={linkPasted}
+                  className="rounded-md bg-primary text-primary-foreground px-3 py-1.5 text-[12.5px] font-medium disabled:opacity-50"
+                >
+                  {link.isPending ? 'Linking…' : 'Link'}
+                </button>
+              </>
+            )}
             <button
               type="button"
               disabled={detecting || link.isPending}

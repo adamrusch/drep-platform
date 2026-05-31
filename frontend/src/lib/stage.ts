@@ -12,3 +12,17 @@ export function getStage(): string {
 export function isTestStage(): boolean {
   return getStage() === 'test';
 }
+
+/** True in production. */
+export function isProdStage(): boolean {
+  return getStage() === 'prod';
+}
+
+/**
+ * Whether to offer the "paste a drep id" linking input. Pasting only proves the
+ * DRep exists, not that the user controls it, so the backend rejects it in
+ * production (CIP-95 proof-of-control only). Hide the input there to match.
+ */
+export function pasteDrepLinkAllowed(): boolean {
+  return !isProdStage();
+}
