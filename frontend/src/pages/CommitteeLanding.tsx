@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { useAuthStore, useIsCommitteeMember, useIsAuthenticated } from '@/stores/authStore';
 import { useRegisterCommittee } from '@/hooks/useCommitteeMembership';
+import { pasteDrepLinkAllowed } from '@/lib/stage';
 
 const inputCls =
   'w-full rounded-token-md border border-[var(--border-default)] bg-[var(--bg-canvas)] px-3 py-2 text-[13px] focus:outline-none focus-visible:shadow-token-focus';
@@ -139,13 +140,17 @@ function RegisterCommitteeCard(): React.ReactElement {
           ) : (
             <>
               <div className="flex gap-2">
-                <input className={`${inputCls} flex-1 font-mono`} value={drepId} onChange={(e) => setDrepId(e.target.value)} placeholder="drep1…" />
+                {pasteDrepLinkAllowed() && (
+                  <input className={`${inputCls} flex-1 font-mono`} value={drepId} onChange={(e) => setDrepId(e.target.value)} placeholder="drep1…" />
+                )}
                 <Button size="sm" variant="secondary" disabled={detecting} onClick={() => void detect()}>
                   {detecting ? 'Reading…' : 'Use wallet (CIP-95)'}
                 </Button>
               </div>
               <p className="text-[11px] text-[var(--text-secondary)]">
-                Paste your registered drep id, or detect it from your wallet. Your DRep must already be registered on-chain.
+                {pasteDrepLinkAllowed()
+                  ? 'Paste your registered drep id, or detect it from your wallet. Your DRep must already be registered on-chain.'
+                  : 'Connect your CIP-95 wallet so we can verify you control the DRep. Your DRep must already be registered on-chain.'}
               </p>
               {detectErr && <p className="text-[11.5px] text-[var(--danger)]">{detectErr}</p>}
             </>
