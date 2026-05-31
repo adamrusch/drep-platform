@@ -9,6 +9,7 @@ import type {
 import { extractAuthContext } from '../../middleware/role-guard';
 import { writeAuditEvent } from '../../lib/audit';
 import { drepIdFromDRepKey } from '../../lib/drepId';
+import { pasteDrepLinkAllowed } from '../../lib/stage';
 import {
   getSafetyMode,
   isSafetyModeActive,
@@ -65,6 +66,15 @@ export const handler = async (
         return badRequest('Invalid CIP-95 DRep key');
       }
     } else if (body.drepId && /^drep1[0-9a-z]{10,}$/.test(body.drepId.trim())) {
+      // Paste path proves the DRep exists, not that the caller controls it.
+      // Disabled in production so a committee can't be bound to someone else's
+      // DRep — CIP-95 proof-of-control only there.
+      if (!pasteDrepLinkAllowed()) {
+        return forbidden(
+          'To bind a committee to your DRep, connect a CIP-95 wallet so we can verify you control it. ' +
+            'Pasting a drep id is disabled here to prevent impersonation.',
+        );
+      }
       drepId = body.drepId.trim();
     } else {
       return badRequest(

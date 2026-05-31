@@ -3,7 +3,8 @@ import { getItem, updateItem, tableNames } from '../../lib/dynamodb';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { writeAuditEvent } from '../../lib/audit';
 import { drepIdFromDRepKey } from '../../lib/drepId';
-import { ok, badRequest, conflict, notFound, handleError } from '../_response';
+import { pasteDrepLinkAllowed } from '../../lib/stage';
+import { ok, badRequest, conflict, notFound, forbidden, handleError } from '../_response';
 
 interface LinkDrepBody {
   /** CIP-95 DRep public key (hex) — derived server-side, proves control. */
@@ -42,6 +43,14 @@ export const handler = async (
         return badRequest('Invalid CIP-95 DRep key');
       }
     } else if (body.drepId && /^drep1[0-9a-z]{10,}$/.test(body.drepId.trim())) {
+      // Paste path proves the DRep exists, not that the caller controls it.
+      // Disabled in production to prevent impersonation — CIP-95 only there.
+      if (!pasteDrepLinkAllowed()) {
+        return forbidden(
+          'To link your DRep, connect a CIP-95 wallet so we can verify you control it. ' +
+            'Pasting a drep id is disabled here to prevent impersonation.',
+        );
+      }
       drepId = body.drepId.trim();
     } else {
       return badRequest('Provide your CIP-95 DRep key (drepKey) or your registered drep id (drepId).');
