@@ -10,6 +10,9 @@ export interface AuthContext {
    *  Renamed from `drepId` on 2026-05-27 for semantic clarity. */
   registeredDrepId?: string;
   sessionType?: string;
+  /** The session-revocation counter validated by the authorizer. Carried so
+   *  `/auth/refresh` can re-mint at the current version without re-reading. */
+  tokenVersion?: number;
 }
 
 /**
@@ -27,6 +30,7 @@ interface LambdaAuthorizerContext {
   roles?: string;
   sessionType?: string;
   registeredDrepId?: string;
+  tokenVersion?: string;
   drepId?: string; // legacy — remove after 2026-06-03
 }
 
@@ -72,11 +76,14 @@ export function extractAuthContext(
   // trigger date.
   const registeredDrepId = ctx.registeredDrepId ?? ctx.drepId;
 
+  const tokenVersion = ctx.tokenVersion !== undefined ? Number(ctx.tokenVersion) : undefined;
+
   return {
     walletAddress,
     roles,
     registeredDrepId,
     sessionType: ctx.sessionType,
+    ...(Number.isFinite(tokenVersion) ? { tokenVersion } : {}),
   };
 }
 

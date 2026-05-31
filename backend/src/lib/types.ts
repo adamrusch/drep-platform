@@ -421,6 +421,11 @@ export interface JWTPayload {
    *  both during the 7-day rotation window. */
   registeredDrepId?: string;
   sessionType: SessionType;
+  /** Monotonic session-revocation counter. The authorizer rejects a token
+   *  whose `tokenVersion` is below the user row's current value — logout
+   *  increments the row, invalidating every outstanding token at once.
+   *  Absent on legacy tokens → treated as 0. */
+  tokenVersion?: number;
   iat: number;
   exp: number;
 }
@@ -490,6 +495,9 @@ export interface UserItem {
   updatedAt: string;
   sessionTokenHash?: string | null;
   sessionExpiry?: string | null;
+  /** Session-revocation counter — incremented on logout to invalidate every
+   *  outstanding JWT for this wallet. Absent → treated as 0. */
+  tokenVersion?: number;
   roles: string[];
   drepId?: string;
   delegationHistory?: DelegationRecordItem[];
