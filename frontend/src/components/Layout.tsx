@@ -20,6 +20,7 @@ import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
 import { useUiStore } from '@/stores/uiStore';
 import { useThemeStore } from '@/stores/themeStore';
 import { useEpoch } from '@/hooks/useEpoch';
+import { useAutoLinkDrep } from '@/hooks/useAutoLinkDrep';
 import { Button } from '@/components/ui/Button';
 import { cn, formatWalletAddress } from '@/lib/utils';
 import type { UserRole } from '@/types';
@@ -142,6 +143,9 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
   const theme = useThemeStore((s) => s.theme);
   const toggleTheme = useThemeStore((s) => s.toggle);
   const { data: epochInfo } = useEpoch();
+
+  // Auto-detect + link the connected wallet's DRep via CIP-95 (no user action).
+  useAutoLinkDrep();
 
   // Auto-close mobile drawer on route change so a tap on a nav item
   // navigates *and* clears the overlay.
