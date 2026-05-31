@@ -5,6 +5,7 @@ import { useMutationSign } from '@/hooks/useMutationSign';
 import { committeeMessages } from '@/lib/committeeMessages';
 import { getStage } from '@/lib/stage';
 import type { RationaleMode } from '@/types/committee';
+import type { DRepCommittee } from '@/types';
 
 const enc = encodeURIComponent;
 
@@ -104,5 +105,32 @@ export function useStoreIpfsKey(drepId: string) {
   return useMutation({
     mutationFn: (vars: { ipfsProjectId: string }) => put(`/committee/${enc(drepId)}/ipfs-key`, vars),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ['committee', drepId, 'ipfs-key'] }),
+  });
+}
+
+/** Read the committee record (name, description, members, …) so the lead can
+ *  pre-fill the "Edit committee details" form. Disabled until drepId is set. */
+export function useCommitteeDetails(drepId: string) {
+  return useQuery({
+    queryKey: ['drep', drepId],
+    queryFn: () => get<DRepCommittee>(`/drep/${enc(drepId)}`),
+    enabled: Boolean(drepId),
+    staleTime: 30_000,
+  });
+}
+
+/** Edit committee name / description (PUT /drep/{drepId}). JWT-auth, lead-only
+ *  server-side — no signature required. Invalidates the same keys the rest of
+ *  the file invalidates after a committee mutation so the new name shows up
+ *  everywhere the committee is read. */
+export function useUpdateCommittee(drepId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { committeeName?: string; description?: string }) =>
+      put<DRepCommittee>(`/drep/${enc(drepId)}`, vars),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['drep', drepId] });
+      void qc.invalidateQueries({ queryKey: ['committee', drepId] });
+    },
   });
 }

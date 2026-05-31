@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import {
@@ -6,7 +6,11 @@ import {
   useAddCommitteeMember,
   useStoreIpfsKey,
   useIpfsKeyStatus,
+  useCommitteeDetails,
+  useUpdateCommittee,
 } from '@/hooks/useCommitteeMembership';
+import { useAuthStore } from '@/stores/authStore';
+import { useUiStore } from '@/stores/uiStore';
 import type { RationaleMode } from '@/types/committee';
 
 const MODES: { value: RationaleMode; label: string }[] = [
@@ -31,7 +35,9 @@ export function CommitteeSettings({ drepId }: { drepId: string }): React.ReactEl
   const [ipfsKey, setIpfsKey] = useState('');
 
   return (
-    <Card>
+    <div className="space-y-4">
+      <CommitteeDetailsCard drepId={drepId} />
+      <Card>
       <CardHeader><CardTitle>Committee settings</CardTitle></CardHeader>
       <CardContent className="space-y-6">
         {/* Voting config */}
@@ -100,6 +106,131 @@ export function CommitteeSettings({ drepId }: { drepId: string }): React.ReactEl
             </Button>
           </div>
         </section>
+      </CardContent>
+    </Card>
+    </div>
+  );
+}
+
+/** "Committee details" card — lets the lead DRep edit the committee name and
+ *  description (PUT /drep/{drepId}). Gated on the connected wallet being the
+ *  lead even though the parent already gates: defense-in-depth keeps the form
+ *  off the screen for non-leads in any future caller. */
+function CommitteeDetailsCard({ drepId }: { drepId: string }): React.ReactElement | null {
+  const walletAddress = useAuthStore((s) => s.walletAddress);
+  const addToast = useUiStore((s) => s.addToast);
+  const details = useCommitteeDetails(drepId);
+  const update = useUpdateCommittee(drepId);
+
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+
+  // Pre-fill once the committee record loads. Refill on subsequent loads
+  // (e.g. another tab edits the committee) so the form stays in sync.
+  useEffect(() => {
+    if (details.data) {
+      setName(details.data.committeeName);
+      setDescription(details.data.description);
+    }
+  }, [details.data]);
+
+  if (details.isLoading) {
+    return (
+      <Card>
+        <CardHeader><CardTitle>Committee details</CardTitle></CardHeader>
+        <CardContent>
+          <p className="text-[13px] text-[var(--text-secondary)]">Loading…</p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (details.isError || !details.data) {
+    return (
+      <Card>
+        <CardHeader><CardTitle>Committee details</CardTitle></CardHeader>
+        <CardContent>
+          <p className="text-[13px] text-[var(--danger)]">
+            {(details.error as Error)?.message ?? 'Could not load committee details.'}
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  // Lead-only gate — hide the editor for non-leads.
+  const isLead = Boolean(walletAddress) && walletAddress === details.data.leadWallet;
+  if (!isLead) return null;
+
+  const dirty =
+    name.trim() !== details.data.committeeName ||
+    description.trim() !== details.data.description;
+  const canSave =
+    dirty && name.trim().length > 0 && description.trim().length > 0 && !update.isPending;
+
+  const submit = (): void => {
+    const body: { committeeName?: string; description?: string } = {};
+    if (name.trim() !== details.data?.committeeName) body.committeeName = name.trim();
+    if (description.trim() !== details.data?.description) body.description = description.trim();
+    if (Object.keys(body).length === 0) return;
+    update.mutate(body, {
+      onSuccess: () => {
+        addToast({ title: 'Committee details updated', variant: 'success' });
+      },
+      onError: (err) => {
+        addToast({
+          title: 'Could not update committee',
+          description: (err as Error)?.message,
+          variant: 'error',
+        });
+      },
+    });
+  };
+
+  return (
+    <Card>
+      <CardHeader><CardTitle>Committee details</CardTitle></CardHeader>
+      <CardContent className="space-y-3">
+        <label className="block text-[12px] text-[var(--text-secondary)]">
+          Committee name
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            className={`${inputCls} mt-1`}
+            placeholder="Committee name"
+          />
+        </label>
+        <label className="block text-[12px] text-[var(--text-secondary)]">
+          Description
+          <textarea
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            className={`${inputCls} mt-1 min-h-[90px] resize-y`}
+            placeholder="What this committee stands for…"
+          />
+        </label>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="primary" disabled={!canSave} onClick={submit}>
+            {update.isPending ? 'Saving…' : 'Save changes'}
+          </Button>
+          {dirty && !update.isPending && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                setName(details.data?.committeeName ?? '');
+                setDescription(details.data?.description ?? '');
+              }}
+            >
+              Reset
+            </Button>
+          )}
+        </div>
+        {update.isError && (
+          <p className="text-[12px] text-[var(--danger)]">
+            {(update.error as Error)?.message ?? 'Could not update committee.'}
+          </p>
+        )}
       </CardContent>
     </Card>
   );
