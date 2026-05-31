@@ -273,6 +273,22 @@ echo "  drift failures:  ${#drift_failures[@]} ${drift_failures[*]:-}"
 if [[ ${#deploy_failures[@]} -gt 0 ]]; then
     exit 3
 fi
+
+# Post-deploy warm-up. EventBridge rate() rules don't fire until the first
+# interval elapses, so a freshly deployed stack would have empty sync tables
+# (no DReps for up to 30 min, etc.). If the Scheduler stack was (re)deployed,
+# prime the syncs now. Non-fatal — the syncs still run on schedule regardless.
+if [[ "$DRY_RUN" -eq 0 ]]; then
+    warm=0
+    for s in "${STACKS[@]}"; do [[ "$s" == *Scheduler* ]] && warm=1; done
+    if [[ "$warm" -eq 1 ]]; then
+        echo ""
+        echo "Priming syncs (post-deploy warm-up)…"
+        "$(dirname "$0")/warm-syncs.sh" "$STAGE" \
+            || echo "WARN: warm-up failed (non-fatal); syncs will still run on schedule."
+    fi
+fi
+
 if [[ ${#drift_failures[@]} -gt 0 ]]; then
     exit 4
 fi

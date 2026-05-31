@@ -72,6 +72,13 @@ export class SchedulerStack extends cdk.Stack {
       ],
     });
     databaseStack.drepDirectoryTable.grantReadWriteData(directorySyncRole);
+    // Auto-post backfill (clubhouseAutoPosts): the directory sync writes a
+    // welcome post into each newly-active DRep's clubhouse. That path reads the
+    // active governance actions (status-submittedAt-index) and writes
+    // clubhouse_posts. Without these grants the backfill fails closed
+    // (AccessDenied) — observed as postsErrored == newlyActiveDReps.
+    databaseStack.governanceActionsTable.grantReadData(directorySyncRole);
+    databaseStack.clubhousePostsTable.grantReadWriteData(directorySyncRole);
 
     // ---- Governance sync Lambda ----
     this.governanceSyncFn = new lambdaNodejs.NodejsFunction(this, 'GovernanceSyncFn', {
