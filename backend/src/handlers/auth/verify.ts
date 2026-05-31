@@ -88,7 +88,13 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     if (isBootstrapAdmin(walletAddress) && !typedRoles.includes('platform_admin')) {
       typedRoles.push('platform_admin');
     }
-    const { token, expiresAt } = await issueJWT(walletAddress, typedRoles, sessionType, existing?.drepId as string | undefined);
+    // Carry the revocation counter forward so a fresh login does NOT resurrect
+    // tokens that a prior logout revoked (the full-row putItem below would
+    // otherwise reset tokenVersion to undefined → 0, re-validating old tokens).
+    const tokenVersion = typeof existing?.tokenVersion === 'number' ? existing.tokenVersion : 0;
+    const { token, expiresAt } = await issueJWT(
+      walletAddress, typedRoles, sessionType, existing?.drepId as string | undefined, tokenVersion,
+    );
 
     const userItem: UserItem = {
       walletAddress,
@@ -101,6 +107,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
       // full-row putItem below drops drepId and unlinks the user from their
       // committee (FE then shows them as a non-member).
       drepId: existing?.drepId,
+      tokenVersion,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
       sessionTokenHash: hashValue(token),
