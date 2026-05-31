@@ -14,6 +14,7 @@ import {
 } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { writeAuditEvent } from '../../lib/audit';
+import { resolveIdentity } from '../../lib/identity';
 import { resolveClubhouseMembership } from './_membership';
 import { ok, badRequest, forbidden, notFound, serviceUnavailable, handleError } from '../_response';
 
@@ -216,6 +217,8 @@ export const handler = async (
 
     const commentId = ulid();
     const now = new Date().toISOString();
+    // Same identity precedence as posts: profile name → DRep name → stake.
+    const authorDisplayName = (await resolveIdentity(authCtx.walletAddress)).displayName;
 
     // ---- (1) Write the per-row comment to the NEW table FIRST. ----
     // `attribute_not_exists(commentId)` defends against a retried Lambda
@@ -228,6 +231,7 @@ export const handler = async (
       drepId,
       postId,
       authorWallet: authCtx.walletAddress,
+      ...(authorDisplayName ? { authorDisplayName } : {}),
       body: reqBody.body.trim(),
       createdAt: now,
       depth: newDepth,

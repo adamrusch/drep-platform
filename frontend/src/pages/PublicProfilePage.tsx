@@ -60,11 +60,20 @@ export function PublicProfilePage(): React.ReactElement {
           </span>
           <div style={{ flex: 1 }}>
             <h1 className="text-2xl font-bold">
-              {profile.displayName ?? formatWalletAddress(profile.walletAddress)}
+              {profile.resolvedDisplayName ?? profile.displayName ?? formatWalletAddress(profile.walletAddress)}
             </h1>
             <p className="text-sm text-muted-foreground font-mono">
               {formatWalletAddress(profile.walletAddress, 12)}
             </p>
+            {profile.isDRep && profile.drepId && (
+              <Link
+                to={`/dreps/${encodeURIComponent(profile.drepId)}`}
+                className="mt-1 inline-flex items-center gap-1.5 text-[13px] font-semibold text-[var(--brand-primary)] hover:underline"
+              >
+                <span className="inline-flex items-center text-[11px] font-semibold px-2 py-0.5 rounded-token-full bg-[var(--brand-primary-soft)]">DRep</span>
+                Registered DRep{profile.drepName ? ` — ${profile.drepName}` : ''} →
+              </Link>
+            )}
             {profile.roles.length > 0 && (
               <div className="flex gap-2 mt-2">
                 {profile.roles.map((role) => (

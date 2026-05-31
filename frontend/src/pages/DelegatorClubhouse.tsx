@@ -385,11 +385,16 @@ function PostCard({
               {(post.authorDisplayName ?? post.authorWallet).slice(0, 2).toUpperCase()}
             </span>
           )}
-          <span className="text-sm font-semibold text-[var(--text-primary)]">
-            {isAutoPost
-              ? 'drep.tools'
-              : post.authorDisplayName ?? formatWalletAddress(post.authorWallet)}
-          </span>
+          {isAutoPost ? (
+            <span className="text-sm font-semibold text-[var(--text-primary)]">drep.tools</span>
+          ) : (
+            <Link
+              to={`/profile/${encodeURIComponent(post.authorWallet)}`}
+              className="text-sm font-semibold text-[var(--text-primary)] hover:text-[var(--brand-primary)] hover:underline"
+            >
+              {post.authorDisplayName ?? formatWalletAddress(post.authorWallet)}
+            </Link>
+          )}
           {isAutoPost && (
             <span
               className="inline-flex items-center gap-1 text-[10.5px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-token-full bg-[var(--info-soft)] text-[var(--info)]"
@@ -611,9 +616,12 @@ export function ClubhouseCommentRow({
         </span>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-[12.5px] font-semibold text-[var(--text-primary)]">
+            <Link
+              to={`/profile/${encodeURIComponent(comment.authorWallet)}`}
+              className="text-[12.5px] font-semibold text-[var(--text-primary)] hover:text-[var(--brand-primary)] hover:underline"
+            >
               {comment.authorDisplayName ?? formatWalletAddress(comment.authorWallet)}
-            </span>
+            </Link>
             <span className="text-[11px] text-[var(--text-tertiary)]">
               {formatRelativeTime(comment.createdAt)}
             </span>
