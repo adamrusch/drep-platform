@@ -1,12 +1,16 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { writeAuditEvent } from '../../lib/audit';
+import { committeeMessages } from '../../lib/committeeMessages';
 import { hasStoredIpfsKey, storeIpfsKey } from '../../lib/ipfs';
-import { ok, badRequest, notFound, handleError } from '../_response';
-import { assertCommitteeLead, getStage, loadCommittee } from './_committee';
+import { ok, badRequest, unauthorized, notFound, handleError } from '../_response';
+import { assertCommitteeLead, getStage, loadCommittee, verifyCommitteeResign } from './_committee';
 
 interface PutIpfsKeyBody {
   ipfsProjectId: string;
+  mutationNonce: string;
+  mutationSignature: string;
+  mutationKey: string;
 }
 
 /**
@@ -41,6 +45,12 @@ export const handler = async (
     if (!body.ipfsProjectId || body.ipfsProjectId.trim().length === 0) {
       return badRequest('ipfsProjectId is required');
     }
+
+    // Storing a long-lived pinning secret is privileged — require a fresh
+    // CIP-30 re-sign, not just the session cookie.
+    const message = committeeMessages.ipfsKey(stage, drepId, body.mutationNonce, authCtx.walletAddress);
+    const reason = await verifyCommitteeResign(authCtx.walletAddress, body, message);
+    if (reason) return unauthorized(reason);
 
     await storeIpfsKey(stage, drepId, body.ipfsProjectId.trim());
 

@@ -136,10 +136,17 @@ export function useSubmitVote(drepId: string, actionId: string) {
 }
 
 export function useSubmitReceipt(drepId: string, actionId: string) {
+  const sign = useMutationSign();
+  const wallet = useAuthStore((s) => s.walletAddress);
   const invalidate = useInvalidateVote(drepId, actionId);
+  const stage = getStage();
   return useMutation({
-    mutationFn: (vars: { txHash: string }) =>
-      post(`/committee/${enc(drepId)}/votes/${enc(actionId)}/submit/receipt`, vars),
+    mutationFn: async (vars: { txHash: string }) => {
+      const signed = await sign((nonce) =>
+        committeeMessages.submitReceipt(stage, drepId, actionId, vars.txHash, nonce, wallet ?? ''),
+      );
+      return post(`/committee/${enc(drepId)}/votes/${enc(actionId)}/submit/receipt`, { ...vars, ...signed });
+    },
     onSuccess: invalidate,
   });
 }
