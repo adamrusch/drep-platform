@@ -70,6 +70,10 @@ export class ApiStack extends cdk.Stack {
     // ---- Shared Lambda environment ----
     const sharedEnv: Record<string, string> = {
       DYNAMODB_TABLE_PREFIX: `drep-platform-${stage}-`,
+      // Embedded in committee signed messages so a test-stage signature can
+      // never verify on prod (see backend/src/lib/committeeMessages.ts). Also
+      // gates prod-only on-chain broadcast.
+      STAGE: stage,
       CARDANO_NETWORK: stage === 'staging' ? 'preprod' : 'mainnet',
       BLOCKFROST_BASE_URL:
         stage === 'staging'
