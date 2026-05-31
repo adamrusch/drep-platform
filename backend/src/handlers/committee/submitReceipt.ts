@@ -71,6 +71,12 @@ export const handler = async (
       submittedAt: now,
       ...(final?.anchorHash ? { anchorHash: final.anchorHash } : {}),
       ...(final?.ipfsUri ? { anchorUrl: final.ipfsUri } : {}),
+      // Snapshot the exact canonical bytes that produced `anchorHash` onto the
+      // immutable SUBMISSION row. The FINAL row is frozen once this exists (see
+      // finalizeRationale), but snapshotting makes the submission a fully
+      // self-contained record-of-what-mainnet-saw: its canonicalJson hashes to
+      // its anchorHash regardless of anything else in the table.
+      ...(final?.canonicalJson ? { canonicalJson: final.canonicalJson } : {}),
       ...(final ? {} : { rationaleOverridden: true }),
     };
 

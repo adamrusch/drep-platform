@@ -49,26 +49,46 @@ export const handler = async (
     const now = new Date().toISOString();
     const newMembers = (committee.members ?? []).filter((m) => m.walletAddress !== target);
 
-    // Atomic: rewrite the roster (read-modify-write — DynamoDB can't drop a
-    // list element by value) AND release the wallet's membership slot.
-    await transactWrite([
-      {
-        Update: {
-          TableName: tableNames.drepCommittees,
-          Key: { drepId, SK: 'COMMITTEE' },
-          UpdateExpression: 'SET #members = :m, #updatedAt = :now',
-          ConditionExpression: 'attribute_exists(drepId)',
-          ExpressionAttributeNames: { '#members': 'members', '#updatedAt': 'updatedAt' },
-          ExpressionAttributeValues: { ':m': newMembers, ':now': now },
+    // The roster mutation is a read-modify-write (DynamoDB can't drop a list
+    // element by value), so guard it with optimistic concurrency: condition the
+    // write on the committee's `updatedAt` still matching what we just read. If
+    // a concurrent addMember/removeMember changed the roster in between, the
+    // condition fails and we 409 instead of silently clobbering their change
+    // (which would otherwise strand a member: membership slot taken, roster
+    // missing them). Falls back to existence-only for legacy rows with no
+    // `updatedAt`.
+    const expectedUpdatedAt = committee.updatedAt;
+    try {
+      await transactWrite([
+        {
+          Update: {
+            TableName: tableNames.drepCommittees,
+            Key: { drepId, SK: 'COMMITTEE' },
+            UpdateExpression: 'SET #members = :m, #updatedAt = :now',
+            ConditionExpression: expectedUpdatedAt
+              ? 'attribute_exists(drepId) AND #updatedAt = :expected'
+              : 'attribute_exists(drepId)',
+            ExpressionAttributeNames: { '#members': 'members', '#updatedAt': 'updatedAt' },
+            ExpressionAttributeValues: {
+              ':m': newMembers,
+              ':now': now,
+              ...(expectedUpdatedAt ? { ':expected': expectedUpdatedAt } : {}),
+            },
+          },
         },
-      },
-      {
-        Delete: {
-          TableName: tableNames.committeeMembership,
-          Key: { walletAddress: target },
+        {
+          Delete: {
+            TableName: tableNames.committeeMembership,
+            Key: { walletAddress: target },
+          },
         },
-      },
-    ]);
+      ]);
+    } catch (err) {
+      if (err && typeof err === 'object' && (err as { name?: string }).name === 'TransactionCanceledException') {
+        return conflict('The committee roster changed while you were removing a member. Reload and try again.');
+      }
+      throw err;
+    }
 
     await writeAuditEvent({
       entityType: 'drep_committee',
