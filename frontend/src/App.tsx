@@ -99,6 +99,12 @@ const CommitteeVoteList = lazy(() =>
 const AdminPanel = lazy(() =>
   import('@/pages/AdminPanel').then((m) => ({ default: m.AdminPanel })),
 );
+const RationaleEditorPage = lazy(() =>
+  import('@/pages/RationaleEditorPage').then((m) => ({ default: m.RationaleEditorPage })),
+);
+const RationalesPage = lazy(() =>
+  import('@/pages/RationalesPage').then((m) => ({ default: m.RationalesPage })),
+);
 const DRepDirectoryPage = lazy(() =>
   import('@/pages/DRepDirectoryPage').then((m) => ({ default: m.DRepDirectoryPage })),
 );
@@ -257,6 +263,10 @@ function App(): React.ReactElement {
                     user (or shows a Discover CTA for guests). */}
                 <Route path="/clubhouse" element={<ClubhouseLanding />} />
                 <Route
+                  path="/committee/:drepId/votes/:actionId/rationale"
+                  element={<RationaleEditorPage />}
+                />
+                <Route
                   path="/committee/:drepId/votes/:actionId"
                   element={<CommitteeVoteRoom />}
                 />
@@ -271,15 +281,7 @@ function App(): React.ReactElement {
                   }
                 />
                 <Route path="/dreps" element={<DRepDirectoryPage />} />
-                <Route
-                  path="/rationales"
-                  element={
-                    <ComingSoon
-                      title="Rationales"
-                      description="Browse vote rationales from active DReps and committee members. Coming soon."
-                    />
-                  }
-                />
+                <Route path="/rationales" element={<RationalesPage />} />
                 <Route
                   path="/notifications"
                   element={
