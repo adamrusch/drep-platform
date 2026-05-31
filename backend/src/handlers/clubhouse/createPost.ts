@@ -1,6 +1,6 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { ulid } from 'ulid';
-import { putItem, tableNames } from '../../lib/dynamodb';
+import { getItem, putItem, tableNames } from '../../lib/dynamodb';
 import type {
   ClubhousePostItem,
   ClubhousePollOption,
@@ -188,11 +188,33 @@ export const handler = async (
     // stack on a clubhouse post mirrors the comment header (stake / DRep).
     const recognition = await lookupRecognition(authCtx.walletAddress);
 
+    // Author display name. A DRep posting in their OWN clubhouse (they lead the
+    // committee bound to this drepId) is shown under their on-chain DRep name
+    // (CIP-119 givenName) — so it reads "Silence Dogood" + DRep badge, not a raw
+    // stake address. Otherwise fall back to the user's profile display name;
+    // the FE renders a truncated stake address when neither is set.
+    let authorDisplayName: string | undefined;
+    if (isLeadOfThisCommittee) {
+      const dir = await getItem<{ givenName?: string }>(tableNames.drepDirectory, {
+        drepId: drepIdDecoded,
+        SK: 'PROFILE',
+      });
+      authorDisplayName = dir?.givenName;
+    }
+    if (!authorDisplayName) {
+      const user = await getItem<{ displayName?: string }>(tableNames.users, {
+        walletAddress: authCtx.walletAddress,
+        SK: 'PROFILE',
+      });
+      authorDisplayName = user?.displayName;
+    }
+
     const post: ClubhousePostItem = {
       drepId: drepIdDecoded,
       postId,
       authorWallet: authCtx.walletAddress,
       isDRepPost,
+      ...(authorDisplayName ? { authorDisplayName } : {}),
       body: reqBody.body.trim(),
       createdAt: now,
       updatedAt: now,
