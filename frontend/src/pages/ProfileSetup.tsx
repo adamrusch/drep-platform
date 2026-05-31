@@ -5,6 +5,7 @@ import { post } from '@/lib/api';
 import { useMe } from '@/hooks/useAuth';
 import { useAuthStore } from '@/stores/authStore';
 import { useUiStore } from '@/stores/uiStore';
+import { useLinkDrep } from '@/hooks/useCommitteeMembership';
 import type { UserProfile } from '@/types';
 
 export function ProfileSetup(): React.ReactElement {
@@ -111,6 +112,93 @@ export function ProfileSetup(): React.ReactElement {
           {upsertProfile.isPending ? 'Saving…' : 'Save Profile'}
         </button>
       </form>
+
+      <DrepLinkSection currentDrepId={profile?.drepId} />
+    </div>
+  );
+}
+
+/**
+ * Link your wallet to your on-chain DRep so you're recognized as a DRep across
+ * the platform — no committee required. CIP-95 (proves control) or paste.
+ */
+function DrepLinkSection({ currentDrepId }: { currentDrepId?: string }): React.ReactElement {
+  const walletName = useAuthStore((s) => s.walletName);
+  const link = useLinkDrep();
+  const [drepId, setDrepId] = useState('');
+  const [detecting, setDetecting] = useState(false);
+  const [detectErr, setDetectErr] = useState<string | null>(null);
+  const [linked, setLinked] = useState<{ drepId: string; drepName?: string } | null>(null);
+
+  const detectAndLink = async (): Promise<void> => {
+    setDetecting(true);
+    setDetectErr(null);
+    try {
+      const cardano = (
+        window as unknown as {
+          cardano?: Record<string, { enable: (o?: unknown) => Promise<{ cip95?: { getPubDRepKey?: () => Promise<string> } }> }>;
+        }
+      ).cardano;
+      const connector = walletName ? cardano?.[walletName] : undefined;
+      if (!connector) throw new Error('Reconnect your wallet first.');
+      const api = await connector.enable({ extensions: [{ cip: 95 }] });
+      const key = await api?.cip95?.getPubDRepKey?.();
+      if (!key) throw new Error('This wallet did not return a DRep key (CIP-95 not supported?). Paste your drep id instead.');
+      link.mutate({ drepKey: key }, { onSuccess: (r) => setLinked(r) });
+    } catch (e) {
+      setDetectErr((e as Error)?.message ?? 'Could not read your DRep key.');
+    } finally {
+      setDetecting(false);
+    }
+  };
+
+  const linkPasted = (): void => {
+    if (!/^drep1[0-9a-z]{10,}$/.test(drepId.trim())) return;
+    link.mutate({ drepId: drepId.trim() }, { onSuccess: (r) => setLinked(r) });
+  };
+
+  const active = linked?.drepId ?? currentDrepId;
+
+  return (
+    <div className="mt-6 rounded-md border border-[var(--border-default)] p-4 space-y-2">
+      <h3 className="text-sm font-medium">Are you a DRep?</h3>
+      {active ? (
+        <p className="text-[13px] text-[var(--text-secondary)]">
+          ✓ Linked to your DRep{linked?.drepName ? ` — ${linked.drepName}` : ''}. You're recognized as a DRep across the platform.
+        </p>
+      ) : (
+        <>
+          <p className="text-[12.5px] text-[var(--text-secondary)]">
+            Link your registered DRep to be recognized as one (no committee needed). Your name defaults to your DRep name unless you set one above.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <input
+              value={drepId}
+              onChange={(e) => setDrepId(e.target.value)}
+              placeholder="drep1…"
+              className="flex-1 min-w-[220px] rounded-md border border-[var(--border-default)] bg-[var(--bg-canvas)] px-3 py-1.5 text-[12.5px] font-mono"
+            />
+            <button
+              type="button"
+              disabled={!/^drep1[0-9a-z]{10,}$/.test(drepId.trim()) || link.isPending}
+              onClick={linkPasted}
+              className="rounded-md bg-primary text-primary-foreground px-3 py-1.5 text-[12.5px] font-medium disabled:opacity-50"
+            >
+              {link.isPending ? 'Linking…' : 'Link'}
+            </button>
+            <button
+              type="button"
+              disabled={detecting || link.isPending}
+              onClick={() => void detectAndLink()}
+              className="rounded-md border border-[var(--border-default)] px-3 py-1.5 text-[12.5px] font-medium disabled:opacity-50"
+            >
+              {detecting ? 'Reading…' : 'Use wallet (CIP-95)'}
+            </button>
+          </div>
+          {detectErr && <p className="text-[11.5px] text-[var(--danger)]">{detectErr}</p>}
+          {link.isError && <p className="text-[11.5px] text-[var(--danger)]">{(link.error as Error)?.message}</p>}
+        </>
+      )}
     </div>
   );
 }
