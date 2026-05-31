@@ -211,6 +211,12 @@ export class ApiStack extends cdk.Stack {
     const committeeCloseVoteFn = fn('CommitteeCloseVoteFn', 'handlers/committee/closeVote.ts');
     const committeeFailVoteFn = fn('CommitteeFailVoteFn', 'handlers/committee/failVote.ts');
     const committeeWithdrawFn = fn('CommitteeWithdrawFn', 'handlers/committee/withdrawProposal.ts');
+    const committeeGetRationaleFn = fn('CommitteeGetRationaleFn', 'handlers/committee/getRationale.ts');
+    const committeeEditRationaleFn = fn('CommitteeEditRationaleFn', 'handlers/committee/editRationale.ts');
+    const committeeLockRationaleFn = fn('CommitteeLockRationaleFn', 'handlers/committee/lockRationale.ts');
+    const committeeHeartbeatRationaleFn = fn('CommitteeHeartbeatRationaleFn', 'handlers/committee/heartbeatRationale.ts');
+    const committeeReleaseRationaleFn = fn('CommitteeReleaseRationaleFn', 'handlers/committee/releaseRationale.ts');
+    const committeeFinalizeRationaleFn = fn('CommitteeFinalizeRationaleFn', 'handlers/committee/finalizeRationale.ts');
 
     // ---- DRep directory handlers (chain-state read; /dreps routes) ----
     // The directory is the global registry of mainnet DReps with their
@@ -417,6 +423,12 @@ export class ApiStack extends cdk.Stack {
     addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/votes/{actionId}/close', committeeCloseVoteFn, 'CommitteeCloseVote', true);
     addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/votes/{actionId}/fail', committeeFailVoteFn, 'CommitteeFailVote', true);
     addRoute(apigwv2.HttpMethod.DELETE, '/committee/{drepId}/votes/{actionId}', committeeWithdrawFn, 'CommitteeWithdraw', true);
+    addRoute(apigwv2.HttpMethod.GET, '/committee/{drepId}/votes/{actionId}/rationale', committeeGetRationaleFn, 'CommitteeGetRationale', true);
+    addRoute(apigwv2.HttpMethod.PUT, '/committee/{drepId}/votes/{actionId}/rationale', committeeEditRationaleFn, 'CommitteeEditRationale', true);
+    addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/votes/{actionId}/rationale/lock', committeeLockRationaleFn, 'CommitteeLockRationale', true);
+    addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/votes/{actionId}/rationale/lock/heartbeat', committeeHeartbeatRationaleFn, 'CommitteeHeartbeatRationale', true);
+    addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/votes/{actionId}/rationale/lock/release', committeeReleaseRationaleFn, 'CommitteeReleaseRationale', true);
+    addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/votes/{actionId}/rationale/finalize', committeeFinalizeRationaleFn, 'CommitteeFinalizeRationale', true);
 
     // ---- DRep directory routes (chain-state) ----
     addRoute(apigwv2.HttpMethod.GET, '/dreps', drepDirectoryListFn, 'DRepDirectoryList');
