@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useEffect } from 'react';
+import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Home,
@@ -21,6 +21,7 @@ import { useUiStore } from '@/stores/uiStore';
 import { useThemeStore } from '@/stores/themeStore';
 import { useEpoch } from '@/hooks/useEpoch';
 import { useAutoLinkDrep } from '@/hooks/useAutoLinkDrep';
+import { del } from '@/lib/api';
 import { Button } from '@/components/ui/Button';
 import { cn, formatWalletAddress } from '@/lib/utils';
 import type { UserRole } from '@/types';
@@ -147,6 +148,36 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
   // Auto-detect + link the connected wallet's DRep via CIP-95 (no user action).
   useAutoLinkDrep();
 
+  const clearAuth = useAuthStore((s) => s.clearAuth);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Close the account menu on an outside click.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDocClick = (e: MouseEvent): void => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [menuOpen]);
+
+  const handleLogout = async (): Promise<void> => {
+    setMenuOpen(false);
+    try {
+      await del('/auth/session'); // clears the session cookie server-side
+    } catch {
+      /* clear local state regardless */
+    }
+    try {
+      sessionStorage.removeItem('drep_autolink_attempted_for'); // re-detect on next login
+    } catch {
+      /* ignore */
+    }
+    clearAuth();
+    navigate('/');
+  };
+
   // Auto-close mobile drawer on route change so a tap on a nav item
   // navigates *and* clears the overlay.
   useEffect(() => {
@@ -238,24 +269,58 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
             )}
           </button>
           {isAuthenticated && walletAddress ? (
-            <>
+            <div className="relative" ref={menuRef}>
               <button
                 className="wallet-pill"
                 type="button"
-                onClick={() => navigate('/profile/setup')}
+                onClick={() => setMenuOpen((o) => !o)}
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+                aria-label="Account menu"
               >
                 <Wallet size={16} strokeWidth={1.75} aria-hidden="true" />
                 <span>{formatWalletAddress(walletAddress, 6)}</span>
-              </button>
-              <button
-                className="avatar-btn"
-                type="button"
-                onClick={() => navigate('/profile/setup')}
-                aria-label="Open profile menu"
-              >
                 <span className="avatar avatar--sm">{displayInitials}</span>
               </button>
-            </>
+              {menuOpen && (
+                <div
+                  role="menu"
+                  className="absolute right-0 mt-2 w-44 rounded-token-md border border-[var(--border-default)] bg-[var(--bg-canvas)] shadow-token-sm py-1 z-50"
+                >
+                  <button
+                    role="menuitem"
+                    type="button"
+                    className="block w-full text-left px-3 py-2 text-[13px] text-[var(--text-primary)] hover:bg-[var(--bg-muted)]"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      navigate(`/profile/${encodeURIComponent(walletAddress)}`);
+                    }}
+                  >
+                    Public Profile
+                  </button>
+                  <button
+                    role="menuitem"
+                    type="button"
+                    className="block w-full text-left px-3 py-2 text-[13px] text-[var(--text-primary)] hover:bg-[var(--bg-muted)]"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      navigate('/profile/setup');
+                    }}
+                  >
+                    Edit Profile
+                  </button>
+                  <div className="my-1 border-t border-[var(--border-default)]" />
+                  <button
+                    role="menuitem"
+                    type="button"
+                    className="block w-full text-left px-3 py-2 text-[13px] text-[var(--danger)] hover:bg-[var(--bg-muted)]"
+                    onClick={() => void handleLogout()}
+                  >
+                    Logout
+                  </button>
+                </div>
+              )}
+            </div>
           ) : (
             <Suspense fallback={<WalletButtonFallback />}>
               <WalletButton />
