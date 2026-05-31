@@ -1,16 +1,14 @@
 /**
  * DELETE /auth/session
  *
- * Logs out the current session. Two side effects:
- *   1. Clear the JWT cookie via `Set-Cookie: ...; Max-Age=0`
- *   2. Null out `sessionTokenHash` / `sessionExpiry` on the user row so
- *      the deprecated server-side session validation path (kept for
- *      defense in depth) can't be replayed with a leaked cookie.
- *
- * Note: clearing the cookie is the user-visible signal. Step 2 is a
- * belt-and-suspenders move — JWTs are stateless so even without the
- * server-side clear, the cookie's removal alone is sufficient. We do
- * both to keep the user record consistent.
+ * Logs out the current session. Side effects:
+ *   1. Clear the JWT cookie via `Set-Cookie: ...; Max-Age=0`.
+ *   2. Increment `tokenVersion` on the user row. The authorizer rejects any
+ *      token whose version is below the row's — so this revokes EVERY
+ *      outstanding session for the wallet ("log out everywhere"), defeating a
+ *      cookie that was exfiltrated before logout. This is the real revocation
+ *      signal, not just a client-side cookie clear.
+ *   3. Null out `sessionTokenHash` / `sessionExpiry` (legacy fields; harmless).
  */
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { buildClearCookieHeader } from '../../lib/auth';
@@ -25,19 +23,23 @@ export const handler = async (
   try {
     const authCtx = extractAuthContext(event);
 
-    // Clear session fields in DynamoDB
+    // Revoke all sessions (bump tokenVersion) + clear the legacy session
+    // fields, in one atomic update. `ADD` on a missing attribute starts from 0,
+    // so the first-ever logout sets tokenVersion = 1.
     await updateItem(
       tableNames.users,
       { walletAddress: authCtx.walletAddress, SK: 'PROFILE' },
-      'SET #sessionTokenHash = :null, #sessionExpiry = :null, #updatedAt = :now',
+      'SET #sessionTokenHash = :null, #sessionExpiry = :null, #updatedAt = :now ADD #tokenVersion :one',
       {
         '#sessionTokenHash': 'sessionTokenHash',
         '#sessionExpiry': 'sessionExpiry',
         '#updatedAt': 'updatedAt',
+        '#tokenVersion': 'tokenVersion',
       },
       {
         ':null': null,
         ':now': new Date().toISOString(),
+        ':one': 1,
       },
     );
 
