@@ -79,11 +79,11 @@ export const committeeMessages = {
       wallet,
     ),
 
-  rationaleFinalize: (stage: string, drepId: string, actionId: string, anchorHash: string, nonce: string, wallet: string) =>
+  rationaleFinalize: (stage: string, drepId: string, actionId: string, nonce: string, wallet: string) =>
     buildCommitteeMessage(
       stage,
       'rationale-finalize',
-      [['Committee', drepId], ['Action', actionId], ['AnchorHash', anchorHash]],
+      [['Committee', drepId], ['Action', actionId]],
       nonce,
       wallet,
     ),
