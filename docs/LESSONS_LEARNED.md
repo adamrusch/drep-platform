@@ -67,3 +67,9 @@ The recurring meta-lesson: **verify state empirically; never infer it.** Most pa
 
 ---
 *Created 2026-05-30. Append new lessons with a date when they surface.*
+
+## Append 2026-05-31 — auth / cookies
+
+- **Parent-domain cookies shadow stage cookies (403 "signature verification failed").** A session cookie scoped to `.drep.tools` (set by a dev/prod login) is ALSO sent to `api.test.drep.tools`, where it fails JWT verification against the *test* secret. Per-stage cookie *domains* (`.test.drep.tools`) are not enough — the broader parent cookie still collides. **Fix: use a per-stage cookie NAME** (e.g. `access_token_test` vs `access_token`) so each stage's authorizer only reads its own cookie. Until then: test in an incognito window or clear `drep.tools` cookies.
+- **Debugging auth 403s:** check the **authorizer** Lambda logs, not just the handler — a 403 on an authenticated route usually means the authorizer rejected the request *before* the handler ran (so the handler log group may be empty or not exist). "signature verification failed" == token signed with a different secret than the verifier uses (stale/foreign cookie, or a real signer/verifier secret mismatch).
+- **Cached client state masks auth failure.** The Zustand auth store persists to sessionStorage, so the UI (nav, role-gated chrome) can look authenticated from cached roles even while every live API call 403s. Don't infer "logged in & authorized" from the UI; check a live authenticated call.
