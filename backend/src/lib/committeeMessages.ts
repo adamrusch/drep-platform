@@ -115,6 +115,18 @@ export const committeeMessages = {
       wallet,
     ),
 
+  submitReceipt: (stage: string, drepId: string, actionId: string, txHash: string, nonce: string, wallet: string) =>
+    buildCommitteeMessage(
+      stage,
+      'submit-receipt',
+      [['Committee', drepId], ['Action', actionId], ['TxHash', txHash]],
+      nonce,
+      wallet,
+    ),
+
+  ipfsKey: (stage: string, drepId: string, nonce: string, wallet: string) =>
+    buildCommitteeMessage(stage, 'ipfs-key', [['Committee', drepId]], nonce, wallet),
+
   admin: (stage: string, action: string, target: string, nonce: string, wallet: string) =>
     buildCommitteeMessage(stage, 'admin', [['AdminAction', action], ['Target', target]], nonce, wallet),
 } as const;

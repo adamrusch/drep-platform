@@ -3,19 +3,25 @@ import { putItem, tableNames } from '../../lib/dynamodb';
 import type { CommitteeSubmissionItem } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { writeAuditEvent } from '../../lib/audit';
-import { ok, badRequest, forbidden, notFound, conflict, handleError } from '../_response';
+import { committeeMessages } from '../../lib/committeeMessages';
+import { ok, badRequest, unauthorized, forbidden, notFound, conflict, handleError } from '../_response';
 import {
   assertCommitteeLead,
   getStage,
   loadCommittee,
   loadProposal,
   loadRationaleFinal,
+  signatureSnapshot,
+  verifyCommitteeResign,
   voteScopeOf,
 } from './_committee';
 
 interface ReceiptBody {
   txHash: string;
   override?: boolean;
+  mutationNonce: string;
+  mutationSignature: string;
+  mutationKey: string;
 }
 
 /**
@@ -51,6 +57,15 @@ export const handler = async (
     const committee = await loadCommittee(drepId);
     if (!committee) return notFound('Committee');
     assertCommitteeLead(authCtx, committee);
+
+    // Recording a permanent on-chain receipt is a privileged mutation — require
+    // a fresh CIP-30 re-sign bound to THIS txHash (not just the session cookie),
+    // so a leaked cookie can't record a bogus submission.
+    const message = committeeMessages.submitReceipt(
+      getStage(), drepId, actionId, body.txHash, body.mutationNonce, authCtx.walletAddress,
+    );
+    const reason = await verifyCommitteeResign(authCtx.walletAddress, body, message);
+    if (reason) return unauthorized(reason);
 
     const voteScope = voteScopeOf(drepId, actionId);
     const proposal = await loadProposal(voteScope);
@@ -99,7 +114,13 @@ export const handler = async (
       entityId: voteScope,
       eventType: 'committee.vote.submitted',
       actorWallet: authCtx.walletAddress,
-      metadata: { drepId, actionId, txHash: submission.txHash, position: proposal.proposedPosition },
+      metadata: {
+        drepId,
+        actionId,
+        txHash: submission.txHash,
+        position: proposal.proposedPosition,
+        signature: signatureSnapshot(body, message).mutationSignature,
+      },
     });
 
     return ok({ txHash: submission.txHash, position: proposal.proposedPosition });
