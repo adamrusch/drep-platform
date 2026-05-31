@@ -43,3 +43,6 @@ npm-debug.log*
 
 # Test coverage
 coverage/
+
+# Local Claude Code session/tooling state
+.claude/
