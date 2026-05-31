@@ -29,7 +29,7 @@
 
 import { describe, it, expect, beforeAll } from 'vitest';
 import { SignJWT } from 'jose';
-import { issueJWT, verifyJWT } from './auth';
+import { issueJWT, verifyJWT, buildSignMessage } from './auth';
 
 const TEST_SECRET = 'jwt-test-secret-only-for-vitest-do-not-ship';
 const WALLET = 'stake1uyvjdz9rxsfsmv44rtk75k2rqyqskrga96dgdfrqjvjjpwsefcjnp';
@@ -110,6 +110,20 @@ describe('issueJWT / verifyJWT — registeredDrepId rename', () => {
     expect(verified.registeredDrepId).toBe(REGISTERED_DREP);
   });
 
+  it('round-trips tokenVersion through issue → verify', async () => {
+    const { token } = await issueJWT(WALLET, ['delegator'], 'normal', undefined, 4);
+    const verified = await verifyJWT(token);
+    expect(verified.tokenVersion).toBe(4);
+  });
+
+  it('defaults tokenVersion to 0 when issued without one and on legacy tokens', async () => {
+    const { token } = await issueJWT(WALLET, ['delegator'], 'normal');
+    expect((await verifyJWT(token)).tokenVersion).toBe(0);
+
+    const legacy = await manuallySignToken({ roles: ['delegator'], sessionType: 'normal' }, WALLET);
+    expect((await verifyJWT(legacy)).tokenVersion).toBe(0);
+  });
+
   it('issued tokens do NOT carry the legacy `drepId` field on the wire', async () => {
     // Defense against accidentally re-introducing the dual-write path.
     // Decode the JWT body and assert only the new field shape is
@@ -122,5 +136,26 @@ describe('issueJWT / verifyJWT — registeredDrepId rename', () => {
 
     expect(parsed['registeredDrepId']).toBe(REGISTERED_DREP);
     expect(parsed['drepId']).toBeUndefined();
+  });
+});
+
+describe('buildSignMessage — stage binding', () => {
+  it('embeds the stage so a challenge signed on one stage cannot verify on another', () => {
+    const prev = process.env['STAGE'];
+    try {
+      process.env['STAGE'] = 'test';
+      const onTest = buildSignMessage('nonce123', WALLET);
+      process.env['STAGE'] = 'prod';
+      const onProd = buildSignMessage('nonce123', WALLET);
+
+      expect(onTest).toContain('(stage=test)');
+      expect(onProd).toContain('(stage=prod)');
+      expect(onTest).not.toBe(onProd);
+      expect(onTest).toContain(`Wallet: ${WALLET}`);
+      expect(onTest).toContain('Nonce: nonce123');
+    } finally {
+      if (prev === undefined) delete process.env['STAGE'];
+      else process.env['STAGE'] = prev;
+    }
   });
 });
