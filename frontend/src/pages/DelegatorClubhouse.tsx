@@ -26,6 +26,7 @@ import { Composer } from '@/components/clubhouse/Composer';
 import { ClubhouseRail } from '@/components/rails/ClubhouseRail';
 import { PageWithRail } from '@/components/Layout';
 import { Button } from '@/components/ui/Button';
+import { ExpandableText } from '@/components/ExpandableText';
 import type {
   ClubhousePost,
   ClubhouseComment,
@@ -462,9 +463,10 @@ function PostCard({
         </h3>
       )}
 
-      <p className="text-sm text-[var(--text-secondary)] whitespace-pre-wrap leading-relaxed">
-        {post.body}
-      </p>
+      <ExpandableText
+        text={post.body}
+        className="text-sm text-[var(--text-secondary)] whitespace-pre-wrap leading-relaxed"
+      />
 
       {/* Frozen-at annotation — subtle, only on auto-posts. The
           locked spec calls this out as a required UI signal:
