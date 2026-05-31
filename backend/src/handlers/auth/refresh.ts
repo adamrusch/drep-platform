@@ -27,6 +27,9 @@ export const handler = async (
       authCtx.roles,
       'normal',
       authCtx.registeredDrepId,
+      // The authorizer already validated this against the live row and
+      // forwarded it, so re-mint at the same version (no second read).
+      authCtx.tokenVersion ?? 0,
     );
 
     const cookieHeader = buildSetCookieHeader(token, 'normal');
