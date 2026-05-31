@@ -112,6 +112,38 @@ export function useFailCommitteeVote(drepId: string, actionId: string) {
   });
 }
 
+export interface SubmitReadiness {
+  ready: boolean;
+  broadcastAllowed: boolean;
+  stage: string;
+  rationaleOverridden: boolean;
+  payload: {
+    drepId: string;
+    actionId: string;
+    position: CommitteePosition;
+    voteKind: number;
+    anchorUrl: string | null;
+    anchorHash: string | null;
+  };
+  message: string;
+}
+
+export function useSubmitVote(drepId: string, actionId: string) {
+  return useMutation({
+    mutationFn: (vars: { override?: boolean } = {}) =>
+      post<SubmitReadiness>(`/committee/${enc(drepId)}/votes/${enc(actionId)}/submit`, vars),
+  });
+}
+
+export function useSubmitReceipt(drepId: string, actionId: string) {
+  const invalidate = useInvalidateVote(drepId, actionId);
+  return useMutation({
+    mutationFn: (vars: { txHash: string }) =>
+      post(`/committee/${enc(drepId)}/votes/${enc(actionId)}/submit/receipt`, vars),
+    onSuccess: invalidate,
+  });
+}
+
 export function useWithdrawProposal(drepId: string, actionId: string) {
   const sign = useMutationSign();
   const wallet = useAuthStore((s) => s.walletAddress);

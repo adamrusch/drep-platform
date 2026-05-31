@@ -239,6 +239,8 @@ export class ApiStack extends cdk.Stack {
     const committeeFinalizeRationaleFn = fn('CommitteeFinalizeRationaleFn', 'handlers/committee/finalizeRationale.ts');
     const committeeIpfsKeyFn = fn('CommitteeIpfsKeyFn', 'handlers/committee/ipfsKey.ts');
     const committeePinRationaleFn = fn('CommitteePinRationaleFn', 'handlers/committee/pinRationale.ts');
+    const committeeSubmitFn = fn('CommitteeSubmitFn', 'handlers/committee/submit.ts');
+    const committeeSubmitReceiptFn = fn('CommitteeSubmitReceiptFn', 'handlers/committee/submitReceipt.ts');
 
     // ---- Platform admin handlers (Phase 2) ----
     const adminGetSafetyModeFn = fn('AdminGetSafetyModeFn', 'handlers/admin/getSafetyMode.ts');
@@ -459,6 +461,8 @@ export class ApiStack extends cdk.Stack {
     addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/votes/{actionId}/rationale/pin', committeePinRationaleFn, 'CommitteePinRationale', true);
     addRoute(apigwv2.HttpMethod.GET, '/committee/{drepId}/ipfs-key', committeeIpfsKeyFn, 'CommitteeIpfsKeyGet', true);
     addRoute(apigwv2.HttpMethod.PUT, '/committee/{drepId}/ipfs-key', committeeIpfsKeyFn, 'CommitteeIpfsKeyPut', true);
+    addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/votes/{actionId}/submit', committeeSubmitFn, 'CommitteeSubmit', true);
+    addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/votes/{actionId}/submit/receipt', committeeSubmitReceiptFn, 'CommitteeSubmitReceipt', true);
 
     // ---- Platform admin routes (Phase 2) ----
     addRoute(apigwv2.HttpMethod.GET, '/admin/safety-mode', adminGetSafetyModeFn, 'AdminGetSafetyMode', true);
