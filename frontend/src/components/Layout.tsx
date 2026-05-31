@@ -8,6 +8,7 @@ import {
   Users,
   Lightbulb,
   Bell,
+  ShieldCheck,
   Sun,
   Moon,
   Search,
@@ -119,6 +120,14 @@ const NAV_ITEMS: NavItem[] = [
     icon: Bell,
     match: (p) => p.startsWith('/notifications'),
   },
+  {
+    id: 'admin',
+    label: 'Admin',
+    href: '/admin',
+    icon: ShieldCheck,
+    match: (p) => p.startsWith('/admin'),
+    roles: ['platform_admin'],
+  },
 ];
 
 export function Layout({ children }: LayoutProps): React.ReactElement {
@@ -140,11 +149,17 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
     closeMobileMenu();
   }, [location.pathname, closeMobileMenu]);
 
-  // Show all 7 nav items to everyone — guest visitors can see Dashboard
-  // (it redirects to wallet connect under the hood). Hiding nav items
-  // hides primary surfaces and is what the audit flagged. Routes are still
-  // protected by RoleGuard, so revealing the chrome is safe.
-  const visibleNav = NAV_ITEMS;
+  // Show the primary nav items to everyone — guest visitors can see Dashboard
+  // (it redirects to wallet connect under the hood). Hiding nav items hides
+  // primary surfaces and is what the audit flagged. Routes are still protected
+  // by RoleGuard, so revealing the chrome is safe. EXCEPTION: platform_admin-
+  // gated items (Admin) are only shown to admins — there's no reason to expose
+  // an operator surface to every visitor.
+  const roles = useAuthStore((s) => s.roles);
+  const visibleNav = NAV_ITEMS.filter(
+    (item) =>
+      !item.roles?.includes('platform_admin') || roles.includes('platform_admin'),
+  );
 
   const displayInitials =
     profile?.displayName

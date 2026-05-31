@@ -8,6 +8,16 @@ import type { RationaleMode } from '@/types/committee';
 
 const enc = encodeURIComponent;
 
+/** Register a new DRep committee (POST /drep). JWT-auth, no re-sign. Elevates
+ *  the caller to lead_drep server-side — the new role surfaces after a wallet
+ *  re-login. Returns the created committee (incl. its generated drepId). */
+export function useRegisterCommittee() {
+  return useMutation({
+    mutationFn: (vars: { committeeName: string; description: string }) =>
+      post<{ drepId: string; committeeName: string }>('/drep', vars),
+  });
+}
+
 export function useAddCommitteeMember(drepId: string) {
   const sign = useMutationSign();
   const wallet = useAuthStore((s) => s.walletAddress);
