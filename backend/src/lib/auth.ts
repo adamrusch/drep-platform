@@ -90,7 +90,13 @@ export async function generateChallenge(walletAddress: string): Promise<{
 }
 
 export function buildSignMessage(nonce: string, walletAddress: string): string {
-  return `drep-platform wants you to sign in:\n\nWallet: ${walletAddress}\nNonce: ${nonce}\n\nThis request will not trigger a blockchain transaction or cost any gas fees.`;
+  // Stage-bound (defense in depth): a challenge signed on test.drep.tools can't
+  // be replayed against prod even if the per-stage nonce tables were ever
+  // unified. Issuer and verifier both build via this function, so they stay
+  // byte-identical within a stage. The frontend signs the server-provided
+  // message verbatim (useWalletAuth), so this is a backend-only change.
+  const stage = process.env['STAGE'] ?? 'dev';
+  return `drep-platform wants you to sign in (stage=${stage}):\n\nWallet: ${walletAddress}\nNonce: ${nonce}\n\nThis request will not trigger a blockchain transaction or cost any gas fees.`;
 }
 
 /**
@@ -426,6 +432,7 @@ export async function issueJWT(
   roles: UserRole[],
   sessionType: SessionType,
   registeredDrepId?: string,
+  tokenVersion = 0,
 ): Promise<{ token: string; expiresAt: string }> {
   const secret = await getJwtSecret();
   const durationSecs = SESSION_DURATIONS[sessionType];
@@ -434,6 +441,7 @@ export async function issueJWT(
   const payload: Record<string, unknown> = {
     roles,
     sessionType,
+    tokenVersion,
     ...(registeredDrepId ? { registeredDrepId } : {}),
   };
 
@@ -465,6 +473,7 @@ export async function verifyJWT(token: string): Promise<JWTPayload> {
     roles: UserRole[];
     sessionType: SessionType;
     registeredDrepId?: string;
+    tokenVersion?: number;
     drepId?: string; // legacy — remove after 2026-06-03
   };
 
@@ -486,6 +495,7 @@ export async function verifyJWT(token: string): Promise<JWTPayload> {
     roles: josePayload.roles,
     sessionType: josePayload.sessionType,
     registeredDrepId,
+    tokenVersion: typeof josePayload.tokenVersion === 'number' ? josePayload.tokenVersion : 0,
     iat: josePayload.iat ?? 0,
     exp: josePayload.exp ?? 0,
   };

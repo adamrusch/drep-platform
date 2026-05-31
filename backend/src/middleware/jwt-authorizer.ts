@@ -30,13 +30,24 @@
  * Caching: explicitly disabled in `infra/lib/api-stack.ts` (TTL=0). We
  * want immediate revocation on logout; a 5-minute cache TTL would
  * defeat that.
+ *
+ * Revocation: after the JWT verifies cryptographically, we read the user
+ * row's `tokenVersion` and reject the token if it is stale (logout
+ * increments the row, invalidating every outstanding token at once — i.e.
+ * "log out everywhere"). This is one DynamoDB GetItem per authenticated
+ * request; the authorizer already carries `lambdaRole` (table read) and the
+ * table-prefix env via `commonLambdaProps`, so no extra wiring. If the read
+ * itself ERRORS (DynamoDB blip), we FAIL OPEN — the token is already
+ * cryptographically valid and we prefer availability over enforcing
+ * revocation during an outage. A genuine version MISMATCH always fails closed.
  */
 import type {
   APIGatewayRequestAuthorizerEventV2,
   APIGatewaySimpleAuthorizerResult,
 } from 'aws-lambda';
 import { verifyJWT, extractTokenFromCookie } from '../lib/auth';
-import type { JWTPayload } from '../lib/types';
+import { getItem, tableNames } from '../lib/dynamodb';
+import type { JWTPayload, UserItem } from '../lib/types';
 
 
 export const handler = async (
@@ -49,12 +60,39 @@ export const handler = async (
     }
 
     const payload = await verifyJWT(token);
-    return buildAuthorizedResponse(payload);
+
+    // Session revocation: reject a token whose version is below the user
+    // row's current `tokenVersion` (bumped on logout). Fail OPEN on a read
+    // error (token is already crypto-valid); fail CLOSED on a real mismatch.
+    const liveVersion = await currentTokenVersion(payload.sub);
+    if (liveVersion !== null && (payload.tokenVersion ?? 0) < liveVersion) {
+      console.warn(
+        `JWT authorizer rejected revoked token for ${payload.sub}: ` +
+          `tokenVersion ${payload.tokenVersion ?? 0} < ${liveVersion}`,
+      );
+      return { isAuthorized: false };
+    }
+
+    return buildAuthorizedResponse(payload, liveVersion ?? payload.tokenVersion ?? 0);
   } catch (err) {
     console.warn('JWT authorizer rejected request:', err instanceof Error ? err.message : err);
     return { isAuthorized: false };
   }
 };
+
+/**
+ * The user row's current `tokenVersion`, or `null` if it couldn't be read
+ * (so the caller fails open). Absent attribute / absent row → 0.
+ */
+async function currentTokenVersion(walletAddress: string): Promise<number | null> {
+  try {
+    const user = await getItem<UserItem>(tableNames.users, { walletAddress, SK: 'PROFILE' });
+    return typeof user?.tokenVersion === 'number' ? user.tokenVersion : 0;
+  } catch (err) {
+    console.error('JWT authorizer: tokenVersion read failed, failing open:', err);
+    return null;
+  }
+}
 
 function extractToken(event: APIGatewayRequestAuthorizerEventV2): string | null {
   // 1. Try Authorization header (Bearer token)
@@ -73,7 +111,10 @@ function extractToken(event: APIGatewayRequestAuthorizerEventV2): string | null 
   return null;
 }
 
-function buildAuthorizedResponse(payload: JWTPayload): APIGatewaySimpleAuthorizerResult & {
+function buildAuthorizedResponse(
+  payload: JWTPayload,
+  tokenVersion: number,
+): APIGatewaySimpleAuthorizerResult & {
   context: Record<string, string>;
 } {
   return {
@@ -82,6 +123,9 @@ function buildAuthorizedResponse(payload: JWTPayload): APIGatewaySimpleAuthorize
       walletAddress: payload.sub,
       roles: JSON.stringify(payload.roles),
       sessionType: payload.sessionType,
+      // Forward the validated version so /auth/refresh re-mints at the
+      // current version without a second DynamoDB read.
+      tokenVersion: String(tokenVersion),
       ...(payload.registeredDrepId ? { registeredDrepId: payload.registeredDrepId } : {}),
     },
   };
