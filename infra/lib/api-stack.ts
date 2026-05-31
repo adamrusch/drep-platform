@@ -204,6 +204,10 @@ export class ApiStack extends cdk.Stack {
     const committeeAddMemberFn = fn('CommitteeAddMemberFn', 'handlers/committee/addMember.ts');
     const committeeRemoveMemberFn = fn('CommitteeRemoveMemberFn', 'handlers/committee/removeMember.ts');
     const committeeVotingConfigFn = fn('CommitteeVotingConfigFn', 'handlers/committee/updateVotingConfig.ts');
+    const committeeListVotesFn = fn('CommitteeListVotesFn', 'handlers/committee/listVotes.ts');
+    const committeeGetVoteFn = fn('CommitteeGetVoteFn', 'handlers/committee/getVote.ts');
+    const committeeOpenProposalFn = fn('CommitteeOpenProposalFn', 'handlers/committee/openProposal.ts');
+    const committeeCastVoteFn = fn('CommitteeCastVoteFn', 'handlers/committee/castVote.ts');
 
     // ---- DRep directory handlers (chain-state read; /dreps routes) ----
     // The directory is the global registry of mainnet DReps with their
@@ -403,6 +407,10 @@ export class ApiStack extends cdk.Stack {
     addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/members', committeeAddMemberFn, 'CommitteeAddMember', true);
     addRoute(apigwv2.HttpMethod.DELETE, '/committee/{drepId}/members/{walletAddress}', committeeRemoveMemberFn, 'CommitteeRemoveMember', true);
     addRoute(apigwv2.HttpMethod.PUT, '/committee/{drepId}/voting-config', committeeVotingConfigFn, 'CommitteeVotingConfig', true);
+    addRoute(apigwv2.HttpMethod.GET, '/committee/{drepId}/votes', committeeListVotesFn, 'CommitteeListVotes');
+    addRoute(apigwv2.HttpMethod.GET, '/committee/{drepId}/votes/{actionId}', committeeGetVoteFn, 'CommitteeGetVote');
+    addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/votes', committeeOpenProposalFn, 'CommitteeOpenProposal', true);
+    addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/votes/{actionId}/cast', committeeCastVoteFn, 'CommitteeCastVote', true);
 
     // ---- DRep directory routes (chain-state) ----
     addRoute(apigwv2.HttpMethod.GET, '/dreps', drepDirectoryListFn, 'DRepDirectoryList');
