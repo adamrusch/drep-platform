@@ -1,4 +1,4 @@
-import { getItem, queryItems, tableNames } from '../../lib/dynamodb';
+import { getItem, queryItems, updateItem, tableNames } from '../../lib/dynamodb';
 import type { AuthContext } from '../../middleware/role-guard';
 import { AuthorizationError } from '../../middleware/role-guard';
 import {
@@ -10,6 +10,8 @@ import type {
   VotingConfigItem,
   CommitteeVoteProposalItem,
   CommitteeVoteCastItem,
+  CommitteeProposalStatus,
+  CommitteeTallySnapshot,
   GovernanceActionItem,
 } from '../../lib/types';
 
@@ -163,6 +165,57 @@ export function castRowsFrom(
   return items.filter(
     (i) => typeof i['itemKey'] === 'string' && (i['itemKey'] as string).startsWith('CAST#'),
   ) as CommitteeVoteCastItem[];
+}
+
+/**
+ * Race-safe terminal transition of an OPEN proposal. Conditional on
+ * `status = 'open'`, so a manual close racing the epoch sweep (or two members
+ * clicking at once) — only the first wins; the loser gets 'not_open'. Always
+ * REMOVEs statusPartition so the open-proposal GSI shrinks.
+ */
+export async function transitionOpenProposal(
+  voteScope: string,
+  patch: {
+    status: CommitteeProposalStatus;
+    closedReason: NonNullable<CommitteeVoteProposalItem['closedReason']>;
+    closedByWallet: string;
+    finalTally?: CommitteeTallySnapshot;
+  },
+): Promise<'ok' | 'not_open'> {
+  const sets = [
+    '#status = :status',
+    'closedAt = :now',
+    'closedByWallet = :w',
+    'closedReason = :reason',
+  ];
+  const values: Record<string, unknown> = {
+    ':status': patch.status,
+    ':now': new Date().toISOString(),
+    ':w': patch.closedByWallet,
+    ':reason': patch.closedReason,
+    ':open': 'open',
+  };
+  if (patch.finalTally) {
+    sets.push('finalTally = :tally');
+    values[':tally'] = patch.finalTally;
+  }
+  const updateExpression = `SET ${sets.join(', ')} REMOVE statusPartition`;
+  try {
+    await updateItem(
+      tableNames.committeeVotes,
+      { voteScope, itemKey: 'PROPOSAL' },
+      updateExpression,
+      { '#status': 'status' },
+      values,
+      '#status = :open',
+    );
+    return 'ok';
+  } catch (err) {
+    if (err && typeof err === 'object' && (err as { name?: string }).name === 'ConditionalCheckFailedException') {
+      return 'not_open';
+    }
+    throw err;
+  }
 }
 
 /** Count this committee's currently-open proposals (for config-change warnings). */
