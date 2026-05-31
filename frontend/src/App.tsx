@@ -90,6 +90,15 @@ const ClubhouseLanding = lazy(() =>
 const CommitteeVoteRoom = lazy(() =>
   import('@/pages/CommitteeVoteRoom').then((m) => ({ default: m.CommitteeVoteRoom })),
 );
+const CommitteeLanding = lazy(() =>
+  import('@/pages/CommitteeLanding').then((m) => ({ default: m.CommitteeLanding })),
+);
+const CommitteeVoteList = lazy(() =>
+  import('@/pages/CommitteeVoteList').then((m) => ({ default: m.CommitteeVoteList })),
+);
+const AdminPanel = lazy(() =>
+  import('@/pages/AdminPanel').then((m) => ({ default: m.AdminPanel })),
+);
 const DRepDirectoryPage = lazy(() =>
   import('@/pages/DRepDirectoryPage').then((m) => ({ default: m.DRepDirectoryPage })),
 );
@@ -251,13 +260,14 @@ function App(): React.ReactElement {
                   path="/committee/:drepId/votes/:actionId"
                   element={<CommitteeVoteRoom />}
                 />
+                <Route path="/committee/:drepId" element={<CommitteeVoteList />} />
+                <Route path="/committee" element={<CommitteeLanding />} />
                 <Route
-                  path="/committee"
+                  path="/admin"
                   element={
-                    <ComingSoon
-                      title="DRep Committees"
-                      description="Coordination committees for DReps and their trusted delegators — committee membership, lead-DRep roles, and cross-DRep collaboration. Coming soon."
-                    />
+                    <RoleGuard requiredRoles={['platform_admin']} redirectTo="/">
+                      <AdminPanel />
+                    </RoleGuard>
                   }
                 />
                 <Route path="/dreps" element={<DRepDirectoryPage />} />
