@@ -491,9 +491,23 @@ export async function verifyJWT(token: string): Promise<JWTPayload> {
   };
 }
 
+/**
+ * Per-stage session-cookie name. prod keeps `access_token`; every other stage
+ * gets `access_token_<stage>` (e.g. `access_token_test`). This prevents a
+ * broader parent-domain cookie (a `.drep.tools` cookie set by prod) from
+ * shadowing a stage cookie on a subdomain — the test authorizer only ever
+ * reads `access_token_test`, signed by the test secret. (Per-stage *domains*
+ * alone don't fix this: a `.drep.tools` cookie is still sent to
+ * api.test.drep.tools.)
+ */
+export function cookieName(): string {
+  const stage = process.env['STAGE'] ?? 'dev';
+  return stage === 'prod' ? 'access_token' : `access_token_${stage}`;
+}
+
 export function extractTokenFromCookie(cookieHeader: string | undefined): string | null {
   if (!cookieHeader) return null;
-  const match = cookieHeader.match(/(?:^|;\s*)access_token=([^;]+)/);
+  const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${cookieName()}=([^;]+)`));
   return match ? (match[1] ?? null) : null;
 }
 
@@ -510,7 +524,7 @@ export function buildSetCookieHeader(token: string, sessionType: SessionType): s
   const maxAge = SESSION_DURATIONS[sessionType];
   const cookieDomain = process.env['COOKIE_DOMAIN'];
   return [
-    `access_token=${token}`,
+    `${cookieName()}=${token}`,
     `Max-Age=${maxAge}`,
     'HttpOnly',
     'Secure',
@@ -522,7 +536,7 @@ export function buildSetCookieHeader(token: string, sessionType: SessionType): s
 
 export function buildClearCookieHeader(): string {
   const cookieDomain = process.env['COOKIE_DOMAIN'];
-  const parts = ['access_token=', 'Max-Age=0', 'HttpOnly', 'Secure', 'SameSite=Strict', 'Path=/'];
+  const parts = [`${cookieName()}=`, 'Max-Age=0', 'HttpOnly', 'Secure', 'SameSite=Strict', 'Path=/'];
   if (cookieDomain) parts.push(`Domain=${cookieDomain}`);
   return parts.join('; ');
 }
