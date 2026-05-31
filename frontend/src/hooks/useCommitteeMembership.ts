@@ -102,8 +102,16 @@ export function useIpfsKeyStatus(drepId: string) {
 
 export function useStoreIpfsKey(drepId: string) {
   const qc = useQueryClient();
+  const sign = useMutationSign();
+  const wallet = useAuthStore((s) => s.walletAddress);
+  const stage = getStage();
   return useMutation({
-    mutationFn: (vars: { ipfsProjectId: string }) => put(`/committee/${enc(drepId)}/ipfs-key`, vars),
+    mutationFn: async (vars: { ipfsProjectId: string }) => {
+      const signed = await sign((nonce) =>
+        committeeMessages.ipfsKey(stage, drepId, nonce, wallet ?? ''),
+      );
+      return put(`/committee/${enc(drepId)}/ipfs-key`, { ...vars, ...signed });
+    },
     onSuccess: () => void qc.invalidateQueries({ queryKey: ['committee', drepId, 'ipfs-key'] }),
   });
 }
