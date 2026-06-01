@@ -12,6 +12,20 @@ const app = new cdk.App();
 const stage = app.node.tryGetContext('stage') as string | undefined ?? 'dev';
 assertStage(stage); // fail fast on a typo'd stage before provisioning anything
 
+// PRODUCTION WARNING: the live drep.tools site is currently served by the `dev`
+// stage stacks (historical artifact — see docs/TOPOLOGY.md). Until the planned
+// migration to real `*-prod` stacks, deploying `dev` (or `prod`) changes the
+// live site, and because `dev` now resolves to no custom domain a deploy would
+// DETACH drep.tools. The deploy.sh wrapper hard-blocks this without
+// `--touch-production`; this banner covers a direct `cdk deploy`.
+if (stage === 'dev' || stage === 'prod') {
+  console.error(
+    `\n⚠️  Stage "${stage}" currently serves the LIVE drep.tools site. ` +
+      `Deploying it changes production (and a "dev" deploy detaches the domain). ` +
+      `See docs/TOPOLOGY.md before proceeding.\n`,
+  );
+}
+
 const env: cdk.Environment = {
   account: '409410541898',
   region: 'us-east-1',
