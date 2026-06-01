@@ -57,6 +57,7 @@ LOCK_FILE="/tmp/drep-platform-deploy.lock.flock"
 DRY_RUN=0
 RUN_DRIFT=1
 STAGE="dev"
+TOUCH_PRODUCTION=0
 AWS_PROFILE="${AWS_PROFILE:-drep-platform}"
 export AWS_PROFILE
 
@@ -78,6 +79,12 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-drift)
             RUN_DRIFT=0
+            shift
+            ;;
+        --touch-production)
+            # Required acknowledgement to deploy a stage that serves the live
+            # drep.tools domain (see the production guard below).
+            TOUCH_PRODUCTION=1
             shift
             ;;
         --stage)
@@ -109,6 +116,29 @@ if [[ ${#STACKS[@]} -eq 0 ]]; then
     echo "Usage: $0 [--dry-run] [--no-drift] [--stage NAME] STACK [STACK...]" >&2
     echo "Example: $0 DRepPlatform-Api-dev DRepPlatform-Scheduler-dev" >&2
     exit 1
+fi
+
+# ---- Production guard -------------------------------------------------------
+# IMPORTANT (2026-05-31): the live drep.tools / api.drep.tools site is currently
+# served by the `dev` stage stacks (a historical artifact — see
+# docs/TOPOLOGY.md). Until the planned migration to real `*-prod` stacks, the
+# `dev` (and future `prod`) stage IS production: deploying it changes the live
+# app, and because `customDomainFor('dev')` now returns no domain, a `dev`
+# deploy would DETACH drep.tools. Require an explicit acknowledgement so nobody
+# does this by accident. `--dry-run` is always allowed (read-only).
+if [[ "$STAGE" == "dev" || "$STAGE" == "prod" ]] && [[ "$DRY_RUN" -eq 0 ]] && [[ "$TOUCH_PRODUCTION" -ne 1 ]]; then
+    echo "============================================================" >&2
+    echo "  REFUSING TO DEPLOY STAGE '$STAGE' WITHOUT CONFIRMATION" >&2
+    echo "============================================================" >&2
+    echo "  The '$STAGE' stage currently serves the LIVE drep.tools site." >&2
+    echo "  Deploying it will change production and can detach the domain." >&2
+    echo "  See docs/TOPOLOGY.md for the safe migration runbook." >&2
+    echo "" >&2
+    echo "  If you really mean to touch production, re-run with:" >&2
+    echo "      --touch-production" >&2
+    echo "  (or use --dry-run to preview without deploying)." >&2
+    echo "============================================================" >&2
+    exit 2
 fi
 
 # ---- Lock acquisition ----
