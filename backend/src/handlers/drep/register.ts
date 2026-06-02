@@ -76,7 +76,10 @@ export const handler = async (
     }
 
     // ---- Resolve + validate the member roster ----
-    const chairStake = authCtx.walletAddress; // the Chair's stake address == identity
+    // authCtx.walletAddress is already the canonical stake identity (normalised
+    // at /auth/verify); normalise again defensively so the Chair self-exclusion
+    // + dedup below always compare canonical forms.
+    const chairStake = normalizeToStakeAddress(authCtx.walletAddress) ?? authCtx.walletAddress;
     const rawOthers = Array.isArray(body.members) ? body.members : [];
     if (rawOthers.length > MAX_OTHER_MEMBERS) {
       return badRequest(`A committee can have at most ${MAX_OTHER_MEMBERS + 1} members.`);

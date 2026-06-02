@@ -781,7 +781,7 @@ export interface CommitteeVoteProposalItem {
   openedAt: string;
   closedAt?: string;
   closedByWallet?: string;
-  closedReason?: 'manual_pass' | 'manual_fail' | 'withdrawn' | 'epoch_deadline';
+  closedReason?: 'manual_pass' | 'manual_fail' | 'withdrawn' | 'epoch_deadline' | 'ga_terminal';
   /** Tally snapshot stamped at close/finalize for historical display. */
   finalTally?: CommitteeTallySnapshot;
   [key: string]: unknown;

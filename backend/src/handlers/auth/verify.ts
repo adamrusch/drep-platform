@@ -9,6 +9,7 @@ import {
   hashValue,
 } from '../../lib/auth';
 import { getItem, putItem, tableNames } from '../../lib/dynamodb';
+import { normalizeToStakeAddress } from '../../lib/cardanoAddress';
 import { _invalidateForStake } from '../../lib/recognition';
 import { writeAuditEvent } from '../../lib/audit';
 import type { UserItem, SessionType, UserRole } from '../../lib/types';
@@ -65,13 +66,24 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
       return unauthorized(consume.reason ?? 'Challenge already consumed');
     }
 
+    // ---- Canonical identity ----
+    // The wallet may have signed in with a base/payment address (`addr1…`) when
+    // it doesn't expose a reward address. The platform identifies users by their
+    // STAKE address everywhere (users PK, JWT sub, committee membership), so
+    // normalise to the stake form here — at the one boundary where identity is
+    // minted. The SIGNATURE was verified against the raw address above (the
+    // credential check accepts either form); from here down everything keys off
+    // `identity`. Idempotent for stake-address logins; falls back to the raw
+    // value only for enterprise addresses (no stake credential — a rare edge).
+    const identity = normalizeToStakeAddress(walletAddress) ?? walletAddress;
+
     // 3. Upsert user record in DynamoDB
     const now = new Date().toISOString();
     const sessionType: SessionType = body.rememberMe ? 'remember_me' : 'normal';
 
     // Fetch existing user to preserve roles/profile
     const existing = await getItem<UserItem>(tableNames.users, {
-      walletAddress,
+      walletAddress: identity,
       SK: 'PROFILE',
     });
 
@@ -85,7 +97,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     // Bootstrap platform admins: seed wallets become platform_admin at login so
     // the role is in the JWT (and thus /auth/me + the FE nav). Persisted on the
     // user row below so it survives even if the wallet later leaves the seed.
-    if (isBootstrapAdmin(walletAddress) && !typedRoles.includes('platform_admin')) {
+    if (isBootstrapAdmin(identity) && !typedRoles.includes('platform_admin')) {
       typedRoles.push('platform_admin');
     }
     // Carry the revocation counter forward so a fresh login does NOT resurrect
@@ -93,11 +105,11 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     // otherwise reset tokenVersion to undefined → 0, re-validating old tokens).
     const tokenVersion = typeof existing?.tokenVersion === 'number' ? existing.tokenVersion : 0;
     const { token, expiresAt } = await issueJWT(
-      walletAddress, typedRoles, sessionType, existing?.drepId as string | undefined, tokenVersion,
+      identity, typedRoles, sessionType, existing?.drepId as string | undefined, tokenVersion,
     );
 
     const userItem: UserItem = {
-      walletAddress,
+      walletAddress: identity,
       SK: 'PROFILE',
       displayName: existing?.displayName,
       bio: existing?.bio,
@@ -124,7 +136,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     // up within their own TTL window. Best-effort — never fail the
     // verify on a cache-eviction error.
     try {
-      _invalidateForStake(walletAddress);
+      _invalidateForStake(identity);
     } catch (err) {
       console.warn('verify: recognition cache eviction failed (non-fatal):', err);
     }
@@ -135,9 +147,9 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     // login timeline for incident review.
     await writeAuditEvent({
       entityType: 'auth',
-      entityId: walletAddress,
+      entityId: identity,
       eventType: 'auth.login',
-      actorWallet: walletAddress,
+      actorWallet: identity,
       metadata: {
         sessionType,
         rolesAtIssue: typedRoles,
@@ -149,7 +161,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
 
     return ok(
       {
-        walletAddress,
+        walletAddress: identity,
         roles: typedRoles,
         sessionType,
         expiresAt,
