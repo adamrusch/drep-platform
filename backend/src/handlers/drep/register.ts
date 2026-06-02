@@ -1,5 +1,5 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
-import { getItem, transactWrite, tableNames } from '../../lib/dynamodb';
+import { getItem, batchGetItems, transactWrite, tableNames } from '../../lib/dynamodb';
 import type {
   DRepCommitteeItem,
   CommitteeMemberItem,
@@ -8,29 +8,30 @@ import type {
 } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { writeAuditEvent } from '../../lib/audit';
-import { drepIdFromDRepKey } from '../../lib/drepId';
-import { pasteDrepLinkAllowed } from '../../lib/stage';
+import { normalizeToStakeAddress } from '../../lib/cardanoAddress';
 import {
   getSafetyMode,
   isSafetyModeActive,
   isNewWallet,
   maybeTripSafetyMode,
 } from '../../lib/safetyMode';
+import { MIN_COMMITTEE_MEMBERS } from '../committee/_committee';
 import { created, badRequest, conflict, forbidden, handleError } from '../_response';
 
 interface RegisterDRepBody {
   committeeName: string;
   description: string;
   onChainMetadata?: Record<string, unknown>;
-  /** Proof-of-control path: the CIP-95 DRep public key (hex). The backend
-   *  derives the drep id from it, so only a wallet that controls the DRep can
-   *  bind a committee to it. Preferred. */
-  drepKey?: string;
-  /** Fallback path: the caller's registered drep id (drep1…). Verified to be a
-   *  registered DRep on-chain, but does NOT prove control — kept for testing /
-   *  wallets without CIP-95; harden with drepKey for production. */
-  drepId?: string;
+  /** Addresses (payment OR stake form) of the OTHER members — the Chair (the
+   *  caller) is auto-included as member #1, so this need not contain them. */
+  members?: string[];
+  /** X in "X of N": how many members must vote Agree for "Committee Approved". */
+  approvalThreshold: number;
 }
+
+/** Hard cap so the formation transactWrite stays well under DynamoDB's 100-item
+ *  limit (1 committee + 1 chair membership + others + 1 user update). */
+const MAX_OTHER_MEMBERS = 50;
 
 export const handler = async (
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
@@ -53,93 +54,133 @@ export const handler = async (
       return badRequest('description is required');
     }
 
-    // ---- Resolve the real on-chain DRep id ----
-    // The committee is keyed by the lead's actual drep id, so the committee can
-    // govern that DRep's on-chain votes. Two ways to supply it:
-    //   - drepKey (CIP-95): derived server-side → proves control.
-    //   - drepId (paste): verified to be registered on-chain (below).
-    let drepId: string;
-    if (body.drepKey) {
-      try {
-        drepId = drepIdFromDRepKey(body.drepKey.trim());
-      } catch {
-        return badRequest('Invalid CIP-95 DRep key');
-      }
-    } else if (body.drepId && /^drep1[0-9a-z]{10,}$/.test(body.drepId.trim())) {
-      // Paste path proves the DRep exists, not that the caller controls it.
-      // Disabled in production so a committee can't be bound to someone else's
-      // DRep — CIP-95 proof-of-control only there.
-      if (!pasteDrepLinkAllowed()) {
-        return forbidden(
-          'To bind a committee to your DRep, connect a CIP-95 wallet so we can verify you control it. ' +
-            'Pasting a drep id is disabled here to prevent impersonation.',
-        );
-      }
-      drepId = body.drepId.trim();
-    } else {
-      return badRequest(
-        'A DRep is required. Connect a CIP-95 wallet (we read your DRep key) or provide your registered drep id.',
+    // ---- Gate: the caller must already be a registered DRep ----
+    // The committee binds to the DRep the caller linked (via /drep/link, which
+    // proves control in prod). No drep id is accepted here — we read it off the
+    // caller's profile, so a committee can only ever bind to YOUR own DRep.
+    const profile = await getItem<UserItem>(tableNames.users, {
+      walletAddress: authCtx.walletAddress,
+      SK: 'PROFILE',
+    });
+    const drepId = profile?.drepId as string | undefined;
+    if (!drepId) {
+      return forbidden(
+        'You must be a registered DRep to form a committee. Link your DRep on your profile first.',
       );
     }
-
-    // The DRep must actually be registered on-chain. We check the platform's
-    // directory (synced from chain); a brand-new DRep can take a few minutes to
-    // appear there after its registration confirms.
     const drepInDirectory = await getItem(tableNames.drepDirectory, { drepId, SK: 'PROFILE' });
     if (!drepInDirectory) {
       return conflict(
-        'That DRep is not in the on-chain directory yet. Make sure your DRep is registered on-chain — newly-registered DReps can take a few minutes to index.',
+        'Your DRep is not in the on-chain directory yet. Newly-registered DReps can take a few minutes to index — try again shortly.',
       );
     }
+
+    // ---- Resolve + validate the member roster ----
+    const chairStake = authCtx.walletAddress; // the Chair's stake address == identity
+    const rawOthers = Array.isArray(body.members) ? body.members : [];
+    if (rawOthers.length > MAX_OTHER_MEMBERS) {
+      return badRequest(`A committee can have at most ${MAX_OTHER_MEMBERS + 1} members.`);
+    }
+
+    const invalid: string[] = [];
+    const otherStakes = new Set<string>();
+    for (const raw of rawOthers) {
+      const input = (raw ?? '').trim();
+      if (!input) continue;
+      const stake = normalizeToStakeAddress(input);
+      if (!stake) {
+        invalid.push(input);
+        continue;
+      }
+      if (stake === chairStake) continue; // chair is auto-included; ignore self
+      otherStakes.add(stake);
+    }
+    if (invalid.length > 0) {
+      return badRequest(
+        `These addresses aren't valid Cardano payment or stake addresses: ${invalid
+          .slice(0, 5)
+          .join(', ')}${invalid.length > 5 ? '…' : ''}`,
+      );
+    }
+
+    const memberCount = 1 + otherStakes.size; // Chair + unique others
+    if (memberCount < MIN_COMMITTEE_MEMBERS) {
+      return badRequest(
+        `A committee needs at least ${MIN_COMMITTEE_MEMBERS} members. You (the Chair) plus ${
+          MIN_COMMITTEE_MEMBERS - 1
+        } more — add ${MIN_COMMITTEE_MEMBERS - memberCount} more address(es).`,
+      );
+    }
+
+    // ---- Validate X of N ----
+    const X = body.approvalThreshold;
+    if (typeof X !== 'number' || !Number.isInteger(X) || X < 1 || X > memberCount) {
+      return badRequest(
+        `approvalThreshold (X) must be a whole number between 1 and ${memberCount} (the committee size).`,
+      );
+    }
+
+    // ---- Active check: which member stake addresses have logged in ----
+    const others = [...otherStakes];
+    const userRows =
+      others.length > 0
+        ? await batchGetItems<UserItem>(
+            tableNames.users,
+            others.map((s) => ({ walletAddress: s, SK: 'PROFILE' })),
+          )
+        : [];
+    const activeSet = new Set(userRows.map((r) => r.walletAddress));
 
     const nowMs = Date.now();
     const now = new Date(nowMs).toISOString();
 
     // ---- Sybil safety-mode gate ----
     const safety = await getSafetyMode();
-    if (isSafetyModeActive(safety, Math.floor(nowMs / 1000))) {
-      const profile = await getItem<UserItem>(tableNames.users, {
-        walletAddress: authCtx.walletAddress,
-        SK: 'PROFILE',
-      });
-      if (isNewWallet(profile?.createdAt, nowMs)) {
-        return forbidden(
-          'The platform is temporarily in safety mode after a spike in new committees. ' +
-            'Wallets newer than 7 days cannot create a committee right now. Please try again later.',
-        );
-      }
+    if (isSafetyModeActive(safety, Math.floor(nowMs / 1000)) && isNewWallet(profile?.createdAt, nowMs)) {
+      return forbidden(
+        'The platform is temporarily in safety mode after a spike in new committees. ' +
+          'Wallets newer than 7 days cannot create a committee right now. Please try again later.',
+      );
     }
 
-    const leadMember: CommitteeMemberItem = {
-      walletAddress: authCtx.walletAddress,
-      joinedAt: now,
-      role: 'lead_drep',
-    };
+    const members: CommitteeMemberItem[] = [
+      { walletAddress: chairStake, joinedAt: now, role: 'lead_drep', active: true },
+      ...others.map<CommitteeMemberItem>((s) => ({
+        walletAddress: s,
+        joinedAt: now,
+        role: 'committee_member',
+        active: activeSet.has(s),
+      })),
+    ];
 
     const committee: DRepCommitteeItem = {
       drepId,
       SK: 'COMMITTEE',
-      leadWallet: authCtx.walletAddress,
+      leadWallet: chairStake,
       committeeName: body.committeeName.trim(),
       description: body.description.trim(),
       onChainMetadata: body.onChainMetadata,
-      members: [leadMember],
+      members,
+      approvalThreshold: X,
       createdAt: now,
       updatedAt: now,
     };
 
-    const membershipRow: CommitteeMembershipItem = {
-      walletAddress: authCtx.walletAddress,
-      drepId,
-      role: 'lead',
-      joinedAt: now,
-    };
+    const membershipPuts = members.map((m) => ({
+      Put: {
+        TableName: tableNames.committeeMembership,
+        Item: {
+          walletAddress: m.walletAddress,
+          drepId,
+          role: m.role === 'lead_drep' ? 'lead' : 'member',
+          joinedAt: now,
+        } as CommitteeMembershipItem as unknown as Record<string, unknown>,
+        ConditionExpression: 'attribute_not_exists(walletAddress)',
+      },
+    }));
 
     const rolesSet = new Set([...authCtx.roles, 'lead_drep']);
 
-    // Atomic: create the committee (one per DRep — conditional on the COMMITTEE
-    // row not existing), claim the lead's single membership slot (one committee
-    // per wallet, total), and elevate the user's role + link the drep id.
     try {
       await transactWrite([
         {
@@ -149,26 +190,22 @@ export const handler = async (
             ConditionExpression: 'attribute_not_exists(drepId)',
           },
         },
-        {
-          Put: {
-            TableName: tableNames.committeeMembership,
-            Item: membershipRow as unknown as Record<string, unknown>,
-            ConditionExpression: 'attribute_not_exists(walletAddress)',
-          },
-        },
+        ...membershipPuts,
         {
           Update: {
             TableName: tableNames.users,
-            Key: { walletAddress: authCtx.walletAddress, SK: 'PROFILE' },
-            UpdateExpression: 'SET #roles = :roles, #drepId = :drepId, #updatedAt = :now',
-            ExpressionAttributeNames: { '#roles': 'roles', '#drepId': 'drepId', '#updatedAt': 'updatedAt' },
-            ExpressionAttributeValues: { ':roles': Array.from(rolesSet), ':drepId': drepId, ':now': now },
+            Key: { walletAddress: chairStake, SK: 'PROFILE' },
+            UpdateExpression: 'SET #roles = :roles, #updatedAt = :now',
+            ExpressionAttributeNames: { '#roles': 'roles', '#updatedAt': 'updatedAt' },
+            ExpressionAttributeValues: { ':roles': Array.from(rolesSet), ':now': now },
           },
         },
       ]);
     } catch (err) {
       if (err && typeof err === 'object' && (err as { name?: string }).name === 'TransactionCanceledException') {
-        return conflict('This DRep already has a committee, or your wallet already belongs to one.');
+        return conflict(
+          'Could not create the committee: your DRep already has one, or one of the addresses you added already belongs to another committee.',
+        );
       }
       throw err;
     }
@@ -183,8 +220,8 @@ export const handler = async (
       entityType: 'drep_committee',
       entityId: drepId,
       eventType: 'drep.committee.registered',
-      actorWallet: authCtx.walletAddress,
-      metadata: { leadWallet: authCtx.walletAddress, drepId, boundVia: body.drepKey ? 'cip95' : 'drepId' },
+      actorWallet: chairStake,
+      metadata: { leadWallet: chairStake, drepId, memberCount, approvalThreshold: X },
     });
 
     return created(committee);
