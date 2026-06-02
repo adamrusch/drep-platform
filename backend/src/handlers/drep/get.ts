@@ -1,6 +1,7 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { getItem, tableNames } from '../../lib/dynamodb';
 import type { DRepCommitteeItem } from '../../lib/types';
+import { currentApprovalRule, withMemberActivity } from '../committee/_committee';
 import { ok, badRequest, notFound, internalError } from '../_response';
 
 export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> => {
@@ -19,7 +20,12 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
       return notFound('DRep committee');
     }
 
-    return ok(item);
+    // Refresh each member's live "active" (logged-in) status and surface the
+    // current X-of-N rule for display.
+    const members = await withMemberActivity(item.members);
+    const rule = currentApprovalRule({ ...item, members });
+
+    return ok({ ...item, members, approvalThreshold: rule.approvalThreshold, memberCount: rule.memberCount });
   } catch (err) {
     console.error('drep/get handler error:', err);
     return internalError('Failed to fetch DRep');

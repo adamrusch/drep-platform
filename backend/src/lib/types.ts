@@ -522,6 +522,10 @@ export interface DRepCommitteeItem {
   description: string;
   onChainMetadata?: Record<string, unknown>;
   members: CommitteeMemberItem[];
+  /** X in the "X of N" rule: the number of members who must vote Agree for a
+   *  governance action to be "Committee Approved". N is `members.length`. Set
+   *  at formation and re-specified on every member add/remove. */
+  approvalThreshold?: number;
   createdAt: string;
   updatedAt: string;
   [key: string]: unknown;
@@ -709,10 +713,16 @@ export interface DRepPowerHistoryItem {
 }
 
 export interface CommitteeMemberItem {
+  /** The member's STAKE address — the platform user identity. Members are
+   *  registered by any address form (payment/stake) and normalised to this. */
   walletAddress: string;
   displayName?: string;
   joinedAt: string;
   role: 'lead_drep' | 'committee_member' | 'trusted_delegator';
+  /** True when this stake address has ever logged into the platform (has a
+   *  users row). Refreshed when the committee is read. A member can be added
+   *  while inactive — they just need to be invited to sign in. */
+  active?: boolean;
 }
 
 // ============================================================
@@ -752,10 +762,17 @@ export interface CommitteeVoteProposalItem {
   proposerWallet: string;
   proposerSignature: CommitteeSignature;
   status: CommitteeProposalStatus;
-  /** Snapshotted from VOTING_CONFIG at open time — a mid-vote config change
-   *  does NOT retroactively re-threshold an in-flight proposal. */
-  thresholdPct: number;
-  quorum: number;
+  /** Snapshotted at open time — a mid-vote rule/membership change does NOT
+   *  retroactively re-threshold an in-flight proposal.
+   *
+   *  `approvalThreshold` (X) + `memberCount` (N) are the count-based "X of N"
+   *  rule: the proposal is "Committee Approved" when >= X members vote Agree.
+   *  `thresholdPct`/`quorum` are the LEGACY percentage model, kept optional so
+   *  older proposals still deserialise; new proposals snapshot X/N. */
+  approvalThreshold?: number;
+  memberCount?: number;
+  thresholdPct?: number;
+  quorum?: number;
   /** Copied from governance_actions so the deadline sweep needs no join.
    *  Also the sparse-GSI sort key. */
   epochDeadline: number;
@@ -776,6 +793,10 @@ export interface CommitteeTallySnapshot {
   abstainCount: number;
   activePool: number;
   agreePct: number;
+  /** Count-based "X of N" snapshot. `approved` = agreeCount >= approvalThreshold. */
+  approvalThreshold?: number;
+  memberCount?: number;
+  approved?: boolean;
 }
 
 /** SK='CAST#<wallet>' — latest cast per voter (overwritten on re-vote). */

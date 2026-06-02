@@ -206,6 +206,36 @@ export function decodeCardanoAddress(bech32String: string): DecodedAddress {
 }
 
 /**
+ * Normalise any Cardano address a user might paste — a payment/base address
+ * (`addr1…`), an enterprise address, or a reward/stake address (`stake1…`) —
+ * to its canonical STAKE (reward) bech32 address. That stake address is the
+ * platform's user identity (the `walletAddress` key on the users table), so
+ * this lets us match "is this person on the platform?" regardless of which
+ * address form they were given.
+ *
+ * Returns null when the input can't be mapped to a stake identity:
+ *   - not a valid/ supported address, or
+ *   - an enterprise address (no stake credential at all).
+ *
+ * Network + key/script-ness are preserved from the input.
+ */
+export function normalizeToStakeAddress(input: string): string | null {
+  let decoded: DecodedAddress;
+  try {
+    decoded = decodeCardanoAddress(input.trim());
+  } catch {
+    return null;
+  }
+  if (!decoded.stakeCredential) return null; // enterprise / no stake part
+  // Reward-address header: 0xe_ = stake KEY, 0xf_ = stake SCRIPT; low nibble is
+  // the network id (1 = mainnet, 0 = testnet).
+  const header = ((decoded.stakeIsScript ? 0xf0 : 0xe0) | (decoded.networkId & 0x0f)) & 0xff;
+  const stakeBytes = Buffer.concat([Buffer.from([header]), decoded.stakeCredential]);
+  const hrp = decoded.networkId === 1 ? 'stake' : 'stake_test';
+  return bech32.encode(hrp, bech32.toWords(stakeBytes), BECH32_LIMIT);
+}
+
+/**
  * Compute the 28-byte blake2b-224 hash of an Ed25519 public key — the
  * "credential" that Cardano addresses embed.
  *

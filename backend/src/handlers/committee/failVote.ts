@@ -1,11 +1,11 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
-import type { CommitteeTallySnapshot } from '../../lib/types';
-import { resolveCommitteeVote } from '../../lib/committeeVoteResolver';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { writeAuditEvent } from '../../lib/audit';
 import { committeeMessages } from '../../lib/committeeMessages';
 import { ok, badRequest, unauthorized, forbidden, notFound, conflict, handleError } from '../_response';
 import {
+  approvalRuleFromProposal,
+  buildTallySnapshot,
   castRowsFrom,
   getStage,
   isProposerOrLead,
@@ -63,18 +63,10 @@ export const handler = async (
 
     const items = await loadVoteScopeItems(voteScope);
     const casts = castRowsFrom(items);
-    const tally = resolveCommitteeVote({
-      casts: casts.map((c) => ({ voterWallet: c.voterWallet, vote: c.vote })),
-      thresholdPct: proposal.thresholdPct,
-      quorum: proposal.quorum,
-    });
-    const finalTally: CommitteeTallySnapshot = {
-      agreeCount: tally.agreeCount,
-      disagreeCount: tally.disagreeCount,
-      abstainCount: tally.abstainCount,
-      activePool: tally.activePool,
-      agreePct: tally.agreePct,
-    };
+    const finalTally = buildTallySnapshot(
+      casts.map((c) => ({ voterWallet: c.voterWallet, vote: c.vote })),
+      approvalRuleFromProposal(proposal),
+    );
 
     const result = await transitionOpenProposal(voteScope, {
       status: 'failed',
