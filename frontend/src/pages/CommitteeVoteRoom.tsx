@@ -72,13 +72,14 @@ export function CommitteeVoteRoom(): React.ReactElement {
         <CardContent>
           <p className="mb-3 text-[13px] text-[var(--text-secondary)]">
             Action <span className="font-mono">{actionId}</span> · proposed by {shortWallet(proposal.proposerWallet)} ·
-            threshold {proposal.thresholdPct}% of active voters · quorum {proposal.quorum}
+            needs <strong className="text-[var(--text-primary)]">{proposal.approvalThreshold}</strong> of{' '}
+            <strong className="text-[var(--text-primary)]">{proposal.memberCount}</strong> Agree (X of N)
           </p>
           <VoteTallyDonut tally={tally} />
           <p className="mt-3 text-[12.5px] text-[var(--text-secondary)]">
-            {tally.isPassing
-              ? 'Currently passing — any member may close it as passed.'
-              : 'Not currently passing.'}
+            {tally.isApproved
+              ? 'Committee Approved — any member may close it as passed.'
+              : `Not yet approved — ${tally.agreeNeeded} more Agree vote${tally.agreeNeeded === 1 ? '' : 's'} needed.`}
           </p>
         </CardContent>
       </Card>
@@ -118,7 +119,8 @@ export function CommitteeVoteRoom(): React.ReactElement {
             </div>
             {!tally.canCloseAsPass && (
               <p className="text-[12px] text-[var(--text-secondary)]">
-                "Close as passed" unlocks once quorum is met and the proposal is passing.
+                "Close as passed" unlocks once {tally.approvalThreshold} of {tally.memberCount}{' '}
+                members have voted Agree (Committee Approved).
               </p>
             )}
             <p className="text-[12px] text-[var(--text-secondary)]">

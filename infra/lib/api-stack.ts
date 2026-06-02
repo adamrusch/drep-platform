@@ -221,6 +221,7 @@ export class ApiStack extends cdk.Stack {
     const drepUpdateFn = fn('DRepUpdateFn', 'handlers/drep/update.ts');
 
     // ---- Committee voting handlers (Phase 2) ----
+    const committeeCheckMembersFn = fn('CommitteeCheckMembersFn', 'handlers/committee/checkAddresses.ts');
     const committeeAddMemberFn = fn('CommitteeAddMemberFn', 'handlers/committee/addMember.ts');
     const committeeRemoveMemberFn = fn('CommitteeRemoveMemberFn', 'handlers/committee/removeMember.ts');
     const committeeVotingConfigFn = fn('CommitteeVotingConfigFn', 'handlers/committee/updateVotingConfig.ts');
@@ -443,6 +444,7 @@ export class ApiStack extends cdk.Stack {
     addRoute(apigwv2.HttpMethod.PUT, '/drep/{drepId}', drepUpdateFn, 'DRepUpdate', true);
 
     // ---- Committee voting routes (Phase 2) ----
+    addRoute(apigwv2.HttpMethod.POST, '/committee/check-members', committeeCheckMembersFn, 'CommitteeCheckMembers', true);
     addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/members', committeeAddMemberFn, 'CommitteeAddMember', true);
     addRoute(apigwv2.HttpMethod.DELETE, '/committee/{drepId}/members/{walletAddress}', committeeRemoveMemberFn, 'CommitteeRemoveMember', true);
     addRoute(apigwv2.HttpMethod.PUT, '/committee/{drepId}/voting-config', committeeVotingConfigFn, 'CommitteeVotingConfig', true);

@@ -1,16 +1,21 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
-import { transactWrite, tableNames } from '../../lib/dynamodb';
-import type { CommitteeMemberItem, CommitteeMembershipItem } from '../../lib/types';
+import { getItem, transactWrite, tableNames } from '../../lib/dynamodb';
+import type { CommitteeMemberItem, CommitteeMembershipItem, UserItem } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { writeAuditEvent } from '../../lib/audit';
 import { committeeMessages } from '../../lib/committeeMessages';
+import { normalizeToStakeAddress } from '../../lib/cardanoAddress';
 import { created, badRequest, unauthorized, notFound, conflict, handleError } from '../_response';
 import { assertCommitteeLead, getStage, loadCommittee, verifyCommitteeResign } from './_committee';
 
 interface AddMemberBody {
+  /** Payment OR stake address — normalised to the stake identity server-side. */
   walletAddress: string;
   displayName?: string;
   role?: 'committee_member' | 'trusted_delegator';
+  /** Re-specified X of N (N = member count AFTER this add). Required: every
+   *  membership change must restate the consensus rule. */
+  approvalThreshold: number;
   mutationNonce: string;
   mutationSignature: string;
   mutationKey: string;
@@ -32,8 +37,14 @@ export const handler = async (
       return badRequest('Invalid JSON body');
     }
 
-    const target = body.walletAddress?.trim();
-    if (!target) return badRequest('walletAddress is required');
+    // The signed message binds the RAW address the Chair typed (the frontend
+    // signs the same string); we normalise separately for storage.
+    const rawInput = body.walletAddress?.trim();
+    if (!rawInput) return badRequest('walletAddress is required');
+    const stake = normalizeToStakeAddress(rawInput);
+    if (!stake) {
+      return badRequest('That is not a valid Cardano payment or stake address.');
+    }
     const role = body.role ?? 'committee_member';
     if (role !== 'committee_member' && role !== 'trusted_delegator') {
       return badRequest('role must be committee_member or trusted_delegator');
@@ -43,25 +54,38 @@ export const handler = async (
     if (!committee) return notFound('Committee');
     assertCommitteeLead(authCtx, committee);
 
-    if (committee.members?.some((m) => m.walletAddress === target)) {
-      return conflict('That wallet is already a member of this committee');
+    if (committee.members?.some((m) => m.walletAddress === stake)) {
+      return conflict('That address is already a member of this committee');
+    }
+
+    // Every membership change must restate X of N. N here is the NEW size.
+    const newMemberCount = (committee.members?.length ?? 0) + 1;
+    const X = body.approvalThreshold;
+    if (typeof X !== 'number' || !Number.isInteger(X) || X < 1 || X > newMemberCount) {
+      return badRequest(
+        `approvalThreshold (X) must be a whole number between 1 and ${newMemberCount} (the new committee size).`,
+      );
     }
 
     const message = committeeMessages.member(
-      getStage(), drepId, 'add', target, body.mutationNonce, authCtx.walletAddress,
+      getStage(), drepId, 'add', rawInput, body.mutationNonce, authCtx.walletAddress,
     );
     const reason = await verifyCommitteeResign(authCtx.walletAddress, body, message);
     if (reason) return unauthorized(reason);
 
+    // Active = the new member's stake address has logged into the platform.
+    const userRow = await getItem<UserItem>(tableNames.users, { walletAddress: stake, SK: 'PROFILE' });
+
     const now = new Date().toISOString();
     const member: CommitteeMemberItem = {
-      walletAddress: target,
+      walletAddress: stake,
       joinedAt: now,
       role: role === 'trusted_delegator' ? 'trusted_delegator' : 'committee_member',
+      active: Boolean(userRow),
       ...(body.displayName ? { displayName: body.displayName } : {}),
     };
     const membershipRow: CommitteeMembershipItem = {
-      walletAddress: target,
+      walletAddress: stake,
       drepId,
       role: 'member',
       joinedAt: now,
@@ -69,7 +93,7 @@ export const handler = async (
 
     try {
       // Atomic: claim the wallet's single membership slot (fails if it already
-      // belongs to ANY committee) AND append it to this committee's roster.
+      // belongs to ANY committee), append it to the roster, AND restate X of N.
       await transactWrite([
         {
           Put: {
@@ -82,9 +106,14 @@ export const handler = async (
           Update: {
             TableName: tableNames.drepCommittees,
             Key: { drepId, SK: 'COMMITTEE' },
-            UpdateExpression: 'SET #members = list_append(#members, :m), #updatedAt = :now',
-            ExpressionAttributeNames: { '#members': 'members', '#updatedAt': 'updatedAt' },
-            ExpressionAttributeValues: { ':m': [member], ':now': now },
+            UpdateExpression:
+              'SET #members = list_append(#members, :m), #approvalThreshold = :x, #updatedAt = :now',
+            ExpressionAttributeNames: {
+              '#members': 'members',
+              '#approvalThreshold': 'approvalThreshold',
+              '#updatedAt': 'updatedAt',
+            },
+            ExpressionAttributeValues: { ':m': [member], ':x': X, ':now': now },
           },
         },
       ]);
@@ -100,7 +129,7 @@ export const handler = async (
       entityId: drepId,
       eventType: 'committee.member.added',
       actorWallet: authCtx.walletAddress,
-      metadata: { targetWallet: target, role: member.role },
+      metadata: { targetWallet: stake, role: member.role, active: member.active, approvalThreshold: X },
     });
 
     return created(member);

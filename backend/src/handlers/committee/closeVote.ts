@@ -1,12 +1,12 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
-import type { CommitteeTallySnapshot } from '../../lib/types';
-import { resolveCommitteeVote } from '../../lib/committeeVoteResolver';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { writeAuditEvent } from '../../lib/audit';
 import { committeeMessages } from '../../lib/committeeMessages';
 import { ok, badRequest, unauthorized, notFound, conflict, handleError } from '../_response';
 import {
+  approvalRuleFromProposal,
   assertCommitteeMember,
+  buildTallySnapshot,
   castRowsFrom,
   getStage,
   loadCommittee,
@@ -54,14 +54,14 @@ export const handler = async (
 
     const items = await loadVoteScopeItems(voteScope);
     const casts = castRowsFrom(items);
-    const tally = resolveCommitteeVote({
-      casts: casts.map((c) => ({ voterWallet: c.voterWallet, vote: c.vote })),
-      thresholdPct: proposal.thresholdPct,
-      quorum: proposal.quorum,
-    });
-    if (!tally.canCloseAsPass) {
+    const rule = approvalRuleFromProposal(proposal);
+    const finalTally = buildTallySnapshot(
+      casts.map((c) => ({ voterWallet: c.voterWallet, vote: c.vote })),
+      rule,
+    );
+    if (!finalTally.approved) {
       return conflict(
-        'This proposal is not currently passing — it needs quorum (3 active voters) and the supermajority threshold before it can be closed as passed.',
+        `This proposal is not "Committee Approved" yet — it needs ${rule.approvalThreshold} of ${rule.memberCount} members to vote Agree before it can be closed as passed.`,
       );
     }
 
@@ -70,14 +70,6 @@ export const handler = async (
     );
     const reason = await verifyCommitteeResign(authCtx.walletAddress, body, message);
     if (reason) return unauthorized(reason);
-
-    const finalTally: CommitteeTallySnapshot = {
-      agreeCount: tally.agreeCount,
-      disagreeCount: tally.disagreeCount,
-      abstainCount: tally.abstainCount,
-      activePool: tally.activePool,
-      agreePct: tally.agreePct,
-    };
 
     const result = await transitionOpenProposal(voteScope, {
       status: 'passed',
