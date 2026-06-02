@@ -52,9 +52,10 @@ const WalletButton = lazy(() => import('./WalletButton'));
  * to swap in the real button.
  */
 function WalletButtonFallback(): React.ReactElement {
+  const { t } = useTranslation();
   return (
-    <Button variant="primary" disabled aria-label="Connect Wallet (loading)">
-      Connect Wallet
+    <Button variant="primary" disabled aria-label={t('common.connectWallet')}>
+      {t('common.connectWallet')}
     </Button>
   );
 }
@@ -240,7 +241,7 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
             strokeWidth={1.75}
             aria-hidden="true"
           />
-          <input placeholder="Search proposals, DReps, topics…" />
+          <input placeholder={t('topbar.search')} />
           <span className="kbd">⌘K</span>
         </div>
 
@@ -358,17 +359,17 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
         <div className="sidebar__footer">
           <div className="epoch-card">
             <div className="epoch-card__row">
-              <span>Network</span>
+              <span>{t('sidebar.network')}</span>
               <span>
                 <span className="network-dot" />
-                Mainnet
+                {t('sidebar.mainnet')}
               </span>
             </div>
             <div
               className="epoch-card__row"
               style={{ marginTop: 10, marginBottom: 0 }}
             >
-              <span>Epoch</span>
+              <span>{t('sidebar.epoch')}</span>
             </div>
             <div className="epoch-card__num">{epochInfo?.epoch ?? '—'}</div>
             {/* Phase B migrated the primary metadata source to Koios.
@@ -377,7 +378,7 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
                 We surface Koios in the sidebar so the user sees the true
                 hot-path source; if we ever swap or expose a multi-source
                 aggregation, update this string. */}
-            <div className="epoch-card__sub">Synced from Koios</div>
+            <div className="epoch-card__sub">{t('sidebar.syncedKoios')}</div>
           </div>
         </div>
       </aside>

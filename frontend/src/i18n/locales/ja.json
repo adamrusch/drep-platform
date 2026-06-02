@@ -35,6 +35,15 @@
     "editProfile": "プロフィールを編集",
     "logout": "ログアウト"
   },
+  "topbar": {
+    "search": "提案・DRep・トピックを検索…"
+  },
+  "sidebar": {
+    "network": "ネットワーク",
+    "mainnet": "メインネット",
+    "epoch": "エポック",
+    "syncedKoios": "Koiosから同期"
+  },
   "guest": {
     "eyebrow": "Cardanoガバナンス",
     "title": "DRep連携プラットフォーム",
