@@ -4,9 +4,17 @@ import { extractAuthContext } from '../../middleware/role-guard';
 import { writeAuditEvent } from '../../lib/audit';
 import { committeeMessages } from '../../lib/committeeMessages';
 import { ok, badRequest, unauthorized, notFound, conflict, handleError } from '../_response';
-import { assertCommitteeLead, getStage, loadCommittee, verifyCommitteeResign } from './_committee';
+import {
+  assertCommitteeLead,
+  getStage,
+  loadCommittee,
+  MIN_COMMITTEE_MEMBERS,
+  verifyCommitteeResign,
+} from './_committee';
 
 interface RemoveMemberBody {
+  /** Re-specified X of N (N = member count AFTER this removal). Required. */
+  approvalThreshold: number;
   mutationNonce: string;
   mutationSignature: string;
   mutationKey: string;
@@ -40,6 +48,22 @@ export const handler = async (
     const idx = committee.members?.findIndex((m) => m.walletAddress === target) ?? -1;
     if (idx < 0) return notFound('Committee member');
 
+    // A committee may never drop below the minimum size.
+    const newMemberCount = (committee.members?.length ?? 0) - 1;
+    if (newMemberCount < MIN_COMMITTEE_MEMBERS) {
+      return conflict(
+        `A committee must keep at least ${MIN_COMMITTEE_MEMBERS} members. Removing this member would leave ${newMemberCount}.`,
+      );
+    }
+
+    // Every membership change must restate X of N (N = the new size).
+    const X = body.approvalThreshold;
+    if (typeof X !== 'number' || !Number.isInteger(X) || X < 1 || X > newMemberCount) {
+      return badRequest(
+        `approvalThreshold (X) must be a whole number between 1 and ${newMemberCount} (the new committee size).`,
+      );
+    }
+
     const message = committeeMessages.member(
       getStage(), drepId, 'remove', target, body.mutationNonce, authCtx.walletAddress,
     );
@@ -64,13 +88,18 @@ export const handler = async (
           Update: {
             TableName: tableNames.drepCommittees,
             Key: { drepId, SK: 'COMMITTEE' },
-            UpdateExpression: 'SET #members = :m, #updatedAt = :now',
+            UpdateExpression: 'SET #members = :m, #approvalThreshold = :x, #updatedAt = :now',
             ConditionExpression: expectedUpdatedAt
               ? 'attribute_exists(drepId) AND #updatedAt = :expected'
               : 'attribute_exists(drepId)',
-            ExpressionAttributeNames: { '#members': 'members', '#updatedAt': 'updatedAt' },
+            ExpressionAttributeNames: {
+              '#members': 'members',
+              '#approvalThreshold': 'approvalThreshold',
+              '#updatedAt': 'updatedAt',
+            },
             ExpressionAttributeValues: {
               ':m': newMembers,
+              ':x': X,
               ':now': now,
               ...(expectedUpdatedAt ? { ':expected': expectedUpdatedAt } : {}),
             },

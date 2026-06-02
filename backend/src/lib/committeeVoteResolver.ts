@@ -2,57 +2,55 @@ import type { CommitteeCastVote } from './types';
 
 /**
  * Pure committee-vote resolver. No I/O — given the current casts and the
- * proposal's snapshotted threshold + quorum, it computes the live tally and
- * whether the proposal currently passes.
+ * proposal's snapshotted "X of N" rule, it computes the live tally and whether
+ * the proposal is "Committee Approved".
  *
- * Settled rules (see docs/PHASE2_COMMITTEE_PLAN.md):
- *  - Pass = configurable supermajority applied to the NON-ABSTAINING pool
- *    (`activePool = agree + disagree`). Abstain shrinks the pool, which makes
- *    passage easier.
- *  - Quorum = at least `quorum` (default 3) non-abstaining voters before a
- *    proposal can resolve.
- *  - Decision D2 = A: there is NO "doomed" computation. Closing a proposal as
- *    failed (or withdrawing it) is a human judgement call gated by role in the
- *    handler, not a property of the tally. The resolver only answers
- *    "is it passing right now?".
- *
- * `thresholdPct` is assumed already validated to 51..100 (never below simple
- * majority) at config-set time — see handlers/committee/updateVotingConfig.
- * At 51% the supermajority test coincides exactly with a strict majority for
- * every pool size, so the floor is honoured.
+ * Rule (settled with the user 2026-05-31):
+ *  - A governance action is **Committee Approved** when at least
+ *    `approvalThreshold` (X) of the `memberCount` (N) members vote **Agree**.
+ *    Abstentions and disagreements simply aren't Agrees — they don't change the
+ *    bar (unlike the old supermajority-of-active-pool model).
+ *  - X and N are snapshotted onto the proposal at open time, so a mid-vote
+ *    membership change or rule change does NOT move an in-flight proposal's bar.
+ *  - There is no "doomed" computation — closing as failed/withdrawn is a human,
+ *    role-gated action in the handler. The resolver only answers "is it
+ *    approved right now, and how many more Agrees are needed?".
  */
 
 export interface CommitteeResolverInput {
   /** One entry per voter. If a voter appears more than once, the LAST entry
    *  wins (defensive — callers should already pass the latest cast per voter). */
   casts: ReadonlyArray<{ voterWallet: string; vote: CommitteeCastVote }>;
-  /** Supermajority percentage applied to the non-abstaining pool (51..100). */
-  thresholdPct: number;
-  /** Minimum non-abstaining voters required to resolve (>= 1). */
-  quorum: number;
+  /** X — number of Agree votes required for "Committee Approved" (>= 1). */
+  approvalThreshold: number;
+  /** N — committee size snapshotted at open time (>= approvalThreshold). */
+  memberCount: number;
 }
 
 export interface CommitteeResolverResult {
   agreeCount: number;
   disagreeCount: number;
   abstainCount: number;
-  /** agree + disagree. Abstain is excluded, so abstaining shrinks this. */
-  activePool: number;
-  /** True once activePool >= quorum. */
-  quorumMet: boolean;
-  /** agree / activePool as a percentage (0 when activePool === 0). May be
-   *  fractional — formatting is the caller's concern. */
+  /** X — echoed for display. */
+  approvalThreshold: number;
+  /** N — echoed for display. */
+  memberCount: number;
+  /** Agree votes still needed to reach X (0 once approved). */
+  agreeNeeded: number;
+  /** agree / N as a percentage (informational; 0 when N === 0). */
   agreePct: number;
-  /** True iff quorumMet AND agree is a supermajority of the active pool. */
+  /** True iff agreeCount >= approvalThreshold — i.e. "Committee Approved". */
+  isApproved: boolean;
+  /** Back-compat aliases for the existing handler/UI call sites. */
   isPassing: boolean;
-  /** True iff any committee member may close the proposal as PASSED right now. */
   canCloseAsPass: boolean;
 }
 
 export function resolveCommitteeVote(
   input: CommitteeResolverInput,
 ): CommitteeResolverResult {
-  const { thresholdPct, quorum } = input;
+  const approvalThreshold = Math.max(1, Math.floor(input.approvalThreshold || 1));
+  const memberCount = Math.max(0, Math.floor(input.memberCount || 0));
 
   // Defensive dedupe: keep the last cast per voter.
   const latest = new Map<string, CommitteeCastVote>();
@@ -67,23 +65,20 @@ export function resolveCommitteeVote(
     else abstainCount++;
   }
 
-  const activePool = agreeCount + disagreeCount;
-  const quorumMet = activePool >= quorum;
-  const agreePct = activePool > 0 ? (agreeCount * 100) / activePool : 0;
-
-  // Integer cross-multiplication avoids floating-point edge cases right at the
-  // threshold (e.g. 2/3 vs 67%).
-  const meetsThreshold = agreeCount * 100 >= activePool * thresholdPct;
-  const isPassing = quorumMet && activePool > 0 && meetsThreshold;
+  const isApproved = agreeCount >= approvalThreshold;
+  const agreeNeeded = Math.max(0, approvalThreshold - agreeCount);
+  const agreePct = memberCount > 0 ? (agreeCount * 100) / memberCount : 0;
 
   return {
     agreeCount,
     disagreeCount,
     abstainCount,
-    activePool,
-    quorumMet,
+    approvalThreshold,
+    memberCount,
+    agreeNeeded,
     agreePct,
-    isPassing,
-    canCloseAsPass: isPassing,
+    isApproved,
+    isPassing: isApproved,
+    canCloseAsPass: isApproved,
   };
 }
