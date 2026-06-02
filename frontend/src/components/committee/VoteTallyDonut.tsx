@@ -7,7 +7,11 @@ const COLORS = {
   abstain: 'var(--text-secondary)',
 };
 
-/** Agree/Disagree/Abstain ring with the agree-% of the active pool at center. */
+/**
+ * Agree / Disagree / Abstain ring with the live X-of-N rule at center —
+ * "{agreeCount} / {memberCount}" with the X-of-N rule + "Committee Approved"
+ * status in the legend.
+ */
 export function VoteTallyDonut({
   tally,
   size = 140,
@@ -26,16 +30,27 @@ export function VoteTallyDonut({
         segments={segments}
         size={size}
         strokeWidth={size >= 140 ? 20 : 14}
-        centerValue={tally.activePool > 0 ? `${Math.round(tally.agreePct)}%` : '—'}
-        centerLabel="agree / active"
+        centerValue={
+          tally.memberCount > 0 ? `${tally.agreeCount}/${tally.memberCount}` : '—'
+        }
+        centerLabel="agree / total"
       />
       <ul className="space-y-1 text-[13px]">
         <LegendRow color={COLORS.agree} label="Agree" value={tally.agreeCount} />
         <LegendRow color={COLORS.disagree} label="Disagree" value={tally.disagreeCount} />
         <LegendRow color={COLORS.abstain} label="Abstain" value={tally.abstainCount} />
         <li className="pt-1 text-[12px] text-[var(--text-secondary)]">
-          {tally.quorumMet ? 'Quorum met' : `Needs ${3 - tally.activePool} more active vote(s) for quorum`}
+          Needs <strong className="text-[var(--text-primary)]">{tally.approvalThreshold}</strong>{' '}
+          of <strong className="text-[var(--text-primary)]">{tally.memberCount}</strong> Agree
+          {tally.isApproved ? null : ` — ${tally.agreeNeeded} more`}
         </li>
+        {tally.isApproved && (
+          <li className="pt-1">
+            <span className="inline-flex items-center gap-1 rounded-full bg-[var(--success)] px-2 py-0.5 text-[11.5px] font-semibold text-white">
+              Committee Approved ✓
+            </span>
+          </li>
+        )}
       </ul>
     </div>
   );

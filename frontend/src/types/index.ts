@@ -268,6 +268,10 @@ export interface DRepCommittee {
   description: string;
   onChainMetadata?: Record<string, unknown>;
   members: CommitteeMember[];
+  /** X — number of Agree votes required for "Committee Approved". */
+  approvalThreshold: number;
+  /** N — current committee size (echoed by the backend on /drep/{drepId}). */
+  memberCount: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -277,6 +281,10 @@ export interface CommitteeMember {
   displayName?: string;
   joinedAt: string;
   role: 'lead_drep' | 'committee_member' | 'trusted_delegator';
+  /** True when this member's stake address has ever signed in to the platform.
+   *  Optional for backwards compat with legacy committee rows synced before the
+   *  active flag existed — treat absence as `false`. */
+  active?: boolean;
 }
 
 // ---- DRep directory (chain-state, /dreps endpoint) ----

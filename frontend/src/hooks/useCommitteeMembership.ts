@@ -4,24 +4,33 @@ import { useAuthStore } from '@/stores/authStore';
 import { useMutationSign } from '@/hooks/useMutationSign';
 import { committeeMessages } from '@/lib/committeeMessages';
 import { getStage } from '@/lib/stage';
-import type { RationaleMode } from '@/types/committee';
+import type {
+  RationaleMode,
+  CheckMembersResponse,
+} from '@/types/committee';
 import type { DRepCommittee } from '@/types';
 
 const enc = encodeURIComponent;
 
-/** Register a new DRep committee (POST /drep). JWT-auth, no re-sign. Elevates
- *  the caller to lead_drep server-side — the new role surfaces after a wallet
- *  re-login. Returns the created committee (incl. its generated drepId). */
+/**
+ * Register a new DRep committee (POST /drep). JWT-auth, no re-sign. The caller
+ * must already be a registered DRep server-side (gated in
+ * backend/src/handlers/drep/register.ts) — the committee binds to *their* DRep,
+ * so there's no drep id in the body. Elevates the caller to lead_drep
+ * server-side; the new role surfaces after a wallet re-login.
+ *
+ * `members` are the OTHER members' addresses (payment OR stake form, ≥2 of
+ * them — the Chair is auto-added as member #1 by the handler). `approvalThreshold`
+ * is X in "X of N", where N = `members.length + 1` (the Chair).
+ */
 export function useRegisterCommittee() {
   return useMutation({
     mutationFn: (vars: {
       committeeName: string;
       description: string;
-      /** CIP-95 DRep public key (hex) — backend derives + proves the drep id. */
-      drepKey?: string;
-      /** Or a pasted registered drep id (verified registered on-chain). */
-      drepId?: string;
-    }) => post<{ drepId: string; committeeName: string }>('/drep', vars),
+      members: string[];
+      approvalThreshold: number;
+    }) => post<DRepCommittee>('/drep', vars),
   });
 }
 
@@ -40,13 +49,39 @@ export function useLinkDrep() {
   });
 }
 
+/**
+ * Check, for a list of Cardano addresses, whether each one parses and whether
+ * its canonical stake identity has ever signed in to the platform. Powers the
+ * live "Active / Not active" badge in the formation wizard and the add-member
+ * row. Inactive addresses are still addable — they just need to be invited to
+ * sign in. (POST /committee/check-members; JWT-auth.)
+ */
+export function useCheckMembers() {
+  return useMutation({
+    mutationFn: (vars: { addresses: string[] }) =>
+      post<CheckMembersResponse>('/committee/check-members', vars),
+  });
+}
+
+/**
+ * Add a member to an existing committee. The signed message binds the RAW
+ * address the Chair typed (the backend re-derives the stake identity from
+ * the same string), so we pass the raw input verbatim into the message and
+ * the body. `approvalThreshold` (X) is restated for the NEW committee size
+ * (N = current + 1) — every membership change must rebind the X-of-N rule.
+ */
 export function useAddCommitteeMember(drepId: string) {
   const sign = useMutationSign();
   const wallet = useAuthStore((s) => s.walletAddress);
   const qc = useQueryClient();
   const stage = getStage();
   return useMutation({
-    mutationFn: async (vars: { walletAddress: string; displayName?: string; role?: 'committee_member' | 'trusted_delegator' }) => {
+    mutationFn: async (vars: {
+      walletAddress: string;
+      displayName?: string;
+      role?: 'committee_member' | 'trusted_delegator';
+      approvalThreshold: number;
+    }) => {
       const signed = await sign((nonce) =>
         committeeMessages.member(stage, drepId, 'add', vars.walletAddress, nonce, wallet ?? ''),
       );
@@ -56,17 +91,26 @@ export function useAddCommitteeMember(drepId: string) {
   });
 }
 
+/**
+ * Remove a member. `walletAddress` is the member's stored STAKE address (path
+ * param). `approvalThreshold` (X) is restated for the NEW committee size
+ * (N = current - 1) — the backend rejects removals that would drop below the
+ * minimum, and demands the rule be restated in the same body.
+ */
 export function useRemoveCommitteeMember(drepId: string) {
   const sign = useMutationSign();
   const wallet = useAuthStore((s) => s.walletAddress);
   const qc = useQueryClient();
   const stage = getStage();
   return useMutation({
-    mutationFn: async (vars: { walletAddress: string }) => {
+    mutationFn: async (vars: { walletAddress: string; approvalThreshold: number }) => {
       const signed = await sign((nonce) =>
         committeeMessages.member(stage, drepId, 'remove', vars.walletAddress, nonce, wallet ?? ''),
       );
-      return del(`/committee/${enc(drepId)}/members/${enc(vars.walletAddress)}`, signed);
+      return del(`/committee/${enc(drepId)}/members/${enc(vars.walletAddress)}`, {
+        approvalThreshold: vars.approvalThreshold,
+        ...signed,
+      });
     },
     onSuccess: () => void qc.invalidateQueries({ queryKey: ['drep', drepId] }),
   });
