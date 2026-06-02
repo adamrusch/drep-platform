@@ -8,11 +8,11 @@ import { getCurrentEpochInfo } from '../../lib/koios';
 import { created, badRequest, unauthorized, notFound, conflict, handleError } from '../_response';
 import {
   assertCommitteeMember,
+  currentApprovalRule,
   getStage,
   loadCommittee,
   loadGovernanceAction,
   loadProposal,
-  loadVotingConfig,
   signatureSnapshot,
   verifyCommitteeResign,
   voteScopeOf,
@@ -54,11 +54,12 @@ export const handler = async (
     if (!committee) return notFound('Committee');
     assertCommitteeMember(authCtx, committee);
 
-    const config = await loadVotingConfig(drepId);
-    // A committee that can't reach quorum can't ever resolve — block at open.
-    if ((committee.members?.length ?? 0) < config.quorum) {
+    // The live "X of N" rule. Snapshotted onto the proposal so a later
+    // membership/threshold change can't move this proposal's bar.
+    const rule = currentApprovalRule(committee);
+    if (rule.memberCount < 1 || rule.approvalThreshold < 1 || rule.approvalThreshold > rule.memberCount) {
       return badRequest(
-        `This committee has fewer than ${config.quorum} members and cannot reach quorum. Add members first.`,
+        'This committee has no valid approval rule (X of N). Set the consensus rule before opening a proposal.',
       );
     }
 
@@ -106,8 +107,8 @@ export const handler = async (
       proposerWallet: authCtx.walletAddress,
       proposerSignature: signatureSnapshot(body, message),
       status: 'open',
-      thresholdPct: config.thresholdPct,
-      quorum: config.quorum,
+      approvalThreshold: rule.approvalThreshold,
+      memberCount: rule.memberCount,
       epochDeadline: typeof action.epochDeadline === 'number' ? action.epochDeadline : 0,
       statusPartition: 'OPEN',
       openedAt: now,
@@ -125,8 +126,8 @@ export const handler = async (
         drepId,
         actionId,
         proposedPosition: body.proposedPosition,
-        thresholdPct: config.thresholdPct,
-        quorum: config.quorum,
+        approvalThreshold: rule.approvalThreshold,
+        memberCount: rule.memberCount,
       },
     });
 

@@ -1,6 +1,6 @@
 import { queryItems, updateItem, tableNames } from '../lib/dynamodb';
 import { getCurrentEpochInfo } from '../lib/koios';
-import { resolveCommitteeVote } from '../lib/committeeVoteResolver';
+import { approvalRuleFromProposal, buildTallySnapshot } from '../handlers/committee/_committee';
 import { writeAuditEvent } from '../lib/audit';
 import type {
   CommitteeVoteProposalItem,
@@ -106,16 +106,8 @@ async function computeFinalTally(
     keyConditionExpression: 'voteScope = :vs AND begins_with(itemKey, :cast)',
     expressionAttributeValues: { ':vs': proposal.voteScope, ':cast': 'CAST#' },
   });
-  const tally = resolveCommitteeVote({
-    casts: items.items.map((c) => ({ voterWallet: c.voterWallet, vote: c.vote })),
-    thresholdPct: proposal.thresholdPct,
-    quorum: proposal.quorum,
-  });
-  return {
-    agreeCount: tally.agreeCount,
-    disagreeCount: tally.disagreeCount,
-    abstainCount: tally.abstainCount,
-    activePool: tally.activePool,
-    agreePct: tally.agreePct,
-  };
+  return buildTallySnapshot(
+    items.items.map((c) => ({ voterWallet: c.voterWallet, vote: c.vote })),
+    approvalRuleFromProposal(proposal),
+  );
 }
