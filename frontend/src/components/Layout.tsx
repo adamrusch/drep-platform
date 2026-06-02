@@ -16,9 +16,11 @@ import {
   Menu,
   type LucideIcon,
 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
 import { useUiStore } from '@/stores/uiStore';
 import { useThemeStore } from '@/stores/themeStore';
+import { LanguageSwitcher } from '@/components/LanguageSwitcher';
 import { useEpoch } from '@/hooks/useEpoch';
 import { useAutoLinkDrep } from '@/hooks/useAutoLinkDrep';
 import { del } from '@/lib/api';
@@ -141,6 +143,7 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
   const closeMobileMenu = useUiStore((s) => s.closeMobileMenu);
   const location = useLocation();
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const theme = useThemeStore((s) => s.theme);
   const toggleTheme = useThemeStore((s) => s.toggle);
   const { data: epochInfo } = useEpoch();
@@ -268,6 +271,7 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
               <Sun size={18} strokeWidth={1.75} />
             )}
           </button>
+          <LanguageSwitcher />
           {isAuthenticated && walletAddress ? (
             <div className="relative" ref={menuRef}>
               <button
@@ -276,7 +280,7 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
                 onClick={() => setMenuOpen((o) => !o)}
                 aria-haspopup="menu"
                 aria-expanded={menuOpen}
-                aria-label="Account menu"
+                aria-label={t('account.menu')}
               >
                 <Wallet size={16} strokeWidth={1.75} aria-hidden="true" />
                 <span>{formatWalletAddress(walletAddress, 6)}</span>
@@ -296,7 +300,7 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
                       navigate(`/profile/${encodeURIComponent(walletAddress)}`);
                     }}
                   >
-                    Public Profile
+                    {t('account.publicProfile')}
                   </button>
                   <button
                     role="menuitem"
@@ -307,7 +311,7 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
                       navigate('/profile/setup');
                     }}
                   >
-                    Edit Profile
+                    {t('account.editProfile')}
                   </button>
                   <div className="my-1 border-t border-[var(--border-default)]" />
                   <button
@@ -316,7 +320,7 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
                     className="block w-full text-left px-3 py-2 text-[13px] text-[var(--danger)] hover:bg-[var(--bg-muted)]"
                     onClick={() => void handleLogout()}
                   >
-                    Logout
+                    {t('account.logout')}
                   </button>
                 </div>
               )}
@@ -343,7 +347,7 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
                 className={cn('nav__item', isActive && 'nav__item--active')}
               >
                 <Icon size={18} strokeWidth={1.75} aria-hidden="true" />
-                <span>{item.label}</span>
+                <span>{t(`nav.${item.id}`)}</span>
                 {item.badge !== undefined && (
                   <span className="nav__item-badge">{item.badge}</span>
                 )}
