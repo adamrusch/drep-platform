@@ -1,0 +1,50 @@
+{
+  "common": {
+    "connectWallet": "ウォレットを接続",
+    "connecting": "接続中…",
+    "disconnecting": "切断中…",
+    "create": "作成",
+    "creating": "作成中…",
+    "save": "保存",
+    "saving": "保存中…",
+    "cancel": "キャンセル",
+    "back": "戻る",
+    "next": "次へ",
+    "confirm": "確定",
+    "loading": "読み込み中…",
+    "reload": "再読み込み"
+  },
+  "language": {
+    "label": "言語",
+    "en": "English",
+    "ja": "日本語"
+  },
+  "nav": {
+    "dashboard": "ダッシュボード",
+    "governance": "ガバナンスアクション",
+    "clubhouse": "委任者クラブハウス",
+    "committee": "DRep委員会",
+    "dreps": "DRep一覧",
+    "rationales": "投票理由",
+    "notifications": "通知",
+    "admin": "管理"
+  },
+  "account": {
+    "menu": "アカウントメニュー",
+    "publicProfile": "公開プロフィール",
+    "editProfile": "プロフィールを編集",
+    "logout": "ログアウト"
+  },
+  "guest": {
+    "eyebrow": "Cardanoガバナンス",
+    "title": "DRep連携プラットフォーム",
+    "subtitle": "Cardanoの委任者とDRepのための、透明性が高くコミュニティ主導のガバナンス連携。ガバナンスアクションを追跡し、議論に参加し、あなたの代表者に説明責任を求めましょう。",
+    "browse": "ガバナンスアクションを見る",
+    "card1Title": "ガバナンスを追跡",
+    "card1Desc": "パラメータ変更から国庫引き出しまで、チェーンと同期されたアクティブな提案をフォローできます。",
+    "card2Title": "あなたのDRepと関わる",
+    "card2Desc": "提案にコメントし、DRepの投票予定を確認し、委任者クラブハウスに参加しましょう。",
+    "card3Title": "最新情報を把握",
+    "card3Desc": "委任履歴を確認し、エポックの期限を把握して、重要な投票を見逃しません。"
+  }
+}
