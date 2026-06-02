@@ -6,7 +6,7 @@ import type {
 } from '../../lib/types';
 import { resolveCommitteeVote } from '../../lib/committeeVoteResolver';
 import { ok, badRequest, notFound, handleError } from '../_response';
-import { castRowsFrom, loadVoteScopeItems, voteScopeOf } from './_committee';
+import { approvalRuleFromProposal, castRowsFrom, loadVoteScopeItems, voteScopeOf } from './_committee';
 
 /** Public read: proposal + casts + live tally + rationale draft (if any). */
 export const handler = async (
@@ -32,10 +32,11 @@ export const handler = async (
       | CommitteeRationaleDraftItem
       | undefined;
 
+    const rule = approvalRuleFromProposal(proposal);
     const tally = resolveCommitteeVote({
       casts: casts.map((c) => ({ voterWallet: c.voterWallet, vote: c.vote })),
-      thresholdPct: proposal.thresholdPct,
-      quorum: proposal.quorum,
+      approvalThreshold: rule.approvalThreshold,
+      memberCount: rule.memberCount,
     });
 
     // Public casts omit the raw signature payload (kept on the row + audit log).
@@ -55,8 +56,8 @@ export const handler = async (
         proposedPosition: proposal.proposedPosition,
         proposerWallet: proposal.proposerWallet,
         status: proposal.status,
-        thresholdPct: proposal.thresholdPct,
-        quorum: proposal.quorum,
+        approvalThreshold: rule.approvalThreshold,
+        memberCount: rule.memberCount,
         epochDeadline: proposal.epochDeadline,
         openedAt: proposal.openedAt,
         closedAt: proposal.closedAt,

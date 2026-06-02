@@ -1,15 +1,18 @@
-import { getItem, queryItems, updateItem, tableNames } from '../../lib/dynamodb';
+import { getItem, batchGetItems, queryItems, updateItem, tableNames } from '../../lib/dynamodb';
 import type { AuthContext } from '../../middleware/role-guard';
 import { AuthorizationError } from '../../middleware/role-guard';
 import {
   validateMutationNonce,
   verifyWalletSignature,
 } from '../../lib/auth';
+import { resolveCommitteeVote } from '../../lib/committeeVoteResolver';
 import type {
   DRepCommitteeItem,
+  CommitteeMemberItem,
   VotingConfigItem,
   CommitteeVoteProposalItem,
   CommitteeVoteCastItem,
+  CommitteeCastVote,
   CommitteeProposalStatus,
   CommitteeTallySnapshot,
   CommitteeRationaleDraftItem,
@@ -17,6 +20,7 @@ import type {
   CommitteeRationaleFinalItem,
   RationaleMode,
   GovernanceActionItem,
+  UserItem,
 } from '../../lib/types';
 
 /** A collaborative edit lock auto-expires after 20 min of no heartbeat. */
@@ -54,6 +58,69 @@ export async function loadVotingConfig(
     quorum: item?.quorum ?? DEFAULT_QUORUM,
     item,
   };
+}
+
+/** Minimum committee size (Chair + ≥2 registered members). */
+export const MIN_COMMITTEE_MEMBERS = 3;
+
+/** Simple-majority default for a legacy committee with no explicit X set. */
+export function defaultApprovalThreshold(memberCount: number): number {
+  return Math.floor(memberCount / 2) + 1;
+}
+
+/** The LIVE "X of N" rule for a committee: X = approvalThreshold (or a
+ *  simple-majority default), N = current member count. */
+export function currentApprovalRule(
+  committee: DRepCommitteeItem,
+): { approvalThreshold: number; memberCount: number } {
+  const memberCount = committee.members?.length ?? 0;
+  const approvalThreshold = committee.approvalThreshold ?? defaultApprovalThreshold(memberCount);
+  return { approvalThreshold, memberCount };
+}
+
+/** The "X of N" rule SNAPSHOTTED on a proposal at open time. New proposals
+ *  carry approvalThreshold + memberCount; legacy ones fall back to the old
+ *  quorum/threshold fields so they still resolve without crashing. */
+export function approvalRuleFromProposal(
+  p: Pick<CommitteeVoteProposalItem, 'approvalThreshold' | 'memberCount' | 'quorum' | 'thresholdPct'>,
+): { approvalThreshold: number; memberCount: number } {
+  const approvalThreshold = p.approvalThreshold ?? p.quorum ?? 1;
+  const memberCount = p.memberCount ?? p.quorum ?? approvalThreshold;
+  return { approvalThreshold, memberCount };
+}
+
+/** Build a persisted tally snapshot from casts + an "X of N" rule. */
+export function buildTallySnapshot(
+  casts: ReadonlyArray<{ voterWallet: string; vote: CommitteeCastVote }>,
+  rule: { approvalThreshold: number; memberCount: number },
+): CommitteeTallySnapshot {
+  const r = resolveCommitteeVote({
+    casts,
+    approvalThreshold: rule.approvalThreshold,
+    memberCount: rule.memberCount,
+  });
+  return {
+    agreeCount: r.agreeCount,
+    disagreeCount: r.disagreeCount,
+    abstainCount: r.abstainCount,
+    activePool: r.agreeCount + r.disagreeCount,
+    agreePct: r.agreePct,
+    approvalThreshold: r.approvalThreshold,
+    memberCount: r.memberCount,
+    approved: r.isApproved,
+  };
+}
+
+/** Stamp each member with a live `active` flag (= has a users row / has logged
+ *  in). One batched read; safe on an empty roster. */
+export async function withMemberActivity(
+  members: CommitteeMemberItem[] | undefined,
+): Promise<CommitteeMemberItem[]> {
+  if (!members || members.length === 0) return members ?? [];
+  const keys = members.map((m) => ({ walletAddress: m.walletAddress, SK: 'PROFILE' }));
+  const rows = await batchGetItems<UserItem>(tableNames.users, keys);
+  const activeSet = new Set(rows.map((r) => r.walletAddress));
+  return members.map((m) => ({ ...m, active: activeSet.has(m.walletAddress) }));
 }
 
 /** Caller must be the lead OR a member of THIS committee (scoped — never
