@@ -213,11 +213,12 @@ export function decodeCardanoAddress(bech32String: string): DecodedAddress {
  * this lets us match "is this person on the platform?" regardless of which
  * address form they were given.
  *
- * Returns null when the input can't be mapped to a stake identity:
- *   - not a valid/ supported address, or
- *   - an enterprise address (no stake credential at all).
- *
- * Network + key/script-ness are preserved from the input.
+ * Returns null when the input can't be mapped to a key-hash stake identity:
+ *   - not a valid/ supported address,
+ *   - an enterprise address (no stake credential at all), or
+ *   - a SCRIPT stake credential — those can't log in (wallet auth rejects
+ *     script credentials), so admitting them as a committee member would just
+ *     leave a permanently-inactive entry. Reject for consistency.
  */
 export function normalizeToStakeAddress(input: string): string | null {
   let decoded: DecodedAddress;
@@ -227,6 +228,7 @@ export function normalizeToStakeAddress(input: string): string | null {
     return null;
   }
   if (!decoded.stakeCredential) return null; // enterprise / no stake part
+  if (decoded.stakeIsScript) return null; // script stake credential — can't log in
   // Reward-address header: 0xe_ = stake KEY, 0xf_ = stake SCRIPT; low nibble is
   // the network id (1 = mainnet, 0 = testnet).
   const header = ((decoded.stakeIsScript ? 0xf0 : 0xe0) | (decoded.networkId & 0x0f)) & 0xff;

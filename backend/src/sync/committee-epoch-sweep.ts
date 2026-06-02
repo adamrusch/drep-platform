@@ -52,12 +52,13 @@ export const handler = async (): Promise<{ scanned: number; finalized: number }>
       await updateItem(
         tableNames.committeeVotes,
         { voteScope: proposal.voteScope, itemKey: 'PROPOSAL' },
-        'SET #status = :status, closedAt = :now, closedReason = :reason, finalTally = :tally REMOVE statusPartition',
+        'SET #status = :status, closedAt = :now, closedReason = :reason, closedByWallet = :sys, finalTally = :tally REMOVE statusPartition',
         { '#status': 'status' },
         {
           ':status': 'epoch_finalized',
           ':now': new Date().toISOString(),
-          ':reason': 'epoch_deadline',
+          ':reason': deadlinePassed ? 'epoch_deadline' : 'ga_terminal',
+          ':sys': 'system',
           ':tally': finalTally,
           ':open': 'open',
         },
