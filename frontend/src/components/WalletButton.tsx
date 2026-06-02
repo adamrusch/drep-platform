@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { MeshProvider, useWallet, useWalletList } from '@meshsdk/react';
 import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
 import { useWalletAuth } from '@/auth/useWalletAuth';
@@ -46,6 +47,7 @@ function WalletButtonInner({ className }: WalletButtonProps): React.ReactElement
   const walletAddress = useAuthStore((s) => s.walletAddress);
   const { authenticate, logout, isLoading, error } = useWalletAuth();
   const { addToast } = useUiStore();
+  const { t } = useTranslation();
   const [showWalletList, setShowWalletList] = useState(false);
 
   const handleConnectWallet = async (walletName: string): Promise<void> => {
@@ -116,7 +118,7 @@ function WalletButtonInner({ className }: WalletButtonProps): React.ReactElement
         disabled={isLoading}
         className={className}
       >
-        {isLoading ? 'Disconnecting…' : `${walletAddress.slice(0, 8)}…`}
+        {isLoading ? t('common.disconnecting') : `${walletAddress.slice(0, 8)}…`}
       </Button>
     );
   }
@@ -129,7 +131,7 @@ function WalletButtonInner({ className }: WalletButtonProps): React.ReactElement
         disabled={isLoading}
         className={className}
       >
-        {isLoading ? 'Connecting…' : 'Connect Wallet'}
+        {isLoading ? t('common.connecting') : t('common.connectWallet')}
       </Button>
 
       {showWalletList && (
