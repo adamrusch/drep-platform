@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { Trans, useTranslation } from 'react-i18next';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import {
@@ -22,27 +23,28 @@ export function CommitteeLanding(): React.ReactElement {
   const isAuthed = useIsAuthenticated();
   const isMember = useIsCommitteeMember();
   const drepId = useAuthStore((s) => s.drepId);
+  const { t } = useTranslation();
 
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-semibold text-[var(--text-primary)]">DRep Committees</h1>
+      <h1 className="text-xl font-semibold text-[var(--text-primary)]">
+        {t('committee.pageTitle')}
+      </h1>
       <p className="max-w-2xl text-[14px] text-[var(--text-secondary)]">
-        Committees let a lead DRep and their members deliberate on each governance action,
-        vote with a count-based <strong>X of N</strong> rule, author a shared rationale, and
-        submit the vote on-chain.
+        <Trans i18nKey="committee.pageIntro" components={{ strong: <strong /> }} />
       </p>
 
       {isMember && drepId ? (
         <Card>
           <CardHeader>
-            <CardTitle>Your committee</CardTitle>
+            <CardTitle>{t('committee.yourCommitteeTitle')}</CardTitle>
           </CardHeader>
           <CardContent>
             <Link
               to={`/committee/${encodeURIComponent(drepId)}`}
               className="text-[var(--brand-primary)] hover:underline"
             >
-              Go to your committee's proposals →
+              {t('committee.yourCommitteeLink')}
             </Link>
           </CardContent>
         </Card>
@@ -52,7 +54,7 @@ export function CommitteeLanding(): React.ReactElement {
         <Card>
           <CardContent>
             <p className="text-[13.5px] text-[var(--text-secondary)]">
-              Connect your wallet (top-right) to register a DRep committee or join one.
+              {t('committee.guestPrompt')}
             </p>
           </CardContent>
         </Card>
@@ -73,23 +75,21 @@ export function CommitteeLanding(): React.ReactElement {
 function FormationGate(): React.ReactElement {
   const drepId = useAuthStore((s) => s.drepId);
   const [wizardOpen, setWizardOpen] = useState(false);
+  const { t } = useTranslation();
 
   if (!drepId) {
     return (
       <Card>
         <CardHeader>
-          <CardTitle>You're not yet a registered DRep</CardTitle>
+          <CardTitle>{t('committee.notDrepTitle')}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3 text-[13.5px]">
-          <p className="text-[var(--text-secondary)]">
-            Only registered DReps can form a committee. Link your wallet to your registered
-            DRep on your profile, then come back here to establish a committee.
-          </p>
+          <p className="text-[var(--text-secondary)]">{t('committee.notDrepBody')}</p>
           <Link
             to="/profile/setup"
             className="text-[var(--brand-primary)] hover:underline"
           >
-            Link your DRep on your profile →
+            {t('committee.notDrepLink')}
           </Link>
         </CardContent>
       </Card>
@@ -103,15 +103,12 @@ function FormationGate(): React.ReactElement {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>You're a registered DRep ✓</CardTitle>
+        <CardTitle>{t('committee.isDrepTitle')}</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3 text-[13.5px]">
-        <p className="text-[var(--text-secondary)]">
-          Your wallet is linked to a registered DRep. You can establish a committee to
-          deliberate and vote on governance actions with members you choose.
-        </p>
+        <p className="text-[var(--text-secondary)]">{t('committee.isDrepBody')}</p>
         <Button size="sm" variant="primary" onClick={() => setWizardOpen(true)}>
-          Yes, establish a committee
+          {t('committee.establishCta')}
         </Button>
       </CardContent>
     </Card>
@@ -143,6 +140,7 @@ function FormationWizard({ onCancel }: { onCancel: () => void }): React.ReactEle
   const register = useRegisterCommittee();
   const checkMembers = useCheckMembers();
   const chairStake = useAuthStore((s) => s.walletAddress);
+  const { t } = useTranslation();
 
   // ---- form state ----
   const [step, setStep] = useState<Step>('details');
@@ -281,7 +279,7 @@ function FormationWizard({ onCancel }: { onCancel: () => void }): React.ReactEle
         onError: (err) => {
           setSubmitError(
             (err as Error)?.message ??
-              'Could not create the committee. Please double-check the addresses and try again.',
+              t('committee.wizard.submitErrorFallback'),
           );
         },
       },
@@ -293,18 +291,21 @@ function FormationWizard({ onCancel }: { onCancel: () => void }): React.ReactEle
     return (
       <Card>
         <CardHeader>
-          <CardTitle>Committee created ✓</CardTitle>
+          <CardTitle>{t('committee.created.title')}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3 text-[13.5px]">
           <p className="text-[var(--text-secondary)]">
-            Your committee is registered. <strong className="text-[var(--text-primary)]">Reconnect your wallet</strong> (top-right)
-            to activate your lead-DRep role, then manage members and open proposals.
+            {t('committee.created.bodyPrefix')}
+            <strong className="text-[var(--text-primary)]">
+              {t('committee.created.bodyReconnect')}
+            </strong>
+            {t('committee.created.bodySuffix')}
           </p>
           <Link
             to={`/committee/${encodeURIComponent(created.drepId)}`}
             className="text-[var(--brand-primary)] hover:underline"
           >
-            Go to your committee →
+            {t('committee.created.link')}
           </Link>
         </CardContent>
       </Card>
@@ -314,7 +315,7 @@ function FormationWizard({ onCancel }: { onCancel: () => void }): React.ReactEle
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Establish a committee</CardTitle>
+        <CardTitle>{t('committee.wizard.cardTitle')}</CardTitle>
       </CardHeader>
       <CardContent className="space-y-5">
         <WizardSteps step={step} />
@@ -378,13 +379,14 @@ function FormationWizard({ onCancel }: { onCancel: () => void }): React.ReactEle
 }
 
 function WizardSteps({ step }: { step: Step }): React.ReactElement {
+  const { t } = useTranslation();
   const order: Step[] = ['details', 'members', 'threshold', 'confirm'];
   const labels: Record<Step, string> = {
-    details: '1. Details',
-    members: '2. Members',
-    threshold: '3. X of N',
-    confirm: '4. Confirm',
-    done: '✓ Done',
+    details: t('committee.wizard.stepDetails'),
+    members: t('committee.wizard.stepMembers'),
+    threshold: t('committee.wizard.stepThreshold'),
+    confirm: t('committee.wizard.stepConfirm'),
+    done: t('committee.wizard.stepDone'),
   };
   return (
     <ol className="flex flex-wrap items-center gap-2 text-[12px]">
@@ -423,24 +425,25 @@ function DetailsStep({
   description: string;
   setDescription: (v: string) => void;
 }): React.ReactElement {
+  const { t } = useTranslation();
   return (
     <div className="space-y-3">
       <label className="block text-[12px] text-[var(--text-secondary)]">
-        Committee name
+        {t('committee.wizard.nameLabel')}
         <input
           className={`${inputCls} mt-1`}
           value={name}
           onChange={(e) => setName(e.target.value)}
-          placeholder="e.g. Cardano Builders Collective"
+          placeholder={t('committee.wizard.namePlaceholder')}
         />
       </label>
       <label className="block text-[12px] text-[var(--text-secondary)]">
-        Description
+        {t('committee.wizard.descriptionLabel')}
         <textarea
           className={`${inputCls} mt-1 min-h-[90px] resize-y`}
           value={description}
           onChange={(e) => setDescription(e.target.value)}
-          placeholder="What this committee stands for…"
+          placeholder={t('committee.wizard.descriptionPlaceholder')}
         />
       </label>
     </div>
@@ -465,12 +468,13 @@ function MembersStep({
   hasDuplicates: boolean;
 }): React.ReactElement {
   const walletAddress = useAuthStore((s) => s.walletAddress);
+  const { t } = useTranslation();
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-end gap-3">
         <label className="text-[12px] text-[var(--text-secondary)]">
-          How many members will the committee have?
+          {t('committee.wizard.membersCountLabel')}
           <input
             type="number"
             min={MIN_COMMITTEE_MEMBERS}
@@ -489,7 +493,7 @@ function MembersStep({
           />
         </label>
         <p className="pb-1 text-[11.5px] text-[var(--text-secondary)]">
-          Including you — the Chair. Minimum {MIN_COMMITTEE_MEMBERS}.
+          {t('committee.wizard.membersCountHint', { min: MIN_COMMITTEE_MEMBERS })}
         </p>
       </div>
 
@@ -497,7 +501,9 @@ function MembersStep({
         <li className="flex items-center gap-3 rounded-token-md border border-[var(--border-default)] bg-[var(--bg-muted)] px-3 py-2 text-[12.5px]">
           <span className="font-semibold text-[var(--text-primary)]">#1</span>
           <div className="min-w-0 flex-1">
-            <div className="font-medium text-[var(--text-primary)]">You — Chair</div>
+            <div className="font-medium text-[var(--text-primary)]">
+              {t('committee.wizard.chairLabel')}
+            </div>
             <div className="truncate font-mono text-[11.5px] text-[var(--text-secondary)]">
               {walletAddress ?? '—'}
             </div>
@@ -518,21 +524,20 @@ function MembersStep({
 
       {chairInRows && (
         <p className="rounded-token-md border border-[var(--danger)] bg-[var(--bg-muted)] px-3 py-2 text-[12px] text-[var(--danger)]">
-          You typed your own address as a member. You're already member #1 — remove it from
-          the list below.
+          {t('committee.wizard.errorChairInRows')}
         </p>
       )}
       {hasDuplicates && (
         <p className="rounded-token-md border border-[var(--danger)] bg-[var(--bg-muted)] px-3 py-2 text-[12px] text-[var(--danger)]">
-          Two of the addresses you typed resolve to the same wallet. Each member must be
-          distinct.
+          {t('committee.wizard.errorDuplicates')}
         </p>
       )}
 
       <p className="rounded-token-md border border-[var(--border-default)] bg-[var(--bg-muted)] px-3 py-2 text-[12px] text-[var(--text-secondary)]">
-        <strong className="text-[var(--text-primary)]">Tip:</strong> a "Not active" address
-        just means that wallet hasn't signed into the platform yet. You can still add them —
-        invite them to sign in so they can participate.
+        <strong className="text-[var(--text-primary)]">
+          {t('committee.wizard.tipLabel')}
+        </strong>{' '}
+        {t('committee.wizard.tipBody')}
       </p>
     </div>
   );
@@ -547,6 +552,7 @@ function MemberRowEditor({
   row: MemberRow;
   onChange: (v: string) => void;
 }): React.ReactElement {
+  const { t } = useTranslation();
   const trimmed = row.value.trim();
   const showStatus = trimmed.length > 0;
   return (
@@ -557,7 +563,7 @@ function MemberRowEditor({
           className={`${inputCls} flex-1 font-mono`}
           value={row.value}
           onChange={(e) => onChange(e.target.value)}
-          placeholder="addr1… or stake1…"
+          placeholder={t('committee.wizard.memberAddressPlaceholder')}
           autoComplete="off"
           spellCheck={false}
         />
@@ -571,7 +577,7 @@ function MemberRowEditor({
       </div>
       {row.status?.valid === false && (
         <p className="pl-7 text-[11.5px] text-[var(--danger)]">
-          Not a valid Cardano payment or stake address.
+          {t('committee.wizard.invalidAddress')}
         </p>
       )}
       {row.status?.valid && row.status.displayName && (
@@ -592,27 +598,32 @@ function ActiveBadge({
   active?: boolean;
   checking?: boolean;
 }): React.ReactElement {
+  const { t } = useTranslation();
   if (checking) {
     return (
-      <span className="shrink-0 text-[11.5px] text-[var(--text-secondary)]">Checking…</span>
+      <span className="shrink-0 text-[11.5px] text-[var(--text-secondary)]">
+        {t('committee.wizard.badgeChecking')}
+      </span>
     );
   }
   if (valid === false) {
     return (
-      <span className="shrink-0 text-[11.5px] text-[var(--danger)]">✗ Invalid</span>
+      <span className="shrink-0 text-[11.5px] text-[var(--danger)]">
+        {t('committee.wizard.badgeInvalid')}
+      </span>
     );
   }
   if (valid && active) {
     return (
       <span className="shrink-0 text-[11.5px] font-medium text-[var(--success)]">
-        ✓ Active
+        {t('committee.wizard.badgeActive')}
       </span>
     );
   }
   if (valid && active === false) {
     return (
       <span className="shrink-0 text-[11.5px] font-medium text-[var(--danger)]">
-        ✗ Not active
+        {t('committee.wizard.badgeNotActive')}
       </span>
     );
   }
@@ -630,16 +641,19 @@ function ThresholdStep({
   approvalThreshold: number;
   setApprovalThreshold: (n: number) => void;
 }): React.ReactElement {
+  const { t } = useTranslation();
   return (
     <div className="space-y-3">
       <p className="text-[13px] text-[var(--text-primary)]">
-        How many of the <strong>{memberCount}</strong> members must vote
-        <strong> Agree</strong> for a governance action to be{' '}
-        <strong>Committee Approved</strong>?
+        <Trans
+          i18nKey="committee.wizard.thresholdQuestion"
+          values={{ count: memberCount }}
+          components={{ strong: <strong /> }}
+        />
       </p>
       <div className="flex items-end gap-3">
         <label className="text-[12px] text-[var(--text-secondary)]">
-          X (1–{memberCount})
+          {t('committee.wizard.thresholdLabel', { count: memberCount })}
           <input
             type="number"
             min={1}
@@ -654,24 +668,27 @@ function ThresholdStep({
           />
         </label>
         <p className="pb-2 text-[12.5px] text-[var(--text-primary)]">
-          <strong>{approvalThreshold}</strong> of <strong>{memberCount}</strong>
+          <Trans
+            i18nKey="committee.wizard.thresholdSummary"
+            values={{ x: approvalThreshold, n: memberCount }}
+            components={{ strong: <strong /> }}
+          />
         </p>
       </div>
       <ul className="space-y-1 text-[12px] text-[var(--text-secondary)]">
         <li>
-          <strong>Simple majority:</strong> X = {Math.floor(memberCount / 2) + 1} of{' '}
-          {memberCount}.
+          <strong>{t('committee.wizard.thresholdMajorityLabel')}</strong>{' '}
+          {t('committee.wizard.thresholdMajorityBody', {
+            x: Math.floor(memberCount / 2) + 1,
+            n: memberCount,
+          })}
         </li>
         <li>
-          <strong>Unanimous:</strong> X = {memberCount} of {memberCount} — everyone must
-          agree.
+          <strong>{t('committee.wizard.thresholdUnanimousLabel')}</strong>{' '}
+          {t('committee.wizard.thresholdUnanimousBody', { n: memberCount })}
         </li>
-        <li>
-          Abstentions and disagreements simply aren't Agree votes — they don't lower the bar.
-        </li>
-        <li>
-          Adding or removing a member later will require restating this rule.
-        </li>
+        <li>{t('committee.wizard.thresholdNoLowerBar')}</li>
+        <li>{t('committee.wizard.thresholdRestate')}</li>
       </ul>
     </div>
   );
@@ -697,29 +714,30 @@ function ConfirmStep({
   isPending: boolean;
 }): React.ReactElement {
   const walletAddress = useAuthStore((s) => s.walletAddress);
+  const { t } = useTranslation();
   return (
     <div className="space-y-4 text-[13px]">
       <div>
         <div className="text-[12px] uppercase tracking-wide text-[var(--text-secondary)]">
-          Name
+          {t('committee.wizard.confirmNameLabel')}
         </div>
         <div className="font-medium text-[var(--text-primary)]">{name}</div>
       </div>
       <div>
         <div className="text-[12px] uppercase tracking-wide text-[var(--text-secondary)]">
-          Description
+          {t('committee.wizard.confirmDescriptionLabel')}
         </div>
         <div className="whitespace-pre-wrap text-[var(--text-primary)]">{description}</div>
       </div>
       <div>
         <div className="text-[12px] uppercase tracking-wide text-[var(--text-secondary)]">
-          Members ({memberCount})
+          {t('committee.wizard.confirmMembersLabel', { count: memberCount })}
         </div>
         <ul className="mt-1 space-y-1">
           <li className="flex items-center justify-between gap-2 rounded-token-md border border-[var(--border-default)] bg-[var(--bg-muted)] px-3 py-1.5">
             <span>
               <span className="mr-2 font-semibold text-[var(--text-primary)]">#1</span>
-              You — Chair
+              {t('committee.wizard.confirmMemberChair')}
             </span>
             <span className="truncate font-mono text-[11.5px] text-[var(--text-secondary)]">
               {walletAddress ?? '—'}
@@ -734,7 +752,10 @@ function ConfirmStep({
                 <span className="mr-2 font-semibold text-[var(--text-primary)]">
                   #{i + 2}
                 </span>
-                {r.status?.displayName ?? (r.status?.active ? 'Active member' : 'Member')}
+                {r.status?.displayName ??
+                  (r.status?.active
+                    ? t('committee.wizard.confirmMemberActive')
+                    : t('committee.wizard.confirmMemberFallback'))}
               </span>
               <span className="flex items-center gap-2">
                 <span className="truncate font-mono text-[11.5px] text-[var(--text-secondary)]">
@@ -748,22 +769,29 @@ function ConfirmStep({
       </div>
       <div>
         <div className="text-[12px] uppercase tracking-wide text-[var(--text-secondary)]">
-          Approval rule
+          {t('committee.wizard.confirmRuleLabel')}
         </div>
         <div className="text-[var(--text-primary)]">
-          <strong>{approvalThreshold}</strong> of <strong>{memberCount}</strong> members must
-          vote Agree for Committee Approved.
+          <Trans
+            i18nKey="committee.wizard.confirmRuleBody"
+            values={{ x: approvalThreshold, n: memberCount }}
+            components={{ strong: <strong /> }}
+          />
         </div>
       </div>
       {isTestStage() && (
         <p className="rounded-token-md border border-[var(--border-strong)] bg-[var(--bg-muted)] px-3 py-2 text-[12px] text-[var(--text-secondary)]">
-          <strong className="text-[var(--text-primary)]">TEST environment</strong> — on-chain
-          vote submission is disabled here; votes must be submitted from production.
+          <strong className="text-[var(--text-primary)]">
+            {t('committee.wizard.testEnvLabel')}
+          </strong>
+          {t('committee.wizard.testEnvBody')}
         </p>
       )}
       {submitError && <p className="text-[12px] text-[var(--danger)]">{submitError}</p>}
       {isPending && (
-        <p className="text-[12px] text-[var(--text-secondary)]">Creating committee…</p>
+        <p className="text-[12px] text-[var(--text-secondary)]">
+          {t('committee.wizard.creatingNotice')}
+        </p>
       )}
     </div>
   );
@@ -786,13 +814,14 @@ function WizardNav({
   isPending: boolean;
   canAdvance: boolean;
 }): React.ReactElement {
+  const { t } = useTranslation();
   const order: Step[] = ['details', 'members', 'threshold', 'confirm'];
   const idx = order.indexOf(step);
   const isLast = step === 'confirm';
   return (
     <div className="flex items-center justify-between gap-2 border-t border-[var(--border-default)] pt-3">
       <Button size="sm" variant="ghost" onClick={onCancel} disabled={isPending}>
-        Cancel
+        {t('committee.wizard.cancel')}
       </Button>
       <div className="flex items-center gap-2">
         {idx > 0 && (
@@ -802,7 +831,7 @@ function WizardNav({
             disabled={isPending}
             onClick={() => setStep(order[idx - 1]!)}
           >
-            Back
+            {t('committee.wizard.back')}
           </Button>
         )}
         {!isLast ? (
@@ -812,7 +841,7 @@ function WizardNav({
             disabled={!canAdvance}
             onClick={() => setStep(order[idx + 1]!)}
           >
-            Next
+            {t('committee.wizard.next')}
           </Button>
         ) : (
           <Button
@@ -821,7 +850,9 @@ function WizardNav({
             disabled={!canAdvance || isPending}
             onClick={onSubmit}
           >
-            {isPending ? 'Creating…' : 'Create committee'}
+            {isPending
+              ? t('committee.wizard.createButtonPending')
+              : t('committee.wizard.createButton')}
           </Button>
         )}
       </div>
@@ -834,51 +865,26 @@ function WizardNav({
 // ----------------------------------------------------------------------------
 
 function CommitteeFAQ(): React.ReactElement {
+  const { t } = useTranslation();
   const items = useMemo(
     () => [
-      {
-        q: 'Who can form a committee?',
-        a: 'Only a wallet that is already linked to a registered DRep. If you\'re not a registered DRep yet, link your DRep on your profile first — your committee will then bind to your DRep, so all of its on-chain votes are cast as the DRep you control.',
-      },
-      {
-        q: 'Who is member #1?',
-        a: 'You are. The Chair (the lead DRep forming the committee) is automatically added as the first member. You then add the rest by Cardano address.',
-      },
-      {
-        q: 'How do I add the other members?',
-        a: 'By their Cardano address — either a payment address (addr1…) or a stake address (stake1…). The platform stores everyone by their canonical stake identity, so two different payment addresses for the same wallet resolve to the same person.',
-      },
-      {
-        q: 'What\'s the difference between "Active" and "Not active"?',
-        a: '"Active" means that wallet has signed into the platform before, so they can immediately participate. "Not active" just means we haven\'t seen them sign in — you can still add them. Invite them to sign in so they can cast votes and edit rationales.',
-      },
-      {
-        q: 'What does "X of N" mean?',
-        a: 'X is how many of your N members must vote Agree for a governance action to be Committee Approved. For example, "3 of 5" means at least 3 of your 5 members have to vote Agree before you can close the proposal as passed. Abstentions and disagreements don\'t lower the bar — only Agree votes count toward X.',
-      },
-      {
-        q: 'Why do I have to restate "X of N" when adding or removing a member?',
-        a: 'Because N changes. A "3 of 5" rule isn\'t meaningful if N drops to 4 — you might want 3 of 4, or 2 of 4, or unanimous. Every membership change requires you to consciously restate the rule so the consensus model never silently drifts.',
-      },
-      {
-        q: 'What\'s the minimum committee size?',
-        a: 'Three members, including you. A committee with fewer members isn\'t a committee — that\'s a single DRep with extra steps.',
-      },
+      { q: t('committee.faq.q1'), a: t('committee.faq.a1') },
+      { q: t('committee.faq.q2'), a: t('committee.faq.a2') },
+      { q: t('committee.faq.q3'), a: t('committee.faq.a3') },
+      { q: t('committee.faq.q4'), a: t('committee.faq.a4') },
+      { q: t('committee.faq.q5'), a: t('committee.faq.a5') },
+      { q: t('committee.faq.q6'), a: t('committee.faq.a6') },
+      { q: t('committee.faq.q7'), a: t('committee.faq.a7') },
       ...(isTestStage()
-        ? [
-            {
-              q: 'Does anything happen on-chain in this environment?',
-              a: 'No. This is the TEST environment — on-chain vote submission is disabled here. Everything else (proposals, voting, rationale, member changes) works exactly as in production, so you can practice the full flow without spending ada.',
-            },
-          ]
+        ? [{ q: t('committee.faq.q8'), a: t('committee.faq.a8') }]
         : []),
     ],
-    [],
+    [t],
   );
   return (
     <Card>
       <CardHeader>
-        <CardTitle>How committees work</CardTitle>
+        <CardTitle>{t('committee.faq.title')}</CardTitle>
       </CardHeader>
       <CardContent>
         <ul className="space-y-1">
