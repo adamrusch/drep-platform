@@ -35,6 +35,15 @@
     "editProfile": "Edit Profile",
     "logout": "Logout"
   },
+  "topbar": {
+    "search": "Search proposals, DReps, topics…"
+  },
+  "sidebar": {
+    "network": "Network",
+    "mainnet": "Mainnet",
+    "epoch": "Epoch",
+    "syncedKoios": "Synced from Koios"
+  },
   "guest": {
     "eyebrow": "Cardano Governance",
     "title": "DRep Coordination Platform",
