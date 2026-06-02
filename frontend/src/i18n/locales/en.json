@@ -1,0 +1,50 @@
+{
+  "common": {
+    "connectWallet": "Connect Wallet",
+    "connecting": "Connecting…",
+    "disconnecting": "Disconnecting…",
+    "create": "Create",
+    "creating": "Creating…",
+    "save": "Save",
+    "saving": "Saving…",
+    "cancel": "Cancel",
+    "back": "Back",
+    "next": "Next",
+    "confirm": "Confirm",
+    "loading": "Loading…",
+    "reload": "Reload"
+  },
+  "language": {
+    "label": "Language",
+    "en": "English",
+    "ja": "日本語"
+  },
+  "nav": {
+    "dashboard": "Dashboard",
+    "governance": "Governance Actions",
+    "clubhouse": "Delegator Clubhouse",
+    "committee": "DRep Committees",
+    "dreps": "DReps",
+    "rationales": "Rationales",
+    "notifications": "Notifications",
+    "admin": "Admin"
+  },
+  "account": {
+    "menu": "Account menu",
+    "publicProfile": "Public Profile",
+    "editProfile": "Edit Profile",
+    "logout": "Logout"
+  },
+  "guest": {
+    "eyebrow": "Cardano Governance",
+    "title": "DRep Coordination Platform",
+    "subtitle": "Transparent, community-driven governance coordination for Cardano delegators and DReps. Follow governance actions, participate in discussions, and hold your representatives accountable.",
+    "browse": "Browse Governance Actions",
+    "card1Title": "Track Governance",
+    "card1Desc": "Follow active proposals from parameter changes to treasury withdrawals, all synced from the chain.",
+    "card2Title": "Engage Your DRep",
+    "card2Desc": "Comment on proposals, see how your DRep plans to vote, and participate in the delegator clubhouse.",
+    "card3Title": "Stay Informed",
+    "card3Desc": "Get your delegation history, see epoch deadlines, and never miss an important vote."
+  }
+}
