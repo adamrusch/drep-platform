@@ -771,6 +771,11 @@ export interface CommitteeVoteProposalItem {
    *  older proposals still deserialise; new proposals snapshot X/N. */
   approvalThreshold?: number;
   memberCount?: number;
+  /** The eligible-voter set (member stake addresses) FROZEN at open time. Only
+   *  these wallets may cast on this proposal — so a mid-vote member add can't
+   *  manufacture Agrees, and N can't drift. Absent on legacy proposals (they
+   *  fall back to the live roster check). */
+  memberSnapshot?: string[];
   thresholdPct?: number;
   quorum?: number;
   /** Copied from governance_actions so the deadline sweep needs no join.

@@ -55,6 +55,18 @@ export const handler = async (
     if (proposal.status !== 'open') {
       return conflict('This proposal is closed; votes can no longer be cast');
     }
+    // Only wallets that were committee members when the proposal OPENED may vote
+    // (the eligible set is frozen on the proposal). This stops a chair adding
+    // sympathetic members mid-vote to manufacture the X-of-N approval. Legacy
+    // proposals without a snapshot fall back to the live-roster check above.
+    if (
+      Array.isArray(proposal.memberSnapshot) &&
+      !proposal.memberSnapshot.includes(authCtx.walletAddress)
+    ) {
+      return conflict(
+        'You were not a member of this committee when this proposal opened, so you cannot vote on it.',
+      );
+    }
 
     const message = committeeMessages.cast(
       getStage(), drepId, actionId, body.vote, body.mutationNonce, authCtx.walletAddress,
