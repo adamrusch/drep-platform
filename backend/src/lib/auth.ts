@@ -249,6 +249,12 @@ export function verifyWalletSignature(
   if (!/^[0-9a-fA-F]+$/.test(walletSig.key)) {
     return { valid: false, reason: 'Key is not valid hex' };
   }
+  // Bound the inputs before CBOR-decoding them — a COSE_Sign1 over a short
+  // message is a few hundred bytes and a COSE_Key is ~100; reject pathological
+  // megabyte payloads early (cheap CPU-burn guard).
+  if (walletSig.signature.length > 4096 || walletSig.key.length > 1024) {
+    return { valid: false, reason: 'Signature or key is implausibly large' };
+  }
 
   try {
     // --- 1. Decode COSE_Sign1: [protected_bstr, unprotected, payload_bstr, sig_bstr] ---
@@ -457,7 +463,9 @@ export async function issueJWT(
 
 export async function verifyJWT(token: string): Promise<JWTPayload> {
   const secret = await getJwtSecret();
-  const { payload } = await jwtVerify(token, secret);
+  // Pin HS256 explicitly — never let the token's own `alg` header pick the
+  // verification algorithm (alg-confusion defense-in-depth).
+  const { payload } = await jwtVerify(token, secret, { algorithms: ['HS256'] });
 
   // Backward-compatibility shim: tokens issued before 2026-05-27 carry
   // the registered-DRep id under the legacy field name `drepId`; tokens

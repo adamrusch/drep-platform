@@ -109,6 +109,9 @@ export const handler = async (
       status: 'open',
       approvalThreshold: rule.approvalThreshold,
       memberCount: rule.memberCount,
+      // Freeze WHO may vote, not just how many — a member added after open
+      // cannot vote on this proposal (see castVote).
+      memberSnapshot: (committee.members ?? []).map((m) => m.walletAddress),
       epochDeadline: typeof action.epochDeadline === 'number' ? action.epochDeadline : 0,
       statusPartition: 'OPEN',
       openedAt: now,
