@@ -8,7 +8,10 @@ export const handler = async (
 ): Promise<APIGatewayProxyResultV2> => {
   try {
     const authCtx = extractAuthContext(event);
-    requireRole(authCtx, 'lead_drep');
+    // Break-glass admin tool only. The sync is normally scheduler-driven; this
+    // HTTP trigger fans out expensive Koios/IPFS/GitHub work, so it must NOT be
+    // reachable by every wallet that ever registered a committee (lead_drep).
+    requireRole(authCtx, 'platform_admin');
 
     const result = await runGovernanceIntake();
 
