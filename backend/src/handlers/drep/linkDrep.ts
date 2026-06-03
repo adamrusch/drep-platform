@@ -16,10 +16,17 @@ interface LinkDrepBody {
 /**
  * Link the caller's wallet to their on-chain DRep, so they're recognized as a
  * DRep across the platform (profile, clubhouse names) WITHOUT needing a
- * committee. Sets users.drepId. Two paths:
- *   - drepKey (CIP-95): derived + proves the caller controls the DRep.
- *   - drepId (paste): verified to be registered on-chain (testing convenience;
- *     does not prove control — prefer drepKey to prevent impersonation).
+ * committee. Sets users.drepId.
+ *
+ * SECURITY — neither current path PROVES control of the DRep:
+ *   - `drepKey`: we DERIVE the drep id from a public key, but a DRep public key
+ *     is public on-chain information — deriving its id proves the DRep exists,
+ *     NOT that the caller holds the corresponding private key.
+ *   - `drepId` (paste): same — proves existence, not control.
+ * Real proof-of-control requires a CIP-95 signature over a fresh nonce, made
+ * with the DRep key and verified against it. Until that's implemented, BOTH
+ * paths are gated to non-prod (`pasteDrepLinkAllowed`), so a committee can never
+ * bind to an unverified DRep in production.
  */
 export const handler = async (
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
@@ -37,6 +44,14 @@ export const handler = async (
 
     let drepId: string;
     if (body.drepKey) {
+      // Deriving a drep id from a public key does NOT prove control — gate to
+      // non-prod until a real CIP-95 signed proof-of-control is implemented.
+      if (!pasteDrepLinkAllowed()) {
+        return forbidden(
+          'Linking a DRep in production requires proof you control the DRep key, ' +
+            'which is not yet available. (Coming soon: CIP-95 signed proof-of-control.)',
+        );
+      }
       try {
         drepId = drepIdFromDRepKey(body.drepKey.trim());
       } catch {

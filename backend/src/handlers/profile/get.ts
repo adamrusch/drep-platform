@@ -20,24 +20,23 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
       return notFound('User profile');
     }
 
-    // Strip sensitive fields
-    const {
-      sessionTokenHash: _s,
-      sessionExpiry: _e,
-      ...publicProfile
-    } = user;
-
-    // DRep status: whether this wallet is a registered DRep (leads a committee)
-    // plus the effective display name (profile name → DRep name → none). The
-    // profile page uses these to show a DRep badge + link.
+    // DRep status: whether this wallet is a registered DRep plus the effective
+    // display name (profile name → DRep name → none). The profile page uses
+    // these to show a DRep badge + link.
     const identity = await resolveIdentity(decodeURIComponent(walletAddress));
 
-    // Public profile is shareable across all viewers — safe to edge-cache.
-    // Auth-bound state lives on /auth/me; this endpoint never returns
-    // session-specific content even when the caller is signed in.
+    // EXPLICIT public allow-list — never rest-spread the user row. The row also
+    // carries `roles`, `tokenVersion`, `delegationHistory`, session hashes, etc.
+    // which must NOT be exposed on this unauthenticated, edge-cached endpoint.
+    // (Delegation history has its own dedicated endpoint.) Auth-bound state
+    // lives on /auth/me; this endpoint is shareable across all viewers.
     return ok(
       {
-        ...publicProfile,
+        walletAddress: decodeURIComponent(walletAddress),
+        ...(user.displayName ? { displayName: user.displayName } : {}),
+        ...(user.bio ? { bio: user.bio } : {}),
+        ...(user.socialLinks ? { socialLinks: user.socialLinks } : {}),
+        ...(user.createdAt ? { createdAt: user.createdAt } : {}),
         isDRep: identity.isDRep,
         ...(identity.drepId ? { drepId: identity.drepId } : {}),
         ...(identity.drepName ? { drepName: identity.drepName } : {}),
