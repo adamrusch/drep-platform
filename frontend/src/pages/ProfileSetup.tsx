@@ -7,6 +7,10 @@ import { useMe } from '@/hooks/useAuth';
 import { useAuthStore } from '@/stores/authStore';
 import { useUiStore } from '@/stores/uiStore';
 import { useLinkDrep } from '@/hooks/useCommitteeMembership';
+import {
+  useDeclineAllInvitations,
+  usePendingInvitations,
+} from '@/hooks/useCommitteeInvitations';
 import { pasteDrepLinkAllowed } from '@/lib/stage';
 import type { UserProfile } from '@/types';
 
@@ -22,6 +26,7 @@ export function ProfileSetup(): React.ReactElement {
   const [twitter, setTwitter] = useState('');
   const [github, setGithub] = useState('');
   const [website, setWebsite] = useState('');
+  const [autoDecline, setAutoDecline] = useState(false);
 
   useEffect(() => {
     if (profile) {
@@ -30,6 +35,7 @@ export function ProfileSetup(): React.ReactElement {
       setTwitter(profile.socialLinks?.twitter ?? '');
       setGithub(profile.socialLinks?.github ?? '');
       setWebsite(profile.socialLinks?.website ?? '');
+      setAutoDecline(profile.autoDeclineInvites === true);
     }
   }, [profile]);
 
@@ -55,7 +61,10 @@ export function ProfileSetup(): React.ReactElement {
         github: github.trim() || undefined,
         website: website.trim() || undefined,
       },
-    });
+      // The flag persists explicitly (including `false`) so unchecking
+      // it actually clears a prior `true`. Backend honors the literal.
+      autoDeclineInvites: autoDecline,
+    } as Partial<UserProfile>);
   };
 
   return (
@@ -107,6 +116,26 @@ export function ProfileSetup(): React.ReactElement {
           ))}
         </div>
 
+        {/* Committee invitation preferences */}
+        <div className="space-y-2 border-t border-[var(--border-default)] pt-4">
+          <h3 className="text-sm font-medium">{t('invitations.preferencesTitle')}</h3>
+          <label className="flex items-start gap-2 text-[12.5px] text-[var(--text-primary)]">
+            <input
+              type="checkbox"
+              checked={autoDecline}
+              onChange={(e) => setAutoDecline(e.target.checked)}
+              className="mt-0.5 h-4 w-4 rounded border-[var(--border-default)]"
+            />
+            <span>
+              <span className="font-medium">{t('invitations.autoDeclineLabel')}</span>
+              <span className="block text-[11.5px] text-[var(--text-secondary)]">
+                {t('invitations.autoDeclineHelp')}
+              </span>
+            </span>
+          </label>
+          <DeclineAllInvitationsButton />
+        </div>
+
         <button
           type="submit"
           disabled={upsertProfile.isPending}
@@ -118,6 +147,50 @@ export function ProfileSetup(): React.ReactElement {
 
       <DrepLinkSection currentDrepId={profile?.drepId} />
     </div>
+  );
+}
+
+/** Inline button: rejects every CURRENTLY pending invitation for the
+ *  caller. Distinct from the autoDecline checkbox (which only blocks
+ *  FUTURE invitations). Self-hides when there are no pending invites
+ *  to reject so the form stays clean. */
+function DeclineAllInvitationsButton(): React.ReactElement | null {
+  const { t } = useTranslation();
+  const pending = usePendingInvitations();
+  const declineAll = useDeclineAllInvitations();
+  const addToast = useUiStore((s) => s.addToast);
+
+  if (pending.length === 0) return null;
+
+  const onClick = (): void => {
+    declineAll.mutate(undefined, {
+      onSuccess: (r) => {
+        addToast({
+          title: t('invitations.declineAllToast', { count: r.rejected }),
+          variant: 'success',
+        });
+      },
+      onError: (err) => {
+        addToast({
+          title: t('invitations.declineAllFailedToast'),
+          description: (err as Error)?.message,
+          variant: 'error',
+        });
+      },
+    });
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={declineAll.isPending}
+      className="text-[12px] text-[var(--danger)] underline disabled:opacity-50"
+    >
+      {declineAll.isPending
+        ? t('invitations.decliningAll')
+        : t('invitations.declineAllButton', { count: pending.length })}
+    </button>
   );
 }
 

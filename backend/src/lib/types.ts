@@ -501,6 +501,12 @@ export interface UserItem {
   roles: string[];
   drepId?: string;
   delegationHistory?: DelegationRecordItem[];
+  /** When true, any NEW committee invitation issued to this wallet is
+   *  auto-rejected at creation time (status='rejected', no membership slot
+   *  claimed). Existing pending invitations are NOT touched by flipping this
+   *  flag — the user explicitly hits "Decline all pending" to clear those.
+   *  Absent / false → invitations land as `pending` and surface for response. */
+  autoDeclineInvites?: boolean;
   [key: string]: unknown;
 }
 
@@ -524,10 +530,76 @@ export interface DRepCommitteeItem {
   members: CommitteeMemberItem[];
   /** X in the "X of N" rule: the number of members who must vote Agree for a
    *  governance action to be "Committee Approved". N is `members.length`. Set
-   *  at formation and re-specified on every member add/remove. */
+   *  at formation and re-specified on every member add/remove.
+   *
+   *  Under the invitation model ("Chair's full X stands" — decision B): X is
+   *  the Chair's intended threshold over the INTENDED committee size
+   *  (`intendedMemberCount`); X does NOT shrink as invitations are pending /
+   *  rejected. Live approval is `agreeCount ≥ X` against the frozen eligible
+   *  set (the accepted members). `openProposal` requires
+   *  `members.length ≥ approvalThreshold` so reaching X is feasible. */
   approvalThreshold?: number;
+  /** The Chair's INTENDED committee size at formation / membership-mutation
+   *  time: 1 (Chair) + invited member count. Independent of how many invitees
+   *  have accepted. Stored so the UI can render "X of intendedN — currently
+   *  Y accepted" and so the validator can enforce
+   *  `1 ≤ approvalThreshold ≤ intendedMemberCount`. Optional for backwards
+   *  compat with rows written before the invitation feature — treat absence
+   *  as equal to `members.length` (the pre-invitation behavior, where every
+   *  added address was immediately a member). */
+  intendedMemberCount?: number;
   createdAt: string;
   updatedAt: string;
+  [key: string]: unknown;
+}
+
+// ============================================================
+// Committee invitations (Feature 1)
+//
+// Members do NOT instantly join a committee anymore — at formation and via
+// `addMember`, each non-Chair address gets a PENDING invitation row written
+// under the same `drep_committees` table, partition `drepId`, sort key
+// `INVITE#<inviteeStakeAddress>`. The wallet's exclusivity slot
+// (committee_membership row) is claimed at INVITE time with `role='invited'`
+// so that wallet can't be invited / added to a second committee in parallel.
+//
+// Accept → upgrade slot role to `'member'`, append a `CommitteeMemberItem`
+// to the COMMITTEE row's `members[]` (legacy shape — preserves every
+// downstream voter check and `withMemberActivity`), mark INVITE accepted.
+//
+// Reject / Revoke → delete the membership slot (freeing it), mark INVITE
+// rejected / revoked.
+//
+// `autoDeclineInvites` on the users row is honored at CREATION time only:
+// a new invite is written as `status='rejected'` and the slot is NOT
+// claimed.
+// ============================================================
+
+export type InviteStatus = 'pending' | 'accepted' | 'rejected' | 'revoked';
+export type InviteDecision = 'accept' | 'reject';
+
+/** SK='INVITE#<inviteeStakeAddress>' on `drep_committees`. */
+export interface CommitteeInviteItem {
+  drepId: string;
+  /** `INVITE#<inviteeStakeAddress>`. */
+  SK: string;
+  /** Canonical stake address of the invitee (the platform user identity).
+   *  Duplicated from the SK suffix because GSI keys are flat attributes —
+   *  the `inviteeStake-status-index` partitions on this. */
+  inviteeStake: string;
+  /** Indexed on `inviteeStake-status-index` so a wallet's pending invites
+   *  are a single Query (`PK=inviteeStake AND SK=status='pending'`). */
+  status: InviteStatus;
+  role: 'committee_member' | 'trusted_delegator';
+  /** Optional display name the Chair attached when adding via the
+   *  add-member form. */
+  displayName?: string;
+  /** The Chair's stake address at the time the invitation was issued. */
+  invitedBy: string;
+  invitedAt: string;
+  /** ISO-8601 timestamp the invitee responded (accept/reject) OR the Chair
+   *  revoked. Unset on pending rows. */
+  respondedAt?: string;
   [key: string]: unknown;
 }
 
@@ -910,11 +982,22 @@ export interface VotingConfigItem {
   [key: string]: unknown;
 }
 
-/** committee_membership table — one row per wallet, total. */
+/** committee_membership table — one row per wallet, total. Enforces the
+ *  "one committee per wallet" invariant via a conditional Put.
+ *
+ *  Role values:
+ *    - `'lead'`    — Chair of THIS committee.
+ *    - `'member'`  — accepted member, present in the COMMITTEE row's
+ *                    `members[]`.
+ *    - `'invited'` — invitation pending. The slot is claimed (so the
+ *                    wallet can't be invited / added to a second committee
+ *                    in parallel) but the wallet is NOT yet in `members[]`
+ *                    and has no voting rights. Accept upgrades to
+ *                    `'member'`; reject/revoke deletes the row. */
 export interface CommitteeMembershipItem {
   walletAddress: string;
   drepId: string;
-  role: 'lead' | 'member';
+  role: 'lead' | 'member' | 'invited';
   joinedAt: string;
   [key: string]: unknown;
 }

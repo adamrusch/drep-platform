@@ -48,7 +48,7 @@ export const handler = async (
     const idx = committee.members?.findIndex((m) => m.walletAddress === target) ?? -1;
     if (idx < 0) return notFound('Committee member');
 
-    // A committee may never drop below the minimum size.
+    // A committee may never drop below the minimum size of ACCEPTED members.
     const newMemberCount = (committee.members?.length ?? 0) - 1;
     if (newMemberCount < MIN_COMMITTEE_MEMBERS) {
       return conflict(
@@ -56,11 +56,17 @@ export const handler = async (
       );
     }
 
-    // Every membership change must restate X of N (N = the new size).
+    // Decision B: restate X over the new INTENDED N. Removing an accepted
+    // member shrinks intendedN by 1 as well (they no longer count toward
+    // the Chair's intended roster). For legacy rows without
+    // `intendedMemberCount`, fall back to the accepted count, mirroring the
+    // pre-invitation contract.
+    const currentIntendedN = committee.intendedMemberCount ?? committee.members?.length ?? 0;
+    const newIntendedN = Math.max(0, currentIntendedN - 1);
     const X = body.approvalThreshold;
-    if (typeof X !== 'number' || !Number.isInteger(X) || X < 1 || X > newMemberCount) {
+    if (typeof X !== 'number' || !Number.isInteger(X) || X < 1 || X > newIntendedN) {
       return badRequest(
-        `approvalThreshold (X) must be a whole number between 1 and ${newMemberCount} (the new committee size).`,
+        `approvalThreshold (X) must be a whole number between 1 and ${newIntendedN} (the new intended committee size).`,
       );
     }
 
@@ -88,18 +94,21 @@ export const handler = async (
           Update: {
             TableName: tableNames.drepCommittees,
             Key: { drepId, SK: 'COMMITTEE' },
-            UpdateExpression: 'SET #members = :m, #approvalThreshold = :x, #updatedAt = :now',
+            UpdateExpression:
+              'SET #members = :m, #approvalThreshold = :x, #intendedMemberCount = :n, #updatedAt = :now',
             ConditionExpression: expectedUpdatedAt
               ? 'attribute_exists(drepId) AND #updatedAt = :expected'
               : 'attribute_exists(drepId)',
             ExpressionAttributeNames: {
               '#members': 'members',
               '#approvalThreshold': 'approvalThreshold',
+              '#intendedMemberCount': 'intendedMemberCount',
               '#updatedAt': 'updatedAt',
             },
             ExpressionAttributeValues: {
               ':m': newMembers,
               ':x': X,
+              ':n': newIntendedN,
               ':now': now,
               ...(expectedUpdatedAt ? { ':expected': expectedUpdatedAt } : {}),
             },
