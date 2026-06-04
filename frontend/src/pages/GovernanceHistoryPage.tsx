@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import {
   useGovernanceHistory,
@@ -27,33 +28,33 @@ import type { GovernanceAction, GovernanceActionStatus, GovernanceActionType } f
 
 const STATUS_FILTERS: Array<{
   id: GovernanceActionStatus | 'all';
-  label: string;
+  labelKey: string;
   glyph: string;
 }> = [
-  { id: 'all', label: 'All', glyph: '·' },
-  { id: 'enacted', label: 'Enacted', glyph: '✓' },
-  { id: 'dropped', label: 'Dropped', glyph: '✗' },
-  { id: 'expired', label: 'Expired', glyph: '⏱' },
-  { id: 'active', label: 'Active', glyph: '●' },
+  { id: 'all', labelKey: 'governanceHistory.filterAll', glyph: '·' },
+  { id: 'enacted', labelKey: 'governanceHistory.filterEnacted', glyph: '✓' },
+  { id: 'dropped', labelKey: 'governanceHistory.filterDropped', glyph: '✗' },
+  { id: 'expired', labelKey: 'governanceHistory.filterExpired', glyph: '⏱' },
+  { id: 'active', labelKey: 'governanceHistory.filterActive', glyph: '●' },
 ];
 
-const TYPE_LABELS: Record<GovernanceActionType, string> = {
-  ParameterChange: 'Parameter Change',
-  HardForkInitiation: 'Hard Fork',
-  TreasuryWithdrawals: 'Treasury Withdrawal',
-  NoConfidence: 'No Confidence',
-  UpdateCommittee: 'Update Committee',
-  NewConstitution: 'New Constitution',
-  InfoAction: 'Info',
+const TYPE_LABEL_KEYS: Record<GovernanceActionType, string> = {
+  ParameterChange: 'governanceHistory.typeParameterChange',
+  HardForkInitiation: 'governanceHistory.typeHardForkInitiation',
+  TreasuryWithdrawals: 'governanceHistory.typeTreasuryWithdrawals',
+  NoConfidence: 'governanceHistory.typeNoConfidence',
+  UpdateCommittee: 'governanceHistory.typeUpdateCommittee',
+  NewConstitution: 'governanceHistory.typeNewConstitution',
+  InfoAction: 'governanceHistory.typeInfoAction',
 };
 
 type SortKey = 'recent' | 'lifecycle-epoch' | 'type' | 'yes-power';
 
-const SORT_OPTIONS: Array<{ id: SortKey; label: string }> = [
-  { id: 'recent', label: 'Most recent' },
-  { id: 'lifecycle-epoch', label: 'Lifecycle epoch (latest)' },
-  { id: 'type', label: 'Action type' },
-  { id: 'yes-power', label: 'Yes voting power %' },
+const SORT_OPTIONS: Array<{ id: SortKey; labelKey: string }> = [
+  { id: 'recent', labelKey: 'governanceHistory.sortRecent' },
+  { id: 'lifecycle-epoch', labelKey: 'governanceHistory.sortLifecycleEpoch' },
+  { id: 'type', labelKey: 'governanceHistory.sortType' },
+  { id: 'yes-power', labelKey: 'governanceHistory.sortYesPower' },
 ];
 
 const PAGE_SIZE = 20;
@@ -126,6 +127,7 @@ function yesPowerFraction(a: GovernanceAction): number {
 }
 
 export function GovernanceHistoryPage(): React.ReactElement {
+  const { t } = useTranslation();
   const { data: stats, isLoading: statsLoading } = useGovernanceStats();
   const { data: history, isLoading: historyLoading, error } = useGovernanceHistory();
 
@@ -169,12 +171,13 @@ export function GovernanceHistoryPage(): React.ReactElement {
       .filter(([, count]) => count > 0)
       .sort((a, b) => b[1] - a[1]);
     return entries
-      .map(
-        ([type, count]) =>
-          `${count} ${TYPE_LABELS[type as GovernanceActionType] ?? type}`,
-      )
+      .map(([type, count]) => {
+        const key = TYPE_LABEL_KEYS[type as GovernanceActionType];
+        const label = key ? t(key) : type;
+        return `${count} ${label}`;
+      })
       .join(' · ');
-  }, [stats]);
+  }, [stats, t]);
 
   const earliestLabel = stats?.earliestSubmittedAt
     ? new Date(stats.earliestSubmittedAt).toLocaleDateString()
@@ -188,18 +191,17 @@ export function GovernanceHistoryPage(): React.ReactElement {
       <header className="space-y-1">
         <div className="flex items-baseline justify-between gap-3 flex-wrap">
           <h1 className="text-[26px] font-bold tracking-tight text-[var(--text-primary)]">
-            Governance History
+            {t('governanceHistory.title')}
           </h1>
           <Link
             to="/governance"
             className="text-sm text-[var(--brand-primary)] hover:underline"
           >
-            ← Back to live actions
+            {t('governanceHistory.backToLive')}
           </Link>
         </div>
         <p className="text-sm text-[var(--text-secondary)]">
-          Every governance action ever submitted to Cardano mainnet, sorted by
-          submission time. Reference for governance researchers and DReps.
+          {t('governanceHistory.intro')}
         </p>
       </header>
 
@@ -209,14 +211,14 @@ export function GovernanceHistoryPage(): React.ReactElement {
           'bg-[var(--bg-canvas)] border border-[var(--border-default)]',
           'rounded-token-xl shadow-token-sm p-5 space-y-3',
         )}
-        aria-label="Governance history summary"
+        aria-label={t('governanceHistory.summaryAriaLabel')}
       >
         <div className="flex items-baseline gap-3 flex-wrap">
           <span className="text-[28px] font-bold tabular-nums text-[var(--text-primary)] leading-none">
             {statsLoading ? '—' : stats?.total ?? 0}
           </span>
           <span className="text-[13px] text-[var(--text-secondary)]">
-            actions ever on-chain
+            {t('governanceHistory.actionsEverOnChain')}
           </span>
           {!statsLoading && stats?.earliestSubmittedAt && (
             <span className="text-[12.5px] text-[var(--text-tertiary)] ml-auto">
@@ -252,7 +254,7 @@ export function GovernanceHistoryPage(): React.ReactElement {
                 aria-pressed={isActive}
               >
                 <span aria-hidden="true">{f.glyph}</span>
-                {f.label}
+                {t(f.labelKey)}
                 <span
                   className={cn(
                     'rounded-token-full px-1.5',
@@ -271,21 +273,21 @@ export function GovernanceHistoryPage(): React.ReactElement {
         <div className="grid gap-3 sm:grid-cols-2 pt-1">
           <div>
             <div className="text-[11.5px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)] mb-0.5">
-              Treasury withdrawn
+              {t('governanceHistory.treasuryWithdrawn')}
             </div>
             <div className="text-[18px] font-bold text-[var(--text-primary)] tabular-nums">
               {statsLoading ? '—' : formatAdaCompact(stats?.treasuryWithdrawnLovelace)}
             </div>
             <div className="text-[11.5px] text-[var(--text-tertiary)]">
-              Sum of enacted Treasury Withdrawals only.
+              {t('governanceHistory.treasuryWithdrawnCaption')}
             </div>
           </div>
           <div>
             <div className="text-[11.5px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)] mb-0.5">
-              By type
+              {t('governanceHistory.byType')}
             </div>
             <div className="text-[12.5px] text-[var(--text-secondary)] tabular-nums leading-relaxed">
-              {statsLoading ? '—' : byTypeLabel || 'No actions yet.'}
+              {statsLoading ? '—' : byTypeLabel || t('governanceHistory.noActionsYet')}
             </div>
           </div>
         </div>
@@ -299,7 +301,7 @@ export function GovernanceHistoryPage(): React.ReactElement {
         )}
       >
         <label className="inline-flex items-center gap-2">
-          <span className="text-[var(--text-tertiary)]">Type</span>
+          <span className="text-[var(--text-tertiary)]">{t('governanceHistory.typeLabel')}</span>
           <select
             value={typeFilter}
             onChange={(e) => {
@@ -312,18 +314,18 @@ export function GovernanceHistoryPage(): React.ReactElement {
               'text-[var(--text-primary)] focus-visible:outline-none focus-visible:shadow-token-focus',
             )}
           >
-            <option value="all">All types</option>
-            {(Object.keys(TYPE_LABELS) as GovernanceActionType[]).map((t) => (
-              <option key={t} value={t}>
-                {TYPE_LABELS[t]}
-                {stats?.byType[t] != null ? ` (${stats.byType[t]})` : ''}
+            <option value="all">{t('governanceHistory.allTypes')}</option>
+            {(Object.keys(TYPE_LABEL_KEYS) as GovernanceActionType[]).map((type) => (
+              <option key={type} value={type}>
+                {t(TYPE_LABEL_KEYS[type])}
+                {stats?.byType[type] != null ? ` (${stats.byType[type]})` : ''}
               </option>
             ))}
           </select>
         </label>
 
         <label className="inline-flex items-center gap-2">
-          <span className="text-[var(--text-tertiary)]">Sort</span>
+          <span className="text-[var(--text-tertiary)]">{t('governanceHistory.sortLabel')}</span>
           <select
             value={sortKey}
             onChange={(e) => setSortKey(e.target.value as SortKey)}
@@ -335,14 +337,17 @@ export function GovernanceHistoryPage(): React.ReactElement {
           >
             {SORT_OPTIONS.map((s) => (
               <option key={s.id} value={s.id}>
-                {s.label}
+                {t(s.labelKey)}
               </option>
             ))}
           </select>
         </label>
 
         <span className="ml-auto text-[var(--text-tertiary)] tabular-nums">
-          Showing {visible.length} of {filtered.length}
+          {t('governanceHistory.showingCount', {
+            visible: visible.length,
+            total: filtered.length,
+          })}
         </span>
       </div>
 
@@ -362,7 +367,7 @@ export function GovernanceHistoryPage(): React.ReactElement {
       {error && (
         <div className="rounded-token-lg border border-[var(--danger)]/40 bg-[var(--danger-soft)] p-4 text-sm">
           <p className="font-semibold text-[var(--danger)]">
-            Failed to load governance history
+            {t('governanceHistory.loadFailed')}
           </p>
           <p className="text-[var(--text-secondary)] mt-1">
             {(error as Error).message}
@@ -373,7 +378,7 @@ export function GovernanceHistoryPage(): React.ReactElement {
       {/* Empty state */}
       {!historyLoading && !error && filtered.length === 0 && (
         <div className="text-center py-12 text-[var(--text-tertiary)]">
-          <p>No governance actions match the current filters.</p>
+          <p>{t('governanceHistory.emptyState')}</p>
         </div>
       )}
 
@@ -392,7 +397,7 @@ export function GovernanceHistoryPage(): React.ReactElement {
       {hasMore && (
         <div className="text-center pt-4">
           <Button variant="secondary" onClick={() => setPageCount((c) => c + 1)}>
-            Load more
+            {t('governanceHistory.loadMore')}
           </Button>
         </div>
       )}

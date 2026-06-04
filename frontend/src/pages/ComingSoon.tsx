@@ -1,5 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { Construction } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -15,6 +16,7 @@ interface ComingSoonProps {
  * Notifications until each gets its real page.
  */
 export function ComingSoon({ title, description }: ComingSoonProps): React.ReactElement {
+  const { t } = useTranslation();
   return (
     <div className="max-w-3xl mx-auto">
       <Card padLg className="text-center py-12">
@@ -23,10 +25,10 @@ export function ComingSoon({ title, description }: ComingSoonProps): React.React
         </div>
         <h1 className="text-2xl font-bold mb-2 text-[var(--text-primary)]">{title}</h1>
         <p className="text-sm text-[var(--text-secondary)] max-w-md mx-auto mb-6">
-          {description ?? 'This surface is part of the roadmap and will be available shortly.'}
+          {description ?? t('comingSoon.defaultDescription')}
         </p>
         <Button asChild variant="secondary">
-          <Link to="/governance">Browse Governance Actions</Link>
+          <Link to="/governance">{t('comingSoon.browseGovernance')}</Link>
         </Button>
       </Card>
     </div>

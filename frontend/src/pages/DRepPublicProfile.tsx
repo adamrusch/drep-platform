@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
 import {
   Copy,
@@ -18,7 +19,8 @@ import { Card } from '@/components/ui/Card';
 import { StatusPill } from '@/components/ui/StatusPill';
 import { Sparkline, seededRandomWalk } from '@/components/ui/Sparkline';
 import { useUiStore } from '@/stores/uiStore';
-import { cn, formatLovelace, formatRelativeTime, epochsToDate } from '@/lib/utils';
+import { useFormatters } from '@/hooks/useFormatters';
+import { cn } from '@/lib/utils';
 import type { DRepDetail, DRepReference } from '@/types';
 
 /** Reject anything but http(s) / ipfs — anchor metadata is untrusted user
@@ -134,15 +136,18 @@ const VOTE_PILL_CLASS: Record<string, string> = {
   abstain: 'bg-[var(--bg-muted)] text-[var(--text-secondary)]',
 };
 
-const ACTION_TYPE_LABELS: Record<string, string> = {
-  ParameterChange: 'Parameter Change',
-  HardForkInitiation: 'Hard Fork',
-  TreasuryWithdrawals: 'Treasury',
-  NoConfidence: 'No Confidence',
-  UpdateCommittee: 'Update Committee',
-  NewConstitution: 'New Constitution',
-  InfoAction: 'Info',
-};
+/** Known CIP-1694 governance-action types. Display labels are resolved at
+ *  render via `t('drepProfile.actionTypes.<type>')`; unknown types fall back
+ *  to the raw on-chain type string. */
+const KNOWN_ACTION_TYPES = new Set([
+  'ParameterChange',
+  'HardForkInitiation',
+  'TreasuryWithdrawals',
+  'NoConfidence',
+  'UpdateCommittee',
+  'NewConstitution',
+  'InfoAction',
+]);
 
 function shortHash(hash: string): string {
   if (hash.length <= 12) return hash;
@@ -150,6 +155,8 @@ function shortHash(hash: string): string {
 }
 
 export function DRepPublicProfile(): React.ReactElement {
+  const { t } = useTranslation();
+  const { formatLovelace, formatRelativeTime, formatEpochDate } = useFormatters();
   const { drepId } = useParams<{ drepId: string }>();
   const addToast = useUiStore((s) => s.addToast);
   const { data: viewerProfile } = useMe();
@@ -174,9 +181,9 @@ export function DRepPublicProfile(): React.ReactElement {
   if (error || !drep) {
     return (
       <div className="text-center py-16">
-        <h2 className="text-xl font-semibold mb-2">DRep not found</h2>
+        <h2 className="text-xl font-semibold mb-2">{t('drepProfile.notFound')}</h2>
         <Link to="/dreps" className="text-[var(--brand-primary)] hover:underline text-sm">
-          Back to DRep directory
+          {t('drepProfile.backToDirectory')}
         </Link>
       </div>
     );
@@ -219,9 +226,9 @@ export function DRepPublicProfile(): React.ReactElement {
   const handleCopyId = async (): Promise<void> => {
     try {
       await navigator.clipboard.writeText(drep.drepId);
-      addToast({ title: 'DRep ID copied', variant: 'success' });
+      addToast({ title: t('drepProfile.copyIdToast'), variant: 'success' });
     } catch {
-      addToast({ title: 'Copy failed', variant: 'error' });
+      addToast({ title: t('drepProfile.copyFailedToast'), variant: 'error' });
     }
   };
 
@@ -234,7 +241,7 @@ export function DRepPublicProfile(): React.ReactElement {
           className="flex items-center gap-1 hover:text-[var(--brand-primary)]"
         >
           <ChevronLeft size={14} strokeWidth={1.75} />
-          <span>DReps</span>
+          <span>{t('drepProfile.breadcrumbRoot')}</span>
         </Link>
         <span className="crumbs__sep">/</span>
         <span className="text-[var(--text-primary)] truncate">
@@ -266,35 +273,39 @@ export function DRepPublicProfile(): React.ReactElement {
                 </h1>
               ) : (
                 <h1 className="text-[20px] italic text-[var(--text-tertiary)]">
-                  (Unnamed DRep)
+                  {t('drepProfile.unnamed')}
                 </h1>
               )}
               {drep.isPredefined ? (
                 <StatusPill
                   status="voting"
-                  label="Predefined"
-                  title="A built-in Cardano DRep used for auto-vote delegations. Not a registered DRep — protocol primitive."
+                  label={t('drepProfile.status.predefined')}
+                  title={t('drepProfile.status.predefinedTitle')}
                 />
               ) : drep.isActive ? (
-                <StatusPill status="active" label="Active" />
+                <StatusPill status="active" label={t('drepProfile.status.active')} />
               ) : (
                 <StatusPill
                   status="expired"
                   label={
                     drep.expiresEpoch !== null
-                      ? `Inactive · expires E${drep.expiresEpoch}`
-                      : 'Inactive'
+                      ? t('drepProfile.status.inactiveExpires', { epoch: drep.expiresEpoch })
+                      : t('drepProfile.status.inactive')
                   }
                 />
               )}
               {drep.hasScript && (
-                <StatusPill status="neutral" label="Script" title="Script-controlled DRep" />
+                <StatusPill
+                  status="neutral"
+                  label={t('drepProfile.status.script')}
+                  title={t('drepProfile.status.scriptTitle')}
+                />
               )}
               {drep.anchorVerified === true && (
-                <StatusPill status="passed" label="Anchor verified" />
+                <StatusPill status="passed" label={t('drepProfile.status.anchorVerified')} />
               )}
               {drep.anchorVerified === false && (
-                <StatusPill status="warning" label="Anchor mismatch" />
+                <StatusPill status="warning" label={t('drepProfile.status.anchorMismatch')} />
               )}
               {viewerDelegation && (
                 <StatusPill
@@ -302,13 +313,18 @@ export function DRepPublicProfile(): React.ReactElement {
                   label={
                     viewerDelegation.epochsDelegated !== null &&
                     typeof viewerDelegation.epochStart === 'number'
-                      ? `You're delegated · ${viewerDelegation.epochsDelegated} epoch${viewerDelegation.epochsDelegated === 1 ? '' : 's'} (since E${viewerDelegation.epochStart})`
-                      : "You're delegated to this DRep"
+                      ? t('drepProfile.status.delegatedSince', {
+                          count: viewerDelegation.epochsDelegated,
+                          epoch: viewerDelegation.epochStart,
+                        })
+                      : t('drepProfile.status.delegated')
                   }
                   title={
                     viewerDelegation.epochsDelegated !== null
-                      ? `Cardano epochs are ~5 days each — roughly ${viewerDelegation.epochsDelegated * 5} days delegated`
-                      : 'Your wallet is currently delegated to this DRep'
+                      ? t('drepProfile.status.delegatedTitleDays', {
+                          days: viewerDelegation.epochsDelegated * 5,
+                        })
+                      : t('drepProfile.status.delegatedTitle')
                   }
                 />
               )}
@@ -318,7 +334,7 @@ export function DRepPublicProfile(): React.ReactElement {
             <button
               type="button"
               onClick={() => void handleCopyId()}
-              title={`Click to copy: ${drep.drepId}`}
+              title={t('drepProfile.copyIdTitle', { id: drep.drepId })}
               className={cn(
                 'inline-flex items-center gap-1.5 text-[11.5px] font-mono break-all',
                 'text-[var(--text-muted)] hover:text-[var(--brand-primary)]',
@@ -360,13 +376,13 @@ export function DRepPublicProfile(): React.ReactElement {
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 rounded-token-lg border border-[var(--border-default)] bg-[var(--bg-subtle)] p-4 text-sm">
         <div>
           <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)] mb-0.5">
-            Voting Power
+            {t('drepProfile.stats.votingPower')}
           </div>
           <div className="font-medium text-[var(--text-primary)] tabular-nums">{power}</div>
         </div>
         <div>
           <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)] mb-0.5">
-            Delegators
+            {t('drepProfile.stats.delegators')}
           </div>
           <div className="font-medium text-[var(--text-primary)] tabular-nums">
             {typeof delegatorCount === 'number'
@@ -382,17 +398,20 @@ export function DRepPublicProfile(): React.ReactElement {
         </div>
         <div>
           <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)] mb-0.5">
-            Status
+            {t('drepProfile.stats.status')}
           </div>
           <div className="font-medium text-[var(--text-primary)] capitalize">{drep.status}</div>
         </div>
         <div>
           <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)] mb-0.5">
-            Expires
+            {t('drepProfile.stats.expires')}
           </div>
           <div className="font-medium text-[var(--text-primary)] tabular-nums">
             {drep.expiresEpoch !== null
-              ? `Epoch ${drep.expiresEpoch} (${epochsToDate(drep.expiresEpoch)})`
+              ? t('drepProfile.stats.epochWithDate', {
+                  epoch: drep.expiresEpoch,
+                  date: formatEpochDate(drep.expiresEpoch),
+                })
               : '—'}
           </div>
         </div>
@@ -426,7 +445,7 @@ export function DRepPublicProfile(): React.ReactElement {
             className="inline-flex items-center gap-1 hover:text-[var(--brand-primary)] hover:underline"
             title={drep.anchorUrl}
           >
-            CIP-119 metadata
+            {t('drepProfile.explorer.cip119Metadata')}
             <ExternalLink size={11} strokeWidth={2} aria-hidden="true" />
           </a>
         )}
@@ -442,12 +461,12 @@ export function DRepPublicProfile(): React.ReactElement {
       {drep.isPredefined && (
         <div className="rounded-token-xl border border-[var(--info)]/30 bg-[var(--info-soft)] p-5 text-sm">
           <p className="text-[var(--text-primary)] font-medium mb-1">
-            About this predefined DRep
+            {t('drepProfile.predefinedExplainerTitle')}
           </p>
           <p className="text-[var(--text-secondary)] leading-relaxed">
             {drep.drepId === 'drep_always_abstain'
-              ? "Stake delegated here is recorded as 'Abstain' on every governance action. Abstain stake is excluded from the active voting denominator under CIP-1694."
-              : "Stake delegated here is recorded as 'No' on most governance actions, and 'Yes' on No-Confidence motions. It counts toward the active voting denominator."}
+              ? t('drepProfile.predefinedAbstain')
+              : t('drepProfile.predefinedNoConfidence')}
           </p>
         </div>
       )}
@@ -460,13 +479,13 @@ export function DRepPublicProfile(): React.ReactElement {
           <div className="flex items-center justify-between mb-3">
             <h2 className="font-semibold text-[15px] text-[var(--text-primary)] flex items-center gap-2">
               <TrendingUp size={14} strokeWidth={2} className="text-[var(--brand-primary)]" />
-              Voting power trend
+              {t('drepProfile.trend.title')}
               <span className="text-[11px] text-[var(--text-tertiary)] font-normal ml-1">
-                · last 14 epochs
+                {t('drepProfile.trend.lastEpochs')}
               </span>
             </h2>
             <span className="inline-flex items-center text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-token-full bg-[var(--bg-muted)] text-[var(--text-tertiary)]">
-              Sample data
+              {t('drepProfile.trend.sampleData')}
             </span>
           </div>
           <Sparkline
@@ -481,20 +500,20 @@ export function DRepPublicProfile(): React.ReactElement {
       {/* Bio sections */}
       {drep.objectives && (
         <Card>
-          <h2 className="font-semibold text-[15px] mb-2 text-[var(--text-primary)]">Objectives</h2>
+          <h2 className="font-semibold text-[15px] mb-2 text-[var(--text-primary)]">{t('drepProfile.sections.objectives')}</h2>
           <ProseBlock text={drep.objectives} />
         </Card>
       )}
       {drep.motivations && (
         <Card>
-          <h2 className="font-semibold text-[15px] mb-2 text-[var(--text-primary)]">Motivations</h2>
+          <h2 className="font-semibold text-[15px] mb-2 text-[var(--text-primary)]">{t('drepProfile.sections.motivations')}</h2>
           <ProseBlock text={drep.motivations} />
         </Card>
       )}
       {drep.qualifications && (
         <Card>
           <h2 className="font-semibold text-[15px] mb-2 text-[var(--text-primary)]">
-            Qualifications
+            {t('drepProfile.sections.qualifications')}
           </h2>
           <ProseBlock text={drep.qualifications} />
         </Card>
@@ -504,7 +523,7 @@ export function DRepPublicProfile(): React.ReactElement {
       {general.length > 0 && (
         <Card>
           <h2 className="font-semibold text-[15px] mb-2 text-[var(--text-primary)]">
-            References
+            {t('drepProfile.sections.references')}
           </h2>
           <ul className="space-y-1.5">
             {general.map((ref, i) =>
@@ -525,7 +544,7 @@ export function DRepPublicProfile(): React.ReactElement {
                   className="text-sm text-[var(--text-tertiary)] break-all"
                 >
                   {ref.label || ref.uri}{' '}
-                  <span className="text-xs">(unsupported scheme)</span>
+                  <span className="text-xs">{t('drepProfile.unsupportedScheme')}</span>
                 </li>
               ),
             )}
@@ -540,15 +559,14 @@ export function DRepPublicProfile(): React.ReactElement {
           would imply they're inactive. */}
       <Card>
         <h2 className="font-semibold text-[15px] mb-3 text-[var(--text-primary)] flex items-center gap-2">
-          Recent votes
+          {t('drepProfile.recentVotes.title')}
           <span className="text-[11px] text-[var(--text-tertiary)] font-normal ml-1">
-            · last 10
+            {t('drepProfile.recentVotes.lastTen')}
           </span>
         </h2>
         {drep.isPredefined ? (
           <p className="text-sm text-[var(--text-tertiary)]">
-            Predefined DReps don't have an individual voting history. Their auto-vote is
-            applied at ratification time to every applicable governance action.
+            {t('drepProfile.recentVotes.predefinedNote')}
           </p>
         ) : drep.recentVotes && drep.recentVotes.length > 0 ? (
           <ul className="space-y-1.5">
@@ -556,7 +574,9 @@ export function DRepPublicProfile(): React.ReactElement {
               const actionId = `${v.proposalTxHash}#${v.proposalIndex}`;
               const voteKey = v.vote.toLowerCase();
               const pillClass = VOTE_PILL_CLASS[voteKey] ?? VOTE_PILL_CLASS['abstain'];
-              const typeLabel = ACTION_TYPE_LABELS[v.proposalType] ?? v.proposalType;
+              const typeLabel = KNOWN_ACTION_TYPES.has(v.proposalType)
+                ? t(`drepProfile.actionTypes.${v.proposalType}`)
+                : v.proposalType;
               return (
                 <li key={`${actionId}-${i}`}>
                   <Link
@@ -593,11 +613,11 @@ export function DRepPublicProfile(): React.ReactElement {
           </ul>
         ) : drep.recentVotes ? (
           <p className="text-sm text-[var(--text-tertiary)]">
-            This DRep has not voted on any actions yet.
+            {t('drepProfile.recentVotes.noVotes')}
           </p>
         ) : (
           <p className="text-sm text-[var(--text-tertiary)]">
-            Voting history is unavailable right now. Try again in a moment.
+            {t('drepProfile.recentVotes.unavailable')}
           </p>
         )}
       </Card>
@@ -611,26 +631,26 @@ export function DRepPublicProfile(): React.ReactElement {
             ) : drep.anchorVerified === false ? (
               <AlertTriangle size={13} strokeWidth={2} className="text-[var(--warning)]" />
             ) : null}
-            <span>CIP-119 anchor</span>
+            <span>{t('drepProfile.anchor.title')}</span>
           </div>
           <div>
-            <span className="font-medium text-[var(--text-secondary)]">URL: </span>
+            <span className="font-medium text-[var(--text-secondary)]">{t('drepProfile.anchor.url')}</span>
             <span className="break-all">{drep.anchorUrl}</span>
           </div>
           {drep.anchorHash && (
             <div>
-              <span className="font-medium text-[var(--text-secondary)]">Hash: </span>
+              <span className="font-medium text-[var(--text-secondary)]">{t('drepProfile.anchor.hash')}</span>
               <span className="break-all font-mono">{drep.anchorHash}</span>
             </div>
           )}
           {drep.paymentAddress && (
             <div>
-              <span className="font-medium text-[var(--text-secondary)]">Payment address: </span>
+              <span className="font-medium text-[var(--text-secondary)]">{t('drepProfile.anchor.paymentAddress')}</span>
               <span className="break-all font-mono">{drep.paymentAddress}</span>
             </div>
           )}
           <div>
-            <span className="font-medium text-[var(--text-secondary)]">Last synced: </span>
+            <span className="font-medium text-[var(--text-secondary)]">{t('drepProfile.anchor.lastSynced')}</span>
             <span>{formatRelativeTime(drep.lastSyncedAt)}</span>
           </div>
         </Card>
@@ -646,7 +666,7 @@ export function DRepPublicProfile(): React.ReactElement {
           )}
         >
           <UsersIcon size={13} strokeWidth={2} aria-hidden="true" />
-          View delegator clubhouse
+          {t('drepProfile.viewDelegators')}
         </Link>
       </div>
     </div>

@@ -1,5 +1,6 @@
 import React from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '@/stores/authStore';
 import type { UserRole } from '@/types';
 
@@ -19,6 +20,7 @@ export function RoleGuard({
   redirectTo = '/',
   fallback,
 }: RoleGuardProps): React.ReactElement {
+  const { t } = useTranslation();
   const { walletAddress, roles, expiresAt } = useAuthStore();
   const location = useLocation();
 
@@ -37,9 +39,9 @@ export function RoleGuard({
     if (fallback) return <>{fallback}</>;
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
-        <h2 className="text-2xl font-semibold mb-2">Access Restricted</h2>
+        <h2 className="text-2xl font-semibold mb-2">{t('roleGuard.accessRestricted')}</h2>
         <p className="text-muted-foreground">
-          You need one of the following roles to access this page:{' '}
+          {t('roleGuard.needRole')}{' '}
           <span className="font-medium">{requiredRoles.join(', ')}</span>
         </p>
       </div>

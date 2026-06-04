@@ -1,16 +1,20 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { Calendar, Link2 } from 'lucide-react';
 import { Card, CardHeader, CardTitle } from '@/components/ui/Card';
 import { useGovernanceActions } from '@/hooks/useGovernanceActions';
-import { formatRelativeTime } from '@/lib/utils';
+import { useFormatters } from '@/hooks/useFormatters';
 import type { GovernanceAction } from '@/types';
 
-const SoonPill = (): React.ReactElement => (
-  <span className="inline-flex items-center text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-token-full bg-[var(--bg-muted)] text-[var(--text-tertiary)]">
-    Soon
-  </span>
-);
+const SoonPill = (): React.ReactElement => {
+  const { t } = useTranslation();
+  return (
+    <span className="inline-flex items-center text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-token-full bg-[var(--bg-muted)] text-[var(--text-tertiary)]">
+      {t('proposalRail.soon')}
+    </span>
+  );
+};
 
 interface ProposalRailProps {
   action: GovernanceAction;
@@ -29,6 +33,8 @@ interface ProposalRailProps {
  * Cast Vote modal trigger button.
  */
 export function ProposalRail({ action }: ProposalRailProps): React.ReactElement {
+  const { t } = useTranslation();
+  const { formatRelativeTime } = useFormatters();
   const { data: relatedData } = useGovernanceActions('active');
   const related = (relatedData?.pages ?? [])
     .flatMap((p) => p.items)
@@ -40,25 +46,25 @@ export function ProposalRail({ action }: ProposalRailProps): React.ReactElement 
   // Build timeline events deterministically from the on-chain fields we have.
   const events = [
     {
-      label: 'Submitted',
+      label: t('proposalRail.submitted'),
       detail: formatRelativeTime(action.submittedAt),
       done: true,
       color: 'var(--brand-primary)',
     },
     {
-      label: 'Voting open',
-      detail: action.status === 'active' ? 'Now' : '—',
+      label: t('proposalRail.votingOpen'),
+      detail: action.status === 'active' ? t('proposalRail.now') : '—',
       done: action.status !== 'active' && action.status !== 'expired',
       color: 'var(--brand-accent)',
     },
     {
       label:
         action.status === 'enacted'
-          ? 'Ratified'
+          ? t('proposalRail.ratified')
           : action.status === 'dropped' || action.status === 'expired'
-            ? 'Dropped'
-            : 'Decision',
-      detail: `Epoch ${action.epochDeadline}`,
+            ? t('proposalRail.dropped')
+            : t('proposalRail.decision'),
+      detail: t('proposalRail.epoch', { epoch: action.epochDeadline }),
       done: action.status === 'enacted' || action.status === 'dropped' || action.status === 'expired',
       color:
         action.status === 'enacted'
@@ -75,7 +81,7 @@ export function ProposalRail({ action }: ProposalRailProps): React.ReactElement 
         <CardHeader>
           <CardTitle>
             <Calendar size={14} strokeWidth={2} className="text-[var(--brand-primary)]" />
-            On-chain timeline
+            {t('proposalRail.onChainTimeline')}
           </CardTitle>
         </CardHeader>
         <ol className="space-y-3 ml-2">
@@ -106,13 +112,13 @@ export function ProposalRail({ action }: ProposalRailProps): React.ReactElement 
         <CardHeader>
           <CardTitle>
             <Link2 size={14} strokeWidth={2} className="text-[var(--brand-primary)]" />
-            Related proposals
+            {t('proposalRail.relatedProposals')}
           </CardTitle>
           {related.length === 0 && <SoonPill />}
         </CardHeader>
         {related.length === 0 ? (
           <p className="text-[12.5px] text-[var(--text-tertiary)]">
-            No other active proposals of this type right now.
+            {t('proposalRail.noRelated')}
           </p>
         ) : (
           <ul className="space-y-2.5">
@@ -122,10 +128,10 @@ export function ProposalRail({ action }: ProposalRailProps): React.ReactElement 
                   to={`/governance/${encodeURIComponent(r.actionId)}`}
                   className="block text-[13px] text-[var(--text-primary)] hover:text-[var(--brand-primary)] hover:underline truncate"
                 >
-                  {r.title || r.summary || 'Untitled action'}
+                  {r.title || r.summary || t('proposalRail.untitledAction')}
                 </Link>
                 <div className="text-[11px] text-[var(--text-tertiary)]">
-                  Epoch {r.epochDeadline}
+                  {t('proposalRail.epoch', { epoch: r.epochDeadline })}
                 </div>
               </li>
             ))}

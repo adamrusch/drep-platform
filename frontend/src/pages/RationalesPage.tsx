@@ -1,4 +1,5 @@
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 
 /**
@@ -8,22 +9,20 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
  * now this page points members to their committee + the governance list.
  */
 export function RationalesPage(): React.ReactElement {
+  const { t } = useTranslation();
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-semibold text-[var(--text-primary)]">Rationales</h1>
+      <h1 className="text-xl font-semibold text-[var(--text-primary)]">{t('rationales.title')}</h1>
       <Card>
-        <CardHeader><CardTitle>Where to find rationales</CardTitle></CardHeader>
+        <CardHeader><CardTitle>{t('rationales.whereTitle')}</CardTitle></CardHeader>
         <CardContent className="space-y-2 text-[13.5px] text-[var(--text-secondary)]">
+          <p>{t('rationales.para1')}</p>
           <p>
-            Each committee authors a rationale per governance action; once finalized it carries a
-            CIP-100/108 anchor hash and (after pinning) an IPFS URI embedded in the on-chain vote.
-          </p>
-          <p>
-            Open a{' '}
-            <Link to="/committee" className="text-[var(--brand-primary)] hover:underline">committee</Link>
-            {' '}or browse{' '}
-            <Link to="/governance" className="text-[var(--brand-primary)] hover:underline">governance actions</Link>
-            {' '}to see the associated proposal and rationale.
+            {t('rationales.openA')}{' '}
+            <Link to="/committee" className="text-[var(--brand-primary)] hover:underline">{t('rationales.committee')}</Link>
+            {' '}{t('rationales.orBrowse')}{' '}
+            <Link to="/governance" className="text-[var(--brand-primary)] hover:underline">{t('rationales.governanceActions')}</Link>
+            {' '}{t('rationales.toSee')}
           </p>
         </CardContent>
       </Card>

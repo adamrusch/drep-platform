@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Copy, Twitter, MessageCircle, Globe, X } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
@@ -25,6 +26,7 @@ interface ShareModalProps {
  * Reference: design `app.jsx:121–139`.
  */
 export function ShareModal({ url, title, trigger }: ShareModalProps): React.ReactElement {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const addToast = useUiStore((s) => s.addToast);
 
@@ -36,12 +38,12 @@ export function ShareModal({ url, title, trigger }: ShareModalProps): React.Reac
   const handleCopyLink = async (): Promise<void> => {
     try {
       await navigator.clipboard.writeText(url);
-      addToast({ title: 'Link copied', variant: 'success' });
+      addToast({ title: t('share.linkCopied'), variant: 'success' });
       setOpen(false);
     } catch {
       addToast({
-        title: 'Could not copy',
-        description: 'Your browser blocked clipboard access.',
+        title: t('share.couldNotCopy'),
+        description: t('share.couldNotCopyDescription'),
         variant: 'error',
       });
     }
@@ -50,13 +52,13 @@ export function ShareModal({ url, title, trigger }: ShareModalProps): React.Reac
     try {
       await navigator.clipboard.writeText(discordPayload);
       addToast({
-        title: 'Discord snippet copied',
-        description: 'Paste it into a Discord channel.',
+        title: t('share.discordCopied'),
+        description: t('share.discordCopiedDescription'),
         variant: 'success',
       });
       setOpen(false);
     } catch {
-      addToast({ title: 'Could not copy', variant: 'error' });
+      addToast({ title: t('share.couldNotCopy'), variant: 'error' });
     }
   };
 
@@ -76,11 +78,11 @@ export function ShareModal({ url, title, trigger }: ShareModalProps): React.Reac
         >
           <div className="flex items-start justify-between gap-3 mb-4">
             <Dialog.Title className="text-[18px] font-bold text-[var(--text-primary)]">
-              Share proposal
+              {t('share.title')}
             </Dialog.Title>
             <Dialog.Close asChild>
               <button
-                aria-label="Close"
+                aria-label={t('share.close')}
                 className="text-[var(--text-tertiary)] hover:text-[var(--text-primary)] transition-colors -mt-1 -mr-1 p-1"
               >
                 <X size={18} strokeWidth={1.75} />
@@ -89,7 +91,7 @@ export function ShareModal({ url, title, trigger }: ShareModalProps): React.Reac
           </div>
 
           <Dialog.Description className="text-sm text-[var(--text-secondary)] mb-4">
-            Anyone with this link can view the proposal page and public comments.
+            {t('share.description')}
           </Dialog.Description>
 
           {/* URL preview */}
@@ -114,12 +116,12 @@ export function ShareModal({ url, title, trigger }: ShareModalProps): React.Reac
               className="!justify-center"
             >
               <Copy size={14} strokeWidth={2} />
-              Copy link
+              {t('share.copyLink')}
             </Button>
             <Button asChild variant="secondary" size="sm" className="!justify-center">
               <a href={tweetUrl} target="_blank" rel="noopener noreferrer">
                 <Twitter size={14} strokeWidth={2} />
-                Tweet
+                {t('share.tweet')}
               </a>
             </Button>
             <Button
@@ -129,11 +131,11 @@ export function ShareModal({ url, title, trigger }: ShareModalProps): React.Reac
               className="!justify-center"
             >
               <MessageCircle size={14} strokeWidth={2} />
-              Discord
+              {t('share.discord')}
             </Button>
           </div>
           <p className="text-[11px] text-[var(--text-tertiary)] mt-2">
-            Discord: copies a formatted snippet you can paste into any channel.
+            {t('share.discordNote')}
           </p>
         </Dialog.Content>
       </Dialog.Portal>

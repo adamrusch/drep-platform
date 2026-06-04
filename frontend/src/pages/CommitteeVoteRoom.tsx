@@ -1,3 +1,4 @@
+import { Trans, useTranslation } from 'react-i18next';
 import { useParams, Link } from 'react-router-dom';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -20,6 +21,7 @@ function shortWallet(w: string): string {
 }
 
 export function CommitteeVoteRoom(): React.ReactElement {
+  const { t } = useTranslation();
   const { drepId = '', actionId = '' } = useParams<{ drepId: string; actionId: string }>();
   const wallet = useAuthStore((s) => s.walletAddress);
   const isMember = useIsCommitteeMember();
@@ -29,16 +31,16 @@ export function CommitteeVoteRoom(): React.ReactElement {
   const fail = useFailCommitteeVote(drepId, actionId);
   const withdraw = useWithdrawProposal(drepId, actionId);
 
-  if (isLoading) return <p className="text-[var(--text-secondary)]">Loading proposal…</p>;
+  if (isLoading) return <p className="text-[var(--text-secondary)]">{t('committeeRoom.room.loadingProposal')}</p>;
   if (isError || !data) {
     return (
       <Card>
         <CardContent>
           <p className="text-[var(--text-secondary)]">
-            No proposal found for this governance action yet.
+            {t('committeeRoom.room.notFound')}
           </p>
           <Link to={`/committee/${encodeURIComponent(drepId)}`} className="text-[var(--brand-primary)] hover:underline">
-            ← Back to committee
+            {t('committeeRoom.room.backToCommittee')}
           </Link>
         </CardContent>
       </Card>
@@ -55,38 +57,45 @@ export function CommitteeVoteRoom(): React.ReactElement {
     <div className="space-y-4">
       {isTestStage() && (
         <div className="rounded-token-md border border-[var(--border-strong)] bg-[var(--bg-muted)] px-3 py-2 text-[12.5px] text-[var(--text-secondary)]">
-          <strong className="text-[var(--text-primary)]">TEST environment</strong> — connected to mainnet for read-only validation. On-chain vote submission is disabled here; votes must be submitted from production.
+          <Trans i18nKey="committeeRoom.room.testBanner" components={{ strong: <strong className="text-[var(--text-primary)]" /> }} />
         </div>
       )}
       <div className="flex items-center justify-between">
         <Link to={`/committee/${encodeURIComponent(drepId)}`} className="text-[13px] text-[var(--brand-primary)] hover:underline">
-          ← Committee proposals
+          {t('committeeRoom.room.committeeProposals')}
         </Link>
         <StatusPill status={proposal.status === 'epoch_finalized' ? 'expired' : proposal.status} />
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle>Proposed DRep position: {proposal.proposedPosition}</CardTitle>
+          <CardTitle>{t('committeeRoom.room.proposedPosition', { position: t(`committeeRoom.list.position.${proposal.proposedPosition}`) })}</CardTitle>
         </CardHeader>
         <CardContent>
           <p className="mb-3 text-[13px] text-[var(--text-secondary)]">
-            Action <span className="font-mono">{actionId}</span> · proposed by {shortWallet(proposal.proposerWallet)} ·
-            needs <strong className="text-[var(--text-primary)]">{proposal.approvalThreshold}</strong> of{' '}
-            <strong className="text-[var(--text-primary)]">{proposal.memberCount}</strong> Agree (X of N)
+            <Trans
+              i18nKey="committeeRoom.room.actionLine"
+              values={{
+                actionId,
+                proposer: shortWallet(proposal.proposerWallet),
+                x: proposal.approvalThreshold,
+                n: proposal.memberCount,
+              }}
+              components={{ mono: <span className="font-mono" />, strong: <strong className="text-[var(--text-primary)]" /> }}
+            />
           </p>
           <VoteTallyDonut tally={tally} />
           <p className="mt-3 text-[12.5px] text-[var(--text-secondary)]">
             {tally.isApproved
-              ? 'Committee Approved — any member may close it as passed.'
-              : `Not yet approved — ${tally.agreeNeeded} more Agree vote${tally.agreeNeeded === 1 ? '' : 's'} needed.`}
+              ? t('committeeRoom.room.approved')
+              : t('committeeRoom.room.notApproved', { count: tally.agreeNeeded })}
           </p>
         </CardContent>
       </Card>
 
       {isOpen && isMember && (
         <Card>
-          <CardHeader><CardTitle>Cast your vote</CardTitle></CardHeader>
+          <CardHeader><CardTitle>{t('committeeRoom.room.castTitle')}</CardTitle></CardHeader>
           <CardContent>
             <CastVotePanel drepId={drepId} actionId={actionId} myVote={myVote} disabled={busy} />
           </CardContent>
@@ -95,7 +104,7 @@ export function CommitteeVoteRoom(): React.ReactElement {
 
       {isOpen && isMember && (
         <Card>
-          <CardHeader><CardTitle>Resolve</CardTitle></CardHeader>
+          <CardHeader><CardTitle>{t('committeeRoom.room.resolveTitle')}</CardTitle></CardHeader>
           <CardContent className="space-y-3">
             <div className="flex flex-wrap gap-2">
               <Button
@@ -104,27 +113,26 @@ export function CommitteeVoteRoom(): React.ReactElement {
                 disabled={!tally.canCloseAsPass || busy}
                 onClick={() => close.mutate()}
               >
-                {close.isPending ? 'Signing…' : 'Close as passed'}
+                {close.isPending ? t('committeeRoom.room.signing') : t('committeeRoom.room.closeAsPassed')}
               </Button>
               {isProposerOrLead && (
                 <>
                   <Button variant="destructive" size="sm" disabled={busy} onClick={() => fail.mutate()}>
-                    {fail.isPending ? 'Signing…' : 'Close as failed'}
+                    {fail.isPending ? t('committeeRoom.room.signing') : t('committeeRoom.room.closeAsFailed')}
                   </Button>
                   <Button variant="ghost" size="sm" disabled={busy} onClick={() => withdraw.mutate()}>
-                    {withdraw.isPending ? 'Signing…' : 'Withdraw'}
+                    {withdraw.isPending ? t('committeeRoom.room.signing') : t('committeeRoom.room.withdraw')}
                   </Button>
                 </>
               )}
             </div>
             {!tally.canCloseAsPass && (
               <p className="text-[12px] text-[var(--text-secondary)]">
-                "Close as passed" unlocks once {tally.approvalThreshold} of {tally.memberCount}{' '}
-                members have voted Agree (Committee Approved).
+                {t('committeeRoom.room.closeLockedHint', { x: tally.approvalThreshold, n: tally.memberCount })}
               </p>
             )}
             <p className="text-[12px] text-[var(--text-secondary)]">
-              Close-as-failed and withdraw are limited to the proposer or the lead DRep.
+              {t('committeeRoom.room.resolveLimited')}
             </p>
           </CardContent>
         </Card>
@@ -135,16 +143,16 @@ export function CommitteeVoteRoom(): React.ReactElement {
       )}
 
       <Card>
-        <CardHeader><CardTitle>Rationale</CardTitle></CardHeader>
+        <CardHeader><CardTitle>{t('committeeRoom.room.rationaleTitle')}</CardTitle></CardHeader>
         <CardContent>
           <p className="mb-2 text-[13px] text-[var(--text-secondary)]">
-            A rationale must be authored and finalized before the vote is submitted on-chain.
+            {t('committeeRoom.room.rationaleHelp')}
           </p>
           <Link
             to={`/committee/${encodeURIComponent(drepId)}/votes/${encodeURIComponent(actionId)}/rationale`}
             className="text-[var(--brand-primary)] hover:underline text-[13.5px]"
           >
-            {data.hasRationaleDraft ? 'Continue the rationale →' : 'Start the rationale →'}
+            {data.hasRationaleDraft ? t('committeeRoom.room.continueRationale') : t('committeeRoom.room.startRationale')}
           </Link>
         </CardContent>
       </Card>

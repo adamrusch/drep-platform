@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { StatusPill } from '@/components/ui/StatusPill';
@@ -18,6 +19,7 @@ const inputCls =
   'w-full rounded-token-md border border-[var(--border-default)] bg-[var(--bg-canvas)] px-3 py-2 text-[13px] focus:outline-none focus-visible:shadow-token-focus';
 
 export function RationaleEditorPage(): React.ReactElement {
+  const { t } = useTranslation();
   const { drepId = '', actionId = '' } = useParams<{ drepId: string; actionId: string }>();
   const { data, isLoading } = useRationale(drepId, actionId);
 
@@ -58,7 +60,7 @@ export function RationaleEditorPage(): React.ReactElement {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [collaborative, holdsLock]);
 
-  if (isLoading) return <p className="text-[var(--text-secondary)]">Loading rationale…</p>;
+  if (isLoading) return <p className="text-[var(--text-secondary)]">{t('rationaleEditor.loading')}</p>;
 
   const save = (): void => {
     edit.mutate({
@@ -71,43 +73,43 @@ export function RationaleEditorPage(): React.ReactElement {
   return (
     <div className="space-y-4">
       <Link to={`/committee/${encodeURIComponent(drepId)}/votes/${encodeURIComponent(actionId)}`} className="text-[13px] text-[var(--brand-primary)] hover:underline">
-        ← Back to vote
+        {t('rationaleEditor.backToVote')}
       </Link>
 
       <Card>
         <CardHeader>
-          <CardTitle>Rationale</CardTitle>
+          <CardTitle>{t('rationaleEditor.title')}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="flex flex-wrap items-center gap-2 text-[12px] text-[var(--text-secondary)]">
-            <StatusPill status="review" label={`Mode: ${mode}`} />
-            {data?.final && <StatusPill status="passed" label="Finalized" />}
+            <StatusPill status="review" label={t('rationaleEditor.mode', { mode })} />
+            {data?.final && <StatusPill status="passed" label={t('rationaleEditor.finalized')} />}
             {collaborative && lockedByOther && (
               <span className="text-[var(--danger)]">
-                {data?.lock?.editorWallet?.slice(0, 12)}… is editing now
+                {t('rationaleEditor.editingNow', { editor: data?.lock?.editorWallet?.slice(0, 12) })}
               </span>
             )}
           </div>
 
           {collaborative && !holdsLock && !data?.final && (
             <Button size="sm" variant="secondary" disabled={lockedByOther || acquire.isPending} onClick={() => acquire.mutate()}>
-              {acquire.isPending ? 'Opening…' : lockedByOther ? 'Locked by another editor' : 'Open for editing'}
+              {acquire.isPending ? t('rationaleEditor.opening') : lockedByOther ? t('rationaleEditor.lockedByAnother') : t('rationaleEditor.openForEditing')}
             </Button>
           )}
 
           <label className="block text-[12px] text-[var(--text-secondary)]">
-            Summary
+            {t('rationaleEditor.summary')}
             <input className={`${inputCls} mt-1`} value={summary} disabled={!canEdit || Boolean(data?.final)} onChange={(e) => setSummary(e.target.value)} />
           </label>
           <label className="block text-[12px] text-[var(--text-secondary)]">
-            Rationale statement
+            {t('rationaleEditor.statement')}
             <textarea className={`${inputCls} mt-1 min-h-[200px] resize-y`} value={statement} disabled={!canEdit || Boolean(data?.final)} onChange={(e) => setStatement(e.target.value)} />
           </label>
-          <p className="text-[11.5px] text-[var(--text-secondary)]">{statement.length} chars (60 KB cap)</p>
+          <p className="text-[11.5px] text-[var(--text-secondary)]">{t('rationaleEditor.charCount', { count: statement.length })}</p>
 
           {!data?.final && (
             <Button size="sm" variant="primary" disabled={!canEdit || !statement.trim() || edit.isPending} onClick={save}>
-              {edit.isPending ? 'Saving…' : collaborative ? 'Save & release lock' : 'Save'}
+              {edit.isPending ? t('rationaleEditor.saving') : collaborative ? t('rationaleEditor.saveAndRelease') : t('rationaleEditor.save')}
             </Button>
           )}
           {edit.isError && <p className="text-[12px] text-[var(--danger)]">{(edit.error as Error)?.message}</p>}
@@ -115,26 +117,26 @@ export function RationaleEditorPage(): React.ReactElement {
       </Card>
 
       <Card>
-        <CardHeader><CardTitle>Finalize & pin</CardTitle></CardHeader>
+        <CardHeader><CardTitle>{t('rationaleEditor.finalizeAndPin')}</CardTitle></CardHeader>
         <CardContent className="space-y-3">
           {data?.final ? (
             <div className="space-y-1 text-[12.5px]">
-              <div className="break-all"><span className="text-[var(--text-secondary)]">anchor hash:</span> <span className="font-mono">{data.final.anchorHash}</span></div>
+              <div className="break-all"><span className="text-[var(--text-secondary)]">{t('rationaleEditor.anchorHash')}</span> <span className="font-mono">{data.final.anchorHash}</span></div>
               {data.final.ipfsUri ? (
-                <div className="break-all"><span className="text-[var(--text-secondary)]">IPFS:</span> <span className="font-mono">{data.final.ipfsUri}</span></div>
+                <div className="break-all"><span className="text-[var(--text-secondary)]">{t('rationaleEditor.ipfs')}</span> <span className="font-mono">{data.final.ipfsUri}</span></div>
               ) : (
                 <Button size="sm" variant="secondary" disabled={pin.isPending} onClick={() => pin.mutate({})}>
-                  {pin.isPending ? 'Pinning…' : 'Pin to IPFS'}
+                  {pin.isPending ? t('rationaleEditor.pinning') : t('rationaleEditor.pinToIpfs')}
                 </Button>
               )}
             </div>
           ) : (
             <>
               <p className="text-[12.5px] text-[var(--text-secondary)]">
-                Finalizing locks the rationale and computes its anchor hash. Required before the on-chain vote. Lead or proposer only.
+                {t('rationaleEditor.finalizeHelp')}
               </p>
               <Button size="sm" variant="primary" disabled={finalize.isPending} onClick={() => finalize.mutate()}>
-                {finalize.isPending ? 'Signing…' : 'Finalize rationale'}
+                {finalize.isPending ? t('rationaleEditor.signing') : t('rationaleEditor.finalize')}
               </Button>
               {finalize.isError && <p className="text-[12px] text-[var(--danger)]">{(finalize.error as Error)?.message}</p>}
             </>
