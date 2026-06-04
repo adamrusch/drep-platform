@@ -1,19 +1,21 @@
 import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { useGovernanceActions } from '@/hooks/useGovernanceActions';
 import { GovernanceActionCard } from '@/components/GovernanceActionCard';
 import { Button } from '@/components/ui/Button';
 import { cn } from '@/lib/utils';
 import type { GovernanceActionStatus } from '@/types';
 
-const STATUS_TABS: Array<{ id: GovernanceActionStatus; label: string }> = [
-  { id: 'active', label: 'Active' },
-  { id: 'enacted', label: 'Enacted' },
-  { id: 'expired', label: 'Expired' },
-  { id: 'dropped', label: 'Dropped' },
+const STATUS_TAB_IDS: GovernanceActionStatus[] = [
+  'active',
+  'enacted',
+  'expired',
+  'dropped',
 ];
 
 export function GovernanceListPage(): React.ReactElement {
+  const { t } = useTranslation();
   const [status, setStatus] = useState<GovernanceActionStatus>('active');
   const { data, isLoading, error, fetchNextPage, hasNextPage, isFetchingNextPage } =
     useGovernanceActions(status);
@@ -25,31 +27,31 @@ export function GovernanceListPage(): React.ReactElement {
       <header className="space-y-1">
         <div className="flex items-baseline justify-between gap-3 flex-wrap">
           <h1 className="text-[26px] font-bold tracking-tight text-[var(--text-primary)]">
-            Governance Actions
+            {t('governanceList.title')}
           </h1>
           <Link
             to="/governance/history"
             className="text-sm text-[var(--brand-primary)] hover:underline"
           >
-            View on-chain history →
+            {t('governanceList.viewHistory')}
           </Link>
         </div>
         <p className="text-sm text-[var(--text-secondary)]">
-          Live from the Cardano mainnet. Updated every minute.
+          {t('governanceList.subtitle')}
         </p>
       </header>
 
       {/* Status tabs — design `.tabs` pattern */}
       <div role="tablist" className="tabs">
-        {STATUS_TABS.map((tab) => (
+        {STATUS_TAB_IDS.map((tabId) => (
           <button
-            key={tab.id}
+            key={tabId}
             role="tab"
-            aria-selected={status === tab.id}
-            onClick={() => setStatus(tab.id)}
-            className={cn('tab', status === tab.id && 'tab--active')}
+            aria-selected={status === tabId}
+            onClick={() => setStatus(tabId)}
+            className={cn('tab', status === tabId && 'tab--active')}
           >
-            {tab.label}
+            {t(`governanceList.tabs.${tabId}`)}
           </button>
         ))}
       </div>
@@ -73,7 +75,7 @@ export function GovernanceListPage(): React.ReactElement {
       {/* Error */}
       {error && (
         <div className="rounded-token-lg border border-[var(--danger)]/40 bg-[var(--danger-soft)] p-4 text-sm">
-          <p className="font-semibold text-[var(--danger)]">Failed to load governance actions</p>
+          <p className="font-semibold text-[var(--danger)]">{t('governanceList.errorTitle')}</p>
           <p className="text-[var(--text-secondary)] mt-1">{(error as Error).message}</p>
         </div>
       )}
@@ -81,7 +83,7 @@ export function GovernanceListPage(): React.ReactElement {
       {/* Empty */}
       {!isLoading && !error && actions.length === 0 && (
         <div className="text-center py-12 text-[var(--text-tertiary)]">
-          <p>No {status} governance actions.</p>
+          <p>{t(`governanceList.empty.${status}`)}</p>
         </div>
       )}
 
@@ -104,7 +106,7 @@ export function GovernanceListPage(): React.ReactElement {
             onClick={() => void fetchNextPage()}
             disabled={isFetchingNextPage}
           >
-            {isFetchingNextPage ? 'Loading…' : 'Load more'}
+            {isFetchingNextPage ? t('governanceList.loadingMore') : t('governanceList.loadMore')}
           </Button>
         </div>
       )}

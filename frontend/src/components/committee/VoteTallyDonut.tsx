@@ -1,3 +1,4 @@
+import { Trans, useTranslation } from 'react-i18next';
 import { Donut } from '@/components/ui/Donut';
 import type { CommitteeTally } from '@/types/committee';
 
@@ -19,10 +20,11 @@ export function VoteTallyDonut({
   tally: CommitteeTally;
   size?: number;
 }): React.ReactElement {
+  const { t } = useTranslation();
   const segments = [
-    { label: 'Agree', value: tally.agreeCount, color: COLORS.agree },
-    { label: 'Disagree', value: tally.disagreeCount, color: COLORS.disagree },
-    { label: 'Abstain', value: tally.abstainCount, color: COLORS.abstain },
+    { label: t('committeeRoom.tally.agree'), value: tally.agreeCount, color: COLORS.agree },
+    { label: t('committeeRoom.tally.disagree'), value: tally.disagreeCount, color: COLORS.disagree },
+    { label: t('committeeRoom.tally.abstain'), value: tally.abstainCount, color: COLORS.abstain },
   ];
   return (
     <div className="flex items-center gap-5">
@@ -33,21 +35,31 @@ export function VoteTallyDonut({
         centerValue={
           tally.memberCount > 0 ? `${tally.agreeCount}/${tally.memberCount}` : '—'
         }
-        centerLabel="agree / total"
+        centerLabel={t('committeeRoom.tally.centerLabel')}
       />
       <ul className="space-y-1 text-[13px]">
-        <LegendRow color={COLORS.agree} label="Agree" value={tally.agreeCount} />
-        <LegendRow color={COLORS.disagree} label="Disagree" value={tally.disagreeCount} />
-        <LegendRow color={COLORS.abstain} label="Abstain" value={tally.abstainCount} />
+        <LegendRow color={COLORS.agree} label={t('committeeRoom.tally.agree')} value={tally.agreeCount} />
+        <LegendRow color={COLORS.disagree} label={t('committeeRoom.tally.disagree')} value={tally.disagreeCount} />
+        <LegendRow color={COLORS.abstain} label={t('committeeRoom.tally.abstain')} value={tally.abstainCount} />
         <li className="pt-1 text-[12px] text-[var(--text-secondary)]">
-          Needs <strong className="text-[var(--text-primary)]">{tally.approvalThreshold}</strong>{' '}
-          of <strong className="text-[var(--text-primary)]">{tally.memberCount}</strong> Agree
-          {tally.isApproved ? null : ` — ${tally.agreeNeeded} more`}
+          {tally.isApproved ? (
+            <Trans
+              i18nKey="committeeRoom.tally.needs"
+              values={{ x: tally.approvalThreshold, n: tally.memberCount }}
+              components={{ strong: <strong className="text-[var(--text-primary)]" /> }}
+            />
+          ) : (
+            <Trans
+              i18nKey="committeeRoom.tally.needsMore"
+              values={{ x: tally.approvalThreshold, n: tally.memberCount, remaining: tally.agreeNeeded }}
+              components={{ strong: <strong className="text-[var(--text-primary)]" /> }}
+            />
+          )}
         </li>
         {tally.isApproved && (
           <li className="pt-1">
             <span className="inline-flex items-center gap-1 rounded-full bg-[var(--success)] px-2 py-0.5 text-[11.5px] font-semibold text-white">
-              Committee Approved ✓
+              {t('committeeRoom.tally.approvedBadge')}
             </span>
           </li>
         )}

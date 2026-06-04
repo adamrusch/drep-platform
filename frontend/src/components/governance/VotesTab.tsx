@@ -1,9 +1,12 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { Link } from 'react-router-dom';
 import { Check, X, Minus, ExternalLink } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
 import { _formatLovelaceAda } from '@/components/SentimentBlock';
-import { cn, formatRelativeTime } from '@/lib/utils';
+import { useFormatters } from '@/hooks/useFormatters';
+import { cn } from '@/lib/utils';
 import type { ActionVoteRecord, VoteVoterRole } from '@/types';
 
 /**
@@ -64,14 +67,22 @@ function Pill({
   );
 }
 
-function VotePill({ vote }: { vote: ActionVoteRecord['vote'] }): React.ReactElement {
+function VotePill({
+  vote,
+  t,
+}: {
+  vote: ActionVoteRecord['vote'];
+  t: TFunction;
+}): React.ReactElement {
   switch (vote) {
     case 'Yes':
-      return <Pill label="Yes" iconClass="text-[var(--success)]" Icon={Check} />;
+      return <Pill label={t('votesTab.choiceYes')} iconClass="text-[var(--success)]" Icon={Check} />;
     case 'No':
-      return <Pill label="No" iconClass="text-[var(--danger)]" Icon={X} />;
+      return <Pill label={t('votesTab.choiceNo')} iconClass="text-[var(--danger)]" Icon={X} />;
     case 'Abstain':
-      return <Pill label="Abstain" iconClass="text-[var(--text-muted)]" Icon={Minus} />;
+      return (
+        <Pill label={t('votesTab.choiceAbstain')} iconClass="text-[var(--text-muted)]" Icon={Minus} />
+      );
   }
 }
 
@@ -92,7 +103,7 @@ function truncateBech32(id: string): string {
  *     `CC Member (${truncated hot cred})` so individuals stay
  *     visually distinct without a name.
  */
-function voterLabel(v: ActionVoteRecord): string {
+function voterLabel(v: ActionVoteRecord, t: TFunction): string {
   if (v.voterRole === 'DRep') {
     if (v.voterDisplayName && v.voterDisplayName.length > 0) return v.voterDisplayName;
     return truncateBech32(v.voterId);
@@ -107,7 +118,7 @@ function voterLabel(v: ActionVoteRecord): string {
   }
   // ConstitutionalCommittee
   if (v.ccName && v.ccName.length > 0) return v.ccName;
-  return `CC Member (${truncateBech32(v.voterId)})`;
+  return t('votesTab.ccMemberLabel', { id: truncateBech32(v.voterId) });
 }
 
 /** Voter-label link target by role. DReps deep-link to their in-app
@@ -123,11 +134,13 @@ function voterHref(v: ActionVoteRecord): string | null {
 }
 
 function VoteRow({ v }: { v: ActionVoteRecord }): React.ReactElement {
+  const { t } = useTranslation();
+  const { formatRelativeTime } = useFormatters();
   // Strikethrough applies to the entire row body so it reads as
   // "everything about this vote is superseded by a later one."
   const strikethrough = v.superseded ? 'line-through opacity-70' : '';
   const absoluteTime = new Date(v.votedAt).toLocaleString();
-  const voterLabelText = voterLabel(v);
+  const voterLabelText = voterLabel(v, t);
   const labelClasses = cn(
     'text-[14px] font-semibold text-[var(--text-primary)] truncate',
     'hover:text-[var(--brand-primary)] hover:underline',
@@ -176,12 +189,12 @@ function VoteRow({ v }: { v: ActionVoteRecord }): React.ReactElement {
           {voterEl}
           {v.superseded && (
             <span className="inline-flex items-center px-1.5 py-0.5 rounded-token-sm bg-[var(--bg-muted)] text-[10.5px] font-medium uppercase tracking-wider text-[var(--text-tertiary)] no-underline">
-              Superseded
+              {t('votesTab.superseded')}
             </span>
           )}
         </div>
         <div className={cn('flex items-center gap-3 flex-shrink-0', strikethrough)}>
-          <VotePill vote={v.vote} />
+          <VotePill vote={v.vote} t={t} />
         </div>
       </div>
       <div
@@ -194,8 +207,8 @@ function VoteRow({ v }: { v: ActionVoteRecord }): React.ReactElement {
           <span
             title={
               v.votingPowerIsApprox
-                ? 'Current power; historical snapshot unavailable for this vote’s epoch'
-                : 'Voting power at the time of the vote'
+                ? t('votesTab.powerApproxTooltip')
+                : t('votesTab.powerTooltip')
             }
           >
             {(() => {
@@ -217,7 +230,7 @@ function VoteRow({ v }: { v: ActionVoteRecord }): React.ReactElement {
             className="inline-flex items-center gap-1 hover:text-[var(--brand-primary)] hover:underline"
             title={v.rationaleUrl}
           >
-            Rationale
+            {t('votesTab.rationale')}
             <ExternalLink size={11} strokeWidth={2} aria-hidden="true" />
           </a>
         )}
@@ -233,11 +246,15 @@ function VoterSection({
   title: string;
   votes: readonly ActionVoteRecord[];
 }): React.ReactElement | null {
+  const { t } = useTranslation();
   if (votes.length === 0) return null;
   return (
     <section className="space-y-3">
       <h3 className="text-[12px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">
-        {title} <span className="ml-1 text-[var(--text-muted)]">({votes.length})</span>
+        {title}{' '}
+        <span className="ml-1 text-[var(--text-muted)]">
+          {t('votesTab.sectionCount', { count: votes.length })}
+        </span>
       </h3>
       <div className="space-y-2">
         {votes.map((v) => (
@@ -248,18 +265,19 @@ function VoterSection({
   );
 }
 
-const ROLE_TITLES: Record<VoteVoterRole, string> = {
-  DRep: 'DReps',
-  SPO: 'SPOs',
-  ConstitutionalCommittee: 'Constitutional Committee',
+const ROLE_TITLE_KEYS: Record<VoteVoterRole, string> = {
+  DRep: 'votesTab.roleDreps',
+  SPO: 'votesTab.roleSpos',
+  ConstitutionalCommittee: 'votesTab.roleCc',
 };
 
 export function VotesTab({ votes }: VotesTabProps): React.ReactElement {
+  const { t } = useTranslation();
   if (!votes || votes.length === 0) {
     return (
       <Card>
         <div className="py-6 text-center text-sm text-[var(--text-tertiary)]">
-          No votes have been cast on this action yet.
+          {t('votesTab.noVotes')}
         </div>
       </Card>
     );
@@ -278,9 +296,9 @@ export function VotesTab({ votes }: VotesTabProps): React.ReactElement {
 
   return (
     <div className="space-y-6">
-      <VoterSection title={ROLE_TITLES.DRep} votes={dreps} />
-      <VoterSection title={ROLE_TITLES.SPO} votes={spos} />
-      <VoterSection title={ROLE_TITLES.ConstitutionalCommittee} votes={cc} />
+      <VoterSection title={t(ROLE_TITLE_KEYS.DRep)} votes={dreps} />
+      <VoterSection title={t(ROLE_TITLE_KEYS.SPO)} votes={spos} />
+      <VoterSection title={t(ROLE_TITLE_KEYS.ConstitutionalCommittee)} votes={cc} />
     </div>
   );
 }

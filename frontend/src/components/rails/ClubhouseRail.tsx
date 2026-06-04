@@ -1,9 +1,11 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { Sparkles, Users } from 'lucide-react';
 import { Card, CardHeader, CardTitle } from '@/components/ui/Card';
 import { useActiveThreads, useTopContributors } from '@/hooks/useClubhouseRail';
-import { formatRelativeTime, formatWalletAddress } from '@/lib/utils';
+import { useFormatters } from '@/hooks/useFormatters';
+import { formatWalletAddress } from '@/lib/utils';
 
 /**
  * Right-rail for the Delegator Clubhouse.
@@ -44,6 +46,8 @@ export function ClubhouseRail({ drepId }: ClubhouseRailProps): React.ReactElemen
 // ---- Active threads card ----
 
 function ActiveThreadsCard({ drepId }: { drepId: string }): React.ReactElement {
+  const { t } = useTranslation();
+  const { formatRelativeTime } = useFormatters();
   const { data, isLoading } = useActiveThreads(drepId);
   const threads = data?.items ?? [];
 
@@ -52,7 +56,7 @@ function ActiveThreadsCard({ drepId }: { drepId: string }): React.ReactElement {
       <CardHeader>
         <CardTitle>
           <Sparkles size={14} strokeWidth={2} className="text-[var(--brand-primary)]" />
-          Active threads
+          {t('clubhouseRail.activeThreads')}
         </CardTitle>
       </CardHeader>
       {isLoading ? (
@@ -66,7 +70,7 @@ function ActiveThreadsCard({ drepId }: { drepId: string }): React.ReactElement {
         </ul>
       ) : threads.length === 0 ? (
         <p className="text-[12.5px] text-[var(--text-tertiary)] italic">
-          No active threads yet.
+          {t('clubhouseRail.noActiveThreads')}
         </p>
       ) : (
         <ul className="space-y-3 text-sm">
@@ -76,7 +80,9 @@ function ActiveThreadsCard({ drepId }: { drepId: string }): React.ReactElement {
               className="flex items-start justify-between gap-2 text-[var(--text-secondary)]"
               title={
                 thread.lastReplyAt
-                  ? `Last reply ${formatRelativeTime(thread.lastReplyAt)}`
+                  ? t('clubhouseRail.lastReply', {
+                      time: formatRelativeTime(thread.lastReplyAt),
+                    })
                   : undefined
               }
             >
@@ -93,7 +99,9 @@ function ActiveThreadsCard({ drepId }: { drepId: string }): React.ReactElement {
               </Link>
               <span
                 className="text-[11px] text-[var(--text-tertiary)] tabular-nums flex-shrink-0"
-                aria-label={`${thread.replyCount24h} ${thread.replyCount24h === 1 ? 'reply' : 'replies'} in the last 24 hours`}
+                aria-label={t('clubhouseRail.repliesIn24h', {
+                  count: thread.replyCount24h,
+                })}
               >
                 {thread.replyCount24h}
               </span>
@@ -108,6 +116,7 @@ function ActiveThreadsCard({ drepId }: { drepId: string }): React.ReactElement {
 // ---- Top contributors card ----
 
 function TopContributorsCard({ drepId }: { drepId: string }): React.ReactElement {
+  const { t } = useTranslation();
   const { data, isLoading } = useTopContributors(drepId);
   const contributors = data?.items ?? [];
 
@@ -116,7 +125,7 @@ function TopContributorsCard({ drepId }: { drepId: string }): React.ReactElement
       <CardHeader>
         <CardTitle>
           <Users size={14} strokeWidth={2} className="text-[var(--brand-primary)]" />
-          Top contributors
+          {t('clubhouseRail.topContributors')}
         </CardTitle>
       </CardHeader>
       {isLoading ? (
@@ -130,7 +139,7 @@ function TopContributorsCard({ drepId }: { drepId: string }): React.ReactElement
         </ol>
       ) : contributors.length === 0 ? (
         <p className="text-[12.5px] text-[var(--text-tertiary)] italic">
-          No contributors yet — be first.
+          {t('clubhouseRail.noContributors')}
         </p>
       ) : (
         <ol className="space-y-2.5 text-sm">
@@ -160,7 +169,9 @@ function TopContributorsCard({ drepId }: { drepId: string }): React.ReactElement
                 </span>
                 <span
                   className="text-[11px] tabular-nums text-[var(--text-tertiary)]"
-                  aria-label={`${c.contributionCount} ${c.contributionCount === 1 ? 'contribution' : 'contributions'}`}
+                  aria-label={t('clubhouseRail.contributions', {
+                    count: c.contributionCount,
+                  })}
                 >
                   {c.contributionCount}
                 </span>

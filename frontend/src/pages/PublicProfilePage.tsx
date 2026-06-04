@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
 import { get } from '@/lib/api';
-import { formatRelativeTime, formatWalletAddress } from '@/lib/utils';
+import { formatWalletAddress } from '@/lib/utils';
+import { useFormatters } from '@/hooks/useFormatters';
 import { useDelegationHistory } from '@/hooks/useDelegationHistory';
 import type { UserProfile, DelegationRecord } from '@/types';
 
@@ -11,6 +13,7 @@ import type { UserProfile, DelegationRecord } from '@/types';
  * Shows: avatar, display name, truncated wallet address, bio, social links, delegation history.
  */
 export function PublicProfilePage(): React.ReactElement {
+  const { t } = useTranslation();
   const { walletAddress } = useParams<{ walletAddress: string }>();
 
   const { data: profile, isLoading, error } = useQuery({
@@ -31,13 +34,13 @@ export function PublicProfilePage(): React.ReactElement {
   if (error || !profile) {
     return (
       <div className="text-center py-16">
-        <h2 className="text-xl font-semibold mb-2">Profile not found</h2>
+        <h2 className="text-xl font-semibold mb-2">{t('publicProfile.notFound')}</h2>
         <p className="text-sm text-muted-foreground mb-4">
-          No public profile exists for{' '}
+          {t('publicProfile.noProfileFor')}{' '}
           <span className="font-mono">{walletAddress ? formatWalletAddress(walletAddress) : ''}</span>
         </p>
         <Link to="/" className="text-primary hover:underline text-sm">
-          Back to home
+          {t('publicProfile.backToHome')}
         </Link>
       </div>
     );
@@ -71,8 +74,8 @@ export function PublicProfilePage(): React.ReactElement {
                 to={`/dreps/${encodeURIComponent(profile.drepId)}`}
                 className="mt-1 inline-flex items-center gap-1.5 text-[13px] font-semibold text-[var(--brand-primary)] hover:underline"
               >
-                <span className="inline-flex items-center text-[11px] font-semibold px-2 py-0.5 rounded-token-full bg-[var(--brand-primary-soft)]">DRep</span>
-                Registered DRep{profile.drepName ? ` — ${profile.drepName}` : ''} →
+                <span className="inline-flex items-center text-[11px] font-semibold px-2 py-0.5 rounded-token-full bg-[var(--brand-primary-soft)]">{t('publicProfile.drepBadge')}</span>
+                {t('publicProfile.registeredDRep')}{profile.drepName ? ` — ${profile.drepName}` : ''} →
               </Link>
             )}
             {profile.roles.length > 0 && (
@@ -96,7 +99,7 @@ export function PublicProfilePage(): React.ReactElement {
       {profile.bio && (
         <section className="card">
           <div className="card__header">
-            <h2 className="card__title">About</h2>
+            <h2 className="card__title">{t('publicProfile.sections.about')}</h2>
           </div>
           <div className="card__body">
             <p className="text-sm whitespace-pre-wrap">{profile.bio}</p>
@@ -108,7 +111,7 @@ export function PublicProfilePage(): React.ReactElement {
       {profile.socialLinks && Object.values(profile.socialLinks).some(Boolean) && (
         <section className="card">
           <div className="card__header">
-            <h2 className="card__title">Links</h2>
+            <h2 className="card__title">{t('publicProfile.sections.links')}</h2>
           </div>
           <div className="card__body" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--s-2)' }}>
             {profile.socialLinks.twitter && (
@@ -118,7 +121,7 @@ export function PublicProfilePage(): React.ReactElement {
                 rel="noopener noreferrer"
                 className="text-sm text-primary hover:underline"
               >
-                Twitter / X: {profile.socialLinks.twitter}
+                {t('publicProfile.links.twitter', { value: profile.socialLinks.twitter })}
               </a>
             )}
             {profile.socialLinks.github && (
@@ -128,7 +131,7 @@ export function PublicProfilePage(): React.ReactElement {
                 rel="noopener noreferrer"
                 className="text-sm text-primary hover:underline"
               >
-                GitHub: {profile.socialLinks.github}
+                {t('publicProfile.links.github', { value: profile.socialLinks.github })}
               </a>
             )}
             {profile.socialLinks.website && (
@@ -138,11 +141,11 @@ export function PublicProfilePage(): React.ReactElement {
                 rel="noopener noreferrer"
                 className="text-sm text-primary hover:underline"
               >
-                Website: {profile.socialLinks.website}
+                {t('publicProfile.links.website', { value: profile.socialLinks.website })}
               </a>
             )}
             {profile.socialLinks.discord && (
-              <span className="text-sm">Discord: {profile.socialLinks.discord}</span>
+              <span className="text-sm">{t('publicProfile.links.discord', { value: profile.socialLinks.discord })}</span>
             )}
           </div>
         </section>
@@ -164,6 +167,8 @@ function DelegationHistorySection({
 }: {
   walletAddress: string;
 }): React.ReactElement {
+  const { t } = useTranslation();
+  const { formatRelativeTime } = useFormatters();
   const [open, setOpen] = useState(false);
   const { data, isLoading, isError, error } = useDelegationHistory(walletAddress, {
     enabled: open,
@@ -193,24 +198,24 @@ function DelegationHistorySection({
           className="card__header"
           style={{ cursor: 'pointer', listStyle: 'none' }}
         >
-          <h2 className="card__title">Delegation history</h2>
+          <h2 className="card__title">{t('publicProfile.sections.delegationHistory')}</h2>
           <span
             aria-hidden
             className="text-xs"
             style={{ color: 'var(--text-secondary)' }}
           >
-            {open ? 'Hide' : 'Show'}
+            {open ? t('publicProfile.hide') : t('publicProfile.show')}
           </span>
         </summary>
         <div className="card__body">
           {isLoading && (
             <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>
-              Loading delegation history…
+              {t('publicProfile.loadingHistory')}
             </p>
           )}
           {isError && (
             <p className="text-sm" style={{ color: 'var(--danger)' }}>
-              Could not load delegation history.
+              {t('publicProfile.loadHistoryError')}
               {(error as { message?: string } | null)?.message
                 ? ` ${(error as { message?: string }).message}`
                 : ''}
@@ -228,7 +233,7 @@ function DelegationHistorySection({
               >
                 {data.currentDrepId ? (
                   <>
-                    Currently delegating to:{' '}
+                    {t('publicProfile.currentlyDelegating')}{' '}
                     <Link
                       to={`/drep/${encodeURIComponent(data.currentDrepId)}`}
                       className="font-mono hover:underline"
@@ -239,7 +244,7 @@ function DelegationHistorySection({
                   </>
                 ) : (
                   <span style={{ color: 'var(--text-secondary)' }}>
-                    No current delegation found.
+                    {t('publicProfile.noCurrentDelegation')}
                   </span>
                 )}
               </p>
@@ -248,7 +253,7 @@ function DelegationHistorySection({
                   className="text-sm"
                   style={{ color: 'var(--text-secondary)' }}
                 >
-                  No prior delegation records.
+                  {t('publicProfile.noPriorRecords')}
                 </p>
               ) : (
                 <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
@@ -274,8 +279,12 @@ function DelegationHistorySection({
                           {record.drepName ?? formatWalletAddress(record.drepId, 10)}
                         </Link>
                         <div className="text-xs text-muted-foreground">
-                          Epoch {record.epochStart}
-                          {record.epochEnd ? ` – ${record.epochEnd}` : ' – present'}
+                          {t('publicProfile.epochRange', {
+                            start: record.epochStart,
+                            rest: record.epochEnd
+                              ? t('publicProfile.epochEnd', { end: record.epochEnd })
+                              : t('publicProfile.epochPresent'),
+                          })}
                         </div>
                       </div>
                       <span className="text-xs text-muted-foreground">
