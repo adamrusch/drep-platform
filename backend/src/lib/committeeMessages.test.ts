@@ -39,6 +39,25 @@ describe('committeeMessages (golden — issuer and verifier must agree byte-for-
     );
   });
 
+  it('invitation-response accept message binds Committee + Decision', () => {
+    // A captured Accept signature cannot be replayed as a Reject — the
+    // decision is embedded in the plaintext that gets signed.
+    expect(committeeMessages.invitationResponse('test', 'drep1', 'accept', N, W)).toBe(
+      'drep-platform committee invitation-response [v1] (stage=test):\n\n' +
+        `Wallet: ${W}\nCommittee: drep1\nDecision: accept\nNonce: ${N}`,
+    );
+  });
+
+  it('invitation-response reject message differs from accept (different plaintext, different signature)', () => {
+    const accept = committeeMessages.invitationResponse('prod', 'drep1', 'accept', N, W);
+    const reject = committeeMessages.invitationResponse('prod', 'drep1', 'reject', N, W);
+    expect(accept).not.toBe(reject);
+    expect(reject).toBe(
+      'drep-platform committee invitation-response [v1] (stage=prod):\n\n' +
+        `Wallet: ${W}\nCommittee: drep1\nDecision: reject\nNonce: ${N}`,
+    );
+  });
+
   it('embeds the stage so a test signature cannot verify on prod', () => {
     const onTest = committeeMessages.cast('test', 'd', 'a', 'Agree', N, W);
     const onProd = committeeMessages.cast('prod', 'd', 'a', 'Agree', N, W);

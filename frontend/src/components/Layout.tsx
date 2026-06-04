@@ -23,6 +23,7 @@ import { useThemeStore } from '@/stores/themeStore';
 import { LanguageSwitcher } from '@/components/LanguageSwitcher';
 import { useEpoch } from '@/hooks/useEpoch';
 import { useAutoLinkDrep } from '@/hooks/useAutoLinkDrep';
+import { usePendingInvitations } from '@/hooks/useCommitteeInvitations';
 import { del } from '@/lib/api';
 import { Button } from '@/components/ui/Button';
 import { cn, formatWalletAddress } from '@/lib/utils';
@@ -155,6 +156,12 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
   const clearAuth = useAuthStore((s) => s.clearAuth);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  // Pending committee invitations — surfaces a small bell badge in the
+  // topbar so an invitee sees a hint without scrolling to the dashboard.
+  // Read from /auth/me, so the count is live for the authenticated user
+  // and silently empty for guests (the hook returns []).
+  const pendingInvitations = usePendingInvitations();
+  const pendingCount = pendingInvitations.length;
 
   // Close the account menu on an outside click.
   useEffect(() => {
@@ -272,6 +279,27 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
               <Sun size={18} strokeWidth={1.75} />
             )}
           </button>
+          {isAuthenticated && pendingCount > 0 && (
+            <button
+              type="button"
+              onClick={() => navigate('/dashboard')}
+              aria-label={t('invitations.bellAria', { count: pendingCount })}
+              title={t('invitations.bellAria', { count: pendingCount })}
+              className={cn(
+                'relative inline-flex items-center justify-center w-[38px] h-[38px]',
+                'rounded-token-md text-[var(--text-secondary)]',
+                'transition-colors hover:bg-[var(--bg-muted)] hover:text-[var(--text-primary)]',
+              )}
+            >
+              <Bell size={18} strokeWidth={1.75} aria-hidden="true" />
+              <span
+                className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] rounded-full bg-[var(--danger)] text-white text-[10px] leading-[18px] text-center font-semibold px-1"
+                aria-hidden="true"
+              >
+                {pendingCount}
+              </span>
+            </button>
+          )}
           <LanguageSwitcher />
           {isAuthenticated && walletAddress ? (
             <div className="relative" ref={menuRef}>
