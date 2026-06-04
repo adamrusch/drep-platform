@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { Lock } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -17,6 +18,7 @@ import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
  * (or punts gracefully if none is available).
  */
 export function ClubhouseLanding(): React.ReactElement {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const isAuthenticated = useIsAuthenticated();
   const registeredDrepId = useAuthStore((s) => s.drepId);
@@ -62,15 +64,15 @@ export function ClubhouseLanding(): React.ReactElement {
           <Lock size={24} strokeWidth={1.75} />
         </div>
         <h1 className="text-2xl font-bold mb-2 text-[var(--text-primary)]">
-          Delegator Clubhouse
+          {t('clubhouse.title')}
         </h1>
         <p className="text-sm text-[var(--text-secondary)] max-w-md mx-auto mb-6">
           {isAuthenticated
-            ? 'You aren\'t delegated to a DRep yet. Browse the directory to find one and join their clubhouse.'
-            : 'Connect a wallet that delegates to a DRep to enter their private clubhouse.'}
+            ? t('clubhouse.landing.notDelegated')
+            : t('clubhouse.landing.guest')}
         </p>
         <Button asChild variant="primary">
-          <a href="/dreps">Browse DReps</a>
+          <a href="/dreps">{t('clubhouse.landing.browseDReps')}</a>
         </Button>
       </Card>
     </div>

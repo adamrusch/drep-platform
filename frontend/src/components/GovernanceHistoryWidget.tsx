@@ -1,11 +1,13 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { ArrowRight, Check, X, Clock, AlarmClock } from 'lucide-react';
 import {
   useGovernanceHistory,
   useGovernanceStats,
 } from '@/hooks/useGovernanceActions';
-import { formatRelativeTime, cn } from '@/lib/utils';
+import { useFormatters } from '@/hooks/useFormatters';
+import { cn } from '@/lib/utils';
 import type { GovernanceActionStatus } from '@/types';
 
 /**
@@ -71,14 +73,9 @@ const STATUS_GLYPH: Record<GovernanceActionStatus, React.ReactNode> = {
   ),
 };
 
-const STATUS_LABEL: Record<GovernanceActionStatus, string> = {
-  enacted: 'Enacted',
-  dropped: 'Dropped',
-  active: 'Active',
-  expired: 'Expired',
-};
-
 export function GovernanceHistoryWidget(): React.ReactElement {
+  const { t } = useTranslation();
+  const { formatRelativeTime } = useFormatters();
   const { data: stats, isLoading: statsLoading } = useGovernanceStats();
   const { data: history, isLoading: historyLoading } = useGovernanceHistory();
 
@@ -98,13 +95,13 @@ export function GovernanceHistoryWidget(): React.ReactElement {
     >
       <div className="flex items-center justify-between gap-3 mb-3">
         <h2 className="text-[15px] font-semibold text-[var(--text-primary)]">
-          Governance History
+          {t('historyWidget.title')}
         </h2>
         <Link
           to="/governance/history"
           className="inline-flex items-center gap-1 text-sm text-[var(--brand-primary)] hover:underline"
         >
-          View all
+          {t('historyWidget.viewAll')}
           <ArrowRight size={14} strokeWidth={2} aria-hidden="true" />
         </Link>
       </div>
@@ -119,7 +116,7 @@ export function GovernanceHistoryWidget(): React.ReactElement {
               <span className="font-semibold text-[var(--text-primary)] tabular-nums">
                 {total}
               </span>{' '}
-              actions ever on-chain
+              {t('historyWidget.actionsEverOnChain')}
             </>
           )}
         </div>
@@ -128,7 +125,7 @@ export function GovernanceHistoryWidget(): React.ReactElement {
             <span className="inline-block h-3.5 w-48 bg-[var(--bg-muted)] rounded animate-pulse" />
           ) : (
             <>
-              {enacted} enacted · {dropped} dropped · {expired} expired · {active} active
+              {t('historyWidget.statusBreakdown', { enacted, dropped, expired, active })}
             </>
           )}
         </div>
@@ -140,7 +137,7 @@ export function GovernanceHistoryWidget(): React.ReactElement {
               <span className="font-semibold text-[var(--text-secondary)]">
                 {formatAdaCompact(stats?.treasuryWithdrawnLovelace)}
               </span>{' '}
-              withdrawn from treasury
+              {t('historyWidget.withdrawnFromTreasury')}
             </>
           )}
         </div>
@@ -149,7 +146,7 @@ export function GovernanceHistoryWidget(): React.ReactElement {
       {/* Recent activity list */}
       <div className="border-t border-[var(--border-subtle)] pt-3">
         <div className="text-[11.5px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)] mb-2">
-          Recent activity
+          {t('historyWidget.recentActivity')}
         </div>
         {historyLoading ? (
           <ul className="space-y-2">
@@ -162,7 +159,7 @@ export function GovernanceHistoryWidget(): React.ReactElement {
           </ul>
         ) : recent.length === 0 ? (
           <div className="text-[12.5px] text-[var(--text-tertiary)] py-2">
-            No governance actions yet.
+            {t('historyWidget.noActionsYet')}
           </div>
         ) : (
           <ul className="space-y-1.5">
@@ -179,7 +176,10 @@ export function GovernanceHistoryWidget(): React.ReactElement {
                   <Link
                     to={`/governance/${encodeURIComponent(action.actionId)}`}
                     className="flex items-center gap-2 text-[12.5px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:underline"
-                    title={`${STATUS_LABEL[status]} · ${label}`}
+                    title={t('historyWidget.itemTitle', {
+                      status: t(`historyWidget.status.${status}`),
+                      label,
+                    })}
                   >
                     <span className="flex-shrink-0">{STATUS_GLYPH[status]}</span>
                     <span className="flex-1 truncate">{label}</span>
@@ -197,7 +197,7 @@ export function GovernanceHistoryWidget(): React.ReactElement {
             to="/governance/history"
             className="inline-flex items-center gap-1 text-[12.5px] text-[var(--brand-primary)] hover:underline"
           >
-            View full history
+            {t('historyWidget.viewFullHistory')}
             <ArrowRight size={12} strokeWidth={2} aria-hidden="true" />
           </Link>
         </div>

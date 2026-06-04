@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 interface ExpandableTextProps {
   text: string;
@@ -21,6 +22,7 @@ export function ExpandableText({
   className,
   collapsedLines = 6,
 }: ExpandableTextProps): React.ReactElement {
+  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
   const ref = useRef<HTMLParagraphElement>(null);
@@ -66,7 +68,7 @@ export function ExpandableText({
           aria-expanded={expanded}
           className="mt-1 text-[12.5px] font-medium text-[var(--brand-primary)] hover:underline focus-visible:outline-none"
         >
-          {expanded ? 'Show less' : 'Show more'}
+          {expanded ? t('common.showLess') : t('common.showMore')}
         </button>
       )}
     </div>

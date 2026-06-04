@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
 import {
   Check,
@@ -20,7 +21,8 @@ import {
 } from '@/hooks/useClubhouse';
 import { useMe } from '@/hooks/useAuth';
 import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
-import { formatRelativeTime, formatWalletAddress, cn } from '@/lib/utils';
+import { formatWalletAddress, cn } from '@/lib/utils';
+import { useFormatters } from '@/hooks/useFormatters';
 import { get } from '@/lib/api';
 import { Composer } from '@/components/clubhouse/Composer';
 import { ClubhouseRail } from '@/components/rails/ClubhouseRail';
@@ -46,6 +48,7 @@ import type {
  * Reference: `clubhouse.jsx:79–84, 178–215, 276–297`.
  */
 export function DelegatorClubhouse(): React.ReactElement {
+  const { t } = useTranslation();
   const { drepId } = useParams<{ drepId: string }>();
   const { data, isLoading } = useClubhousePosts(drepId ?? '');
   const { walletAddress, roles } = useAuthStore();
@@ -70,7 +73,7 @@ export function DelegatorClubhouse(): React.ReactElement {
       ? drepDetail!.givenName!
       : drepId
         ? formatWalletAddress(drepId, 10)
-        : 'this DRep';
+        : t('clubhouse.thisDRep');
 
   // ---- Posting gate ----
   //
@@ -113,21 +116,21 @@ export function DelegatorClubhouse(): React.ReactElement {
   let gateMessage: string | null = null;
   if (drepId && !canPost) {
     if (!isAuthenticated) {
-      gateMessage = 'Sign in to post in this clubhouse.';
+      gateMessage = t('clubhouse.gate.signIn');
     } else if (
       typeof liveDelegatedToDrepId === 'string' &&
       liveDelegatedToDrepId !== drepId
     ) {
       // Definitive wrong-DRep — surface the actionable nudge.
-      gateMessage = `Connect a wallet delegated to ${drepName} to post in this clubhouse.`;
+      gateMessage = t('clubhouse.gate.connectDelegated', { name: drepName });
     } else if (liveDelegatedToDrepId === null) {
       // Wallet IS authenticated but is confirmed undelegated.
-      gateMessage = `Connect a wallet delegated to ${drepName} to post in this clubhouse.`;
+      gateMessage = t('clubhouse.gate.connectDelegated', { name: drepName });
     } else {
       // Unknown delegation (`undefined`) — happens when payment-address
       // auth is in use OR both upstreams are down. Use a softer copy
       // that doesn't accuse the user of being wrongly-delegated.
-      gateMessage = `Connect a wallet delegated to ${drepName} to post in this clubhouse.`;
+      gateMessage = t('clubhouse.gate.connectDelegated', { name: drepName });
     }
   }
 
@@ -187,15 +190,14 @@ export function DelegatorClubhouse(): React.ReactElement {
         style={{ background: 'var(--bg-hero)' }}
       >
         <h1 className="m-0 text-[24px] font-bold tracking-tight text-[var(--text-primary)] flex items-center gap-3 flex-wrap">
-          Delegator Clubhouse
+          {t('clubhouse.title')}
           <span className="inline-flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wider px-2 py-1 rounded-token-full bg-[var(--bg-subtle)] text-[var(--text-secondary)]">
             <Lock size={11} strokeWidth={2.4} />
-            Private to delegators
+            {t('clubhouse.privateBadge')}
           </span>
         </h1>
         <p className="text-[13.5px] text-[var(--text-secondary)] max-w-[640px] mt-1.5 leading-relaxed">
-          A space for delegators to ask questions, share ideas, and help shape Cardano
-          governance together with their DRep.
+          {t('clubhouse.intro')}
         </p>
       </div>
 
@@ -220,7 +222,7 @@ export function DelegatorClubhouse(): React.ReactElement {
           ))
         ) : (data?.items.length ?? 0) === 0 ? (
           <div className="text-center py-12 text-sm text-[var(--text-tertiary)] rounded-token-xl border border-[var(--border-default)] bg-[var(--bg-canvas)]">
-            No posts yet. Be the first to start the conversation.
+            {t('clubhouse.emptyPosts')}
           </div>
         ) : (
           sortClubhousePosts(data?.items ?? []).map((post) => (
@@ -284,6 +286,8 @@ function PostCard({
   isLeadDRep,
   onDelete,
 }: PostCardProps): React.ReactElement {
+  const { t } = useTranslation();
+  const { formatRelativeTime } = useFormatters();
   const [commentBody, setCommentBody] = useState('');
   const [showComments, setShowComments] = useState(false);
   const createComment = useCreateClubhouseComment();
@@ -376,8 +380,8 @@ function PostCard({
           {isAutoPost ? (
             <span
               className="w-8 h-8 rounded-token-full bg-[var(--info-soft)] text-[var(--info)] flex items-center justify-center flex-shrink-0"
-              title="drep.tools governance feed"
-              aria-label="Governance feed"
+              title={t('clubhouse.tooltip.governanceFeed')}
+              aria-label={t('clubhouse.tooltip.governanceFeedAria')}
             >
               <Radio size={14} strokeWidth={2.2} />
             </span>
@@ -399,33 +403,33 @@ function PostCard({
           {isAutoPost && (
             <span
               className="inline-flex items-center gap-1 text-[10.5px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-token-full bg-[var(--info-soft)] text-[var(--info)]"
-              title="Auto-generated by drep.tools when this governance action was first detected"
+              title={t('clubhouse.tooltip.governanceFeedBadge')}
             >
-              Governance feed
+              {t('clubhouse.governanceFeed')}
             </span>
           )}
           {post.pinned && (
             <span
               className="inline-flex items-center gap-1 text-[10.5px] font-semibold px-2 py-0.5 rounded-token-full bg-[var(--bg-muted)] text-[var(--text-secondary)]"
-              title="Pinned until this governance action completes"
+              title={t('clubhouse.tooltip.pinned')}
             >
               <Pin size={10} strokeWidth={2.4} />
-              Pinned
+              {t('clubhouse.pinned')}
             </span>
           )}
           {post.isDRepPost && !isAutoPost && (
             <span className="inline-flex items-center text-[11px] font-semibold px-2 py-0.5 rounded-token-full bg-[var(--brand-primary-soft)] text-[var(--brand-primary)]">
-              DRep
+              {t('clubhouse.drepBadge')}
             </span>
           )}
           {post.stakeAda && (
             <span className="inline-flex items-center text-[11px] font-semibold px-2 py-0.5 rounded-token-full bg-[var(--bg-muted)] text-[var(--text-secondary)] tabular-nums">
-              {post.stakeAda} stake
+              {t('clubhouse.stakeBadge', { amount: post.stakeAda })}
             </span>
           )}
           {post.type === 'poll' && (
             <span className="inline-flex items-center text-[10.5px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-token-full bg-[var(--brand-accent-soft)] text-[var(--brand-accent)]">
-              Poll
+              {t('clubhouse.pollBadge')}
             </span>
           )}
         </div>
@@ -438,7 +442,7 @@ function PostCard({
               onClick={onDelete}
               className="text-xs text-[var(--danger)] hover:underline"
             >
-              Delete
+              {t('clubhouse.delete')}
             </button>
           )}
         </div>
@@ -452,7 +456,7 @@ function PostCard({
           to={`/governance/${encodeURIComponent(post.autoSource.actionId)}`}
           className="inline-flex items-center gap-1 text-[12.5px] font-medium text-[var(--info)] hover:underline"
         >
-          View governance action
+          {t('clubhouse.viewGovernanceAction')}
           <ExternalLink size={11} strokeWidth={2.2} />
         </Link>
       )}
@@ -476,9 +480,11 @@ function PostCard({
           who scans the rest can still see the abstract is point-in-time. */}
       {isAutoPost && post.autoSource?.abstractFrozenAt && (
         <p className="text-[11px] text-[var(--text-tertiary)] italic">
-          <sup>frozen at sync time</sup>{' '}
+          <sup>{t('clubhouse.frozenAtSync')}</sup>{' '}
           <span title={post.autoSource.abstractFrozenAt}>
-            ({formatRelativeTime(post.autoSource.abstractFrozenAt)})
+            {t('clubhouse.frozenAtSyncTime', {
+              time: formatRelativeTime(post.autoSource.abstractFrozenAt),
+            })}
           </span>
         </p>
       )}
@@ -500,7 +506,7 @@ function PostCard({
           className="inline-flex items-center gap-1.5 hover:text-[var(--text-primary)] transition-colors"
         >
           <MessageSquare size={13} strokeWidth={2} />
-          {collapsedReplyCount} {collapsedReplyCount === 1 ? 'reply' : 'replies'}
+          {t('clubhouse.replies', { count: collapsedReplyCount })}
         </button>
       </div>
 
@@ -513,7 +519,7 @@ function PostCard({
               from the start). */}
           {lazyComments.isLoading && effectiveComments.length === 0 && (
             <div className="text-[12px] text-[var(--text-tertiary)] italic">
-              Loading replies…
+              {t('clubhouse.loadingReplies')}
             </div>
           )}
           {topLevel.map((c) => (
@@ -532,7 +538,7 @@ function PostCard({
               <textarea
                 value={commentBody}
                 onChange={(e) => setCommentBody(e.target.value)}
-                placeholder="Write a reply…"
+                placeholder={t('clubhouse.replyPlaceholder')}
                 rows={2}
                 className="flex-1 rounded-token-md border border-[var(--border-default)] bg-[var(--bg-canvas)] px-3 py-1.5 text-[12.5px] resize-y focus:outline-none focus-visible:shadow-token-focus"
               />
@@ -542,7 +548,7 @@ function PostCard({
                 onClick={() => void handleAddTopLevelComment()}
                 disabled={!commentBody.trim() || createComment.isPending}
               >
-                Reply
+                {t('clubhouse.reply')}
               </Button>
             </div>
           )}
@@ -584,6 +590,8 @@ export function ClubhouseCommentRow({
   currentWallet,
   repliesByParent,
 }: ClubhouseCommentRowProps): React.ReactElement {
+  const { t } = useTranslation();
+  const { formatRelativeTime } = useFormatters();
   const [repliesOpen, setRepliesOpen] = useState(false);
   const [replyFormOpen, setReplyFormOpen] = useState(false);
   const [replyBody, setReplyBody] = useState('');
@@ -635,10 +643,10 @@ export function ClubhouseCommentRow({
             {comment.authorDelegationActive === false && (
               <span
                 className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-token-full bg-[var(--bg-subtle)] text-[var(--text-tertiary)]"
-                title="This wallet is no longer delegated to this DRep. The comment is preserved for context."
+                title={t('clubhouse.tooltip.noLongerDelegated')}
                 data-testid="clubhouse-comment-undelegated-badge"
               >
-                No longer delegated
+                {t('clubhouse.noLongerDelegated')}
               </span>
             )}
           </div>
@@ -657,7 +665,7 @@ export function ClubhouseCommentRow({
                   className="inline-flex items-center gap-1 text-[11.5px] font-medium text-[var(--text-tertiary)] hover:text-[var(--brand-primary)] transition-colors"
                 >
                   <MessageSquare size={11} strokeWidth={2} />
-                  Reply
+                  {t('clubhouse.reply')}
                 </button>
               )}
               {childCount > 0 && (
@@ -672,7 +680,7 @@ export function ClubhouseCommentRow({
                   ) : (
                     <ChevronRight size={11} strokeWidth={2} />
                   )}
-                  {childCount} {childCount === 1 ? 'reply' : 'replies'}
+                  {t('clubhouse.replies', { count: childCount })}
                 </button>
               )}
             </div>
@@ -687,7 +695,7 @@ export function ClubhouseCommentRow({
           <textarea
             value={replyBody}
             onChange={(e) => setReplyBody(e.target.value)}
-            placeholder="Write a reply…"
+            placeholder={t('clubhouse.replyPlaceholder')}
             rows={2}
             className="flex-1 rounded-token-md border border-[var(--border-default)] bg-[var(--bg-canvas)] px-3 py-1.5 text-[12.5px] resize-y focus:outline-none focus-visible:shadow-token-focus"
           />
@@ -697,7 +705,7 @@ export function ClubhouseCommentRow({
             onClick={() => void handleSubmitReply()}
             disabled={!replyBody.trim() || createComment.isPending}
           >
-            Reply
+            {t('clubhouse.reply')}
           </Button>
         </div>
       )}
@@ -734,6 +742,8 @@ interface PollBarsProps {
 }
 
 function PollBars({ options, myVote, closed, onVote, closesAt }: PollBarsProps): React.ReactElement {
+  const { t } = useTranslation();
+  const { formatRelativeTime } = useFormatters();
   const total = options.reduce((s, o) => s + o.votes, 0);
   return (
     <div className="space-y-2 pt-1">
@@ -784,7 +794,7 @@ function PollBars({ options, myVote, closed, onVote, closesAt }: PollBarsProps):
               <span className="font-semibold text-[var(--text-secondary)] tabular-nums">
                 {pct}%{' '}
                 <span className="font-normal text-[var(--text-muted)] ml-1">
-                  ({opt.votes})
+                  {t('clubhouse.poll.voteCount', { count: opt.votes })}
                 </span>
               </span>
             </span>
@@ -792,13 +802,15 @@ function PollBars({ options, myVote, closed, onVote, closesAt }: PollBarsProps):
         );
       })}
       <div className="text-[11.5px] text-[var(--text-tertiary)] tabular-nums">
-        {total} {total === 1 ? 'vote' : 'votes'}
+        {t('clubhouse.poll.votes', { count: total })}
         {closesAt &&
           (closed
-            ? ' · poll closed'
-            : ` · closes ${formatRelativeTime(closesAt)}`)}
+            ? t('clubhouse.poll.closed')
+            : t('clubhouse.poll.closes', { time: formatRelativeTime(closesAt) }))}
         {myVote !== undefined && (
-          <span className="ml-2 text-[var(--brand-primary)] font-semibold">You voted</span>
+          <span className="ml-2 text-[var(--brand-primary)] font-semibold">
+            {t('clubhouse.poll.youVoted')}
+          </span>
         )}
       </div>
     </div>

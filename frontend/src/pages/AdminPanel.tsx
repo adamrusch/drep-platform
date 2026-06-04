@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { StatusPill } from '@/components/ui/StatusPill';
@@ -14,6 +15,7 @@ const inputCls =
 
 /** Platform operator panel — gated to platform_admin via RoleGuard at the route. */
 export function AdminPanel(): React.ReactElement {
+  const { t } = useTranslation();
   const safety = useSafetyMode();
   const clear = useClearSafetyMode();
   const grant = useGrantPlatformAdmin();
@@ -22,43 +24,43 @@ export function AdminPanel(): React.ReactElement {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-semibold text-[var(--text-primary)]">Platform admin</h1>
+      <h1 className="text-xl font-semibold text-[var(--text-primary)]">{t('admin.title')}</h1>
 
       <Card>
-        <CardHeader><CardTitle>Sybil safety mode</CardTitle></CardHeader>
+        <CardHeader><CardTitle>{t('admin.safetyMode.title')}</CardTitle></CardHeader>
         <CardContent className="space-y-3">
           <div className="flex items-center gap-2">
-            <StatusPill status={safety.data?.active ? 'voting' : 'active'} label={safety.data?.active ? 'Active' : 'Off'} />
+            <StatusPill status={safety.data?.active ? 'voting' : 'active'} label={safety.data?.active ? t('admin.safetyMode.active') : t('admin.safetyMode.off')} />
             {safety.data?.triggeredByCount != null && (
               <span className="text-[12px] text-[var(--text-secondary)]">
-                tripped by {safety.data.triggeredByCount} committees in 12h
+                {t('admin.safetyMode.trippedBy', { count: safety.data.triggeredByCount })}
               </span>
             )}
           </div>
           <p className="text-[12px] text-[var(--text-secondary)]">
-            While active, wallets newer than 7 days can't create a committee. Auto-clears after 72h.
+            {t('admin.safetyMode.description')}
           </p>
           <Button size="sm" variant="secondary" disabled={!safety.data?.active || clear.isPending} onClick={() => clear.mutate()}>
-            {clear.isPending ? 'Clearing…' : 'Clear safety mode now'}
+            {clear.isPending ? t('admin.safetyMode.clearing') : t('admin.safetyMode.clearNow')}
           </Button>
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader><CardTitle>Platform admins</CardTitle></CardHeader>
+        <CardHeader><CardTitle>{t('admin.admins.title')}</CardTitle></CardHeader>
         <CardContent className="space-y-3">
           <div className="flex flex-wrap items-center gap-2">
-            <input value={wallet} onChange={(e) => setWallet(e.target.value)} placeholder="wallet address" className={inputCls} />
+            <input value={wallet} onChange={(e) => setWallet(e.target.value)} placeholder={t('admin.admins.walletPlaceholder')} className={inputCls} />
             <Button size="sm" variant="primary" disabled={!wallet.trim() || grant.isPending} onClick={() => grant.mutate(wallet.trim(), { onSuccess: () => setWallet('') })}>
-              {grant.isPending ? '…' : 'Grant'}
+              {grant.isPending ? t('admin.admins.granting') : t('admin.admins.grant')}
             </Button>
             <Button size="sm" variant="destructive" disabled={!wallet.trim() || revoke.isPending} onClick={() => revoke.mutate(wallet.trim(), { onSuccess: () => setWallet('') })}>
-              {revoke.isPending ? '…' : 'Revoke'}
+              {revoke.isPending ? t('admin.admins.revoking') : t('admin.admins.revoke')}
             </Button>
           </div>
           {(grant.isError || revoke.isError) && (
             <p className="text-[12px] text-[var(--danger)]">
-              {((grant.error || revoke.error) as Error)?.message ?? 'Action failed.'}
+              {((grant.error || revoke.error) as Error)?.message ?? t('admin.admins.actionFailed')}
             </p>
           )}
         </CardContent>
