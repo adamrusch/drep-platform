@@ -1,7 +1,6 @@
 import React, { createContext, useContext, useEffect, type ReactNode } from 'react';
 import { useAuthStore } from '@/stores/authStore';
-import { get as apiGet } from '@/lib/api';
-import type { UserProfile } from '@/types';
+import { useMe } from '@/hooks/useAuth';
 
 /**
  * Lightweight auth-state provider.
@@ -53,19 +52,24 @@ export function WalletAuthProvider({ children }: WalletAuthProviderProps): React
     walletAddress && expiresAt && new Date(expiresAt).getTime() > Date.now(),
   );
 
-  // Re-validate session on mount and hydrate profile. Failures clear local
-  // state — usually means the JWT cookie was cleared by the browser or
-  // expired between renders.
-  useEffect(() => {
-    if (!isAuthenticated) return;
+  // The single source of truth for the live profile is the `['auth','me']`
+  // query (enabled only when authenticated). We mirror its data into the
+  // Zustand store on every change — so ANY invalidation of `/auth/me`
+  // (linking a DRep, accepting a committee invite, declining invites, …)
+  // refreshes the store's derived fields (drepId, roles, committeeMembership)
+  // WITHOUT a reload. Previously this provider did a one-shot fetch on mount,
+  // which is why those fields went stale until the next full page load.
+  const { data: meProfile, isError: meError } = useMe();
 
-    apiGet<UserProfile>('/auth/me')
-      .then((profile) => setProfile(profile))
-      .catch(() => {
-        // Session expired or invalid — clear auth state
-        clearAuth();
-      });
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (meProfile) setProfile(meProfile);
+  }, [meProfile, setProfile]);
+
+  useEffect(() => {
+    // A hard error from `/auth/me` (after React-Query's retries) means the
+    // session cookie is gone or invalid — log out cleanly.
+    if (meError) clearAuth();
+  }, [meError, clearAuth]);
 
   return (
     <WalletAuthContext.Provider value={{ isAuthenticated, walletAddress }}>

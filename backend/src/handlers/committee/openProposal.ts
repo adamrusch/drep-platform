@@ -3,27 +3,30 @@ import { putItem, tableNames } from '../../lib/dynamodb';
 import type { CommitteePosition, CommitteeVoteProposalItem } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { writeAuditEvent } from '../../lib/audit';
-import { committeeMessages } from '../../lib/committeeMessages';
 import { getCurrentEpochInfo } from '../../lib/koios';
-import { created, badRequest, unauthorized, notFound, conflict, handleError } from '../_response';
+import { created, badRequest, notFound, conflict, handleError } from '../_response';
 import {
   assertCommitteeMember,
   currentApprovalRule,
-  getStage,
   loadCommittee,
   loadGovernanceAction,
   loadProposal,
-  signatureSnapshot,
-  verifyCommitteeResign,
   voteScopeOf,
 } from './_committee';
 
+/**
+ * Opening a proposal is intentionally a LOW-CEREMONY action: it just queues a
+ * governance action for the committee to deliberate and vote on. As of
+ * 2026-06 it requires only a valid session (JWT) + committee membership — NO
+ * wallet re-signature. The binding actions downstream (casting a vote,
+ * closing/passing, and the on-chain submission) DO still re-sign, so a leaked
+ * cookie can at worst queue a proposal the group then has to actually vote
+ * through. This matches the product decision that a lead shouldn't have to
+ * sign just to "make a proposal ready for the group to review."
+ */
 interface OpenProposalBody {
   actionId: string;
   proposedPosition: CommitteePosition;
-  mutationNonce: string;
-  mutationSignature: string;
-  mutationKey: string;
 }
 
 const POSITIONS: CommitteePosition[] = ['Yes', 'No', 'Abstain'];
@@ -100,12 +103,6 @@ export const handler = async (
       // withdrawn → fall through and overwrite with a fresh proposal (Q1).
     }
 
-    const message = committeeMessages.proposal(
-      getStage(), drepId, actionId, body.proposedPosition, body.mutationNonce, authCtx.walletAddress,
-    );
-    const reason = await verifyCommitteeResign(authCtx.walletAddress, body, message);
-    if (reason) return unauthorized(reason);
-
     const now = new Date().toISOString();
     const proposal: CommitteeVoteProposalItem = {
       voteScope,
@@ -114,7 +111,6 @@ export const handler = async (
       actionId,
       proposedPosition: body.proposedPosition,
       proposerWallet: authCtx.walletAddress,
-      proposerSignature: signatureSnapshot(body, message),
       status: 'open',
       approvalThreshold: rule.approvalThreshold,
       memberCount: rule.memberCount,
