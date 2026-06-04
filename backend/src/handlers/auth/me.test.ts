@@ -47,6 +47,7 @@ vi.mock('../../lib/dynamodb', () => ({
   tableNames: {
     users: 'test-users',
     drepCommittees: 'test-drep_committees',
+    committeeMembership: 'test-committee_membership',
     drepDirectory: 'test-drep_directory',
     governanceActions: 'test-governance_actions',
     governanceVotes: 'test-governance_votes',
@@ -131,6 +132,12 @@ describe('GET /auth/me', () => {
     // override mockQuery for that specific case.
     mockQuery.mockResolvedValue({ items: [], lastEvaluatedKey: undefined, count: 0 });
     mockBatchGet.mockResolvedValue([]);
+    // `/auth/me` makes TWO getItem calls in parallel: the user row
+    // (mockResolvedValueOnce'd per test) and the committee_membership row.
+    // Default any UNqueued getItem to "no row" so the membership lookup
+    // resolves to undefined (→ committeeMembership: null) unless a test
+    // explicitly queues a membership row after the user row.
+    mockGet.mockResolvedValue(undefined as never);
   });
 
   it('includes delegatedToDrepId when the upstream returned a real delegation', async () => {
@@ -271,6 +278,59 @@ describe('GET /auth/me', () => {
       committeeName: 'Cardano Builders Collective',
       role: 'committee_member',
     });
+  });
+
+  // ---- committeeMembership surface (member-recognition fix) ----
+
+  it('returns committeeMembership for a non-lead member (drepId belongs to the lead)', async () => {
+    // The member's user row (call #1) followed by their membership row
+    // (call #2, role 'member'), then the committee-name getItem (call #3).
+    mockGet
+      .mockResolvedValueOnce(buildUserRow() as never) // user PROFILE
+      .mockResolvedValueOnce({ walletAddress: WALLET, drepId: 'drep1lead', role: 'member', joinedAt: 't' } as never) // membership
+      .mockResolvedValueOnce({ drepId: 'drep1lead', SK: 'COMMITTEE', committeeName: 'Cardano Puppy Committee' } as never); // committee name
+    mockLookup.mockResolvedValueOnce({ drepId: null, source: 'koios' });
+
+    const res = (await handler(
+      buildEvent({ walletAddress: WALLET, roles: ['delegator'] }),
+    )) as APIGatewayProxyResultV2;
+    expect(res).toMatchObject({ statusCode: 200 });
+    const data = parseBody(res);
+    expect(data['committeeMembership']).toMatchObject({
+      drepId: 'drep1lead',
+      role: 'member',
+      committeeName: 'Cardano Puppy Committee',
+    });
+    // A member has no registered drepId of their own.
+    expect(data['drepId']).toBeUndefined();
+  });
+
+  it('returns committeeMembership: null when the user is in no committee', async () => {
+    mockGet.mockResolvedValueOnce(buildUserRow() as never); // user row; membership defaults to undefined
+    mockLookup.mockResolvedValueOnce({ drepId: null, source: 'koios' });
+
+    const res = (await handler(
+      buildEvent({ walletAddress: WALLET, roles: ['delegator'] }),
+    )) as APIGatewayProxyResultV2;
+    expect(res).toMatchObject({ statusCode: 200 });
+    const data = parseBody(res);
+    expect(data['committeeMembership']).toBeNull();
+  });
+
+  it('excludes a not-yet-accepted (invited) membership from committeeMembership', async () => {
+    // role 'invited' is a pending slot — it belongs in pendingInvitations,
+    // NOT committeeMembership. No committee-name getItem should fire.
+    mockGet
+      .mockResolvedValueOnce(buildUserRow() as never)
+      .mockResolvedValueOnce({ walletAddress: WALLET, drepId: 'drep1lead', role: 'invited', joinedAt: 't' } as never);
+    mockLookup.mockResolvedValueOnce({ drepId: null, source: 'koios' });
+
+    const res = (await handler(
+      buildEvent({ walletAddress: WALLET, roles: ['delegator'] }),
+    )) as APIGatewayProxyResultV2;
+    expect(res).toMatchObject({ statusCode: 200 });
+    const data = parseBody(res);
+    expect(data['committeeMembership']).toBeNull();
   });
 
   it('does NOT 500 when the pending-invites GSI Query throws', async () => {

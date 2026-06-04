@@ -13,6 +13,7 @@ import {
   useFinalizeRationale,
   usePinRationale,
 } from '@/hooks/useCommitteeRationale';
+import { useIpfsKeyStatus, useStoreIpfsKey } from '@/hooks/useCommitteeMembership';
 
 const HEARTBEAT_MS = 4 * 60 * 1000; // well under the 20-min lock TTL
 const inputCls =
@@ -29,9 +30,13 @@ export function RationaleEditorPage(): React.ReactElement {
   const release = useReleaseRationaleLock(drepId, actionId);
   const finalize = useFinalizeRationale(drepId, actionId);
   const pin = usePinRationale(drepId, actionId);
+  const ipfsKeyStatus = useIpfsKeyStatus(drepId);
+  const storeKey = useStoreIpfsKey(drepId);
 
   const [statement, setStatement] = useState('');
   const [summary, setSummary] = useState('');
+  // Inline Blockfrost-key setup at pin time (only when no key is stored).
+  const [ipfsKeyInput, setIpfsKeyInput] = useState('');
   const loadedFor = useRef<string | null>(null);
 
   // Hydrate the form from the loaded draft (once per draft version).
@@ -68,6 +73,26 @@ export function RationaleEditorPage(): React.ReactElement {
       summary: summary || undefined,
       expectedUpdatedAt: data?.draft?.updatedAt,
     });
+  };
+
+  const keyStored = ipfsKeyStatus.data?.stored === true;
+  const pinBusy = storeKey.isPending || pin.isPending;
+
+  // Save the Blockfrost key to the committee (persisted, encrypted), then pin
+  // with the now-stored key. Keeping it per-committee means the lead does this
+  // once; every later pin is a single click.
+  const saveKeyAndPin = (): void => {
+    const key = ipfsKeyInput.trim();
+    if (!key) return;
+    storeKey.mutate(
+      { ipfsProjectId: key },
+      {
+        onSuccess: () => {
+          setIpfsKeyInput('');
+          pin.mutate({});
+        },
+      },
+    );
   };
 
   return (
@@ -120,14 +145,57 @@ export function RationaleEditorPage(): React.ReactElement {
         <CardHeader><CardTitle>{t('rationaleEditor.finalizeAndPin')}</CardTitle></CardHeader>
         <CardContent className="space-y-3">
           {data?.final ? (
-            <div className="space-y-1 text-[12.5px]">
+            <div className="space-y-2 text-[12.5px]">
               <div className="break-all"><span className="text-[var(--text-secondary)]">{t('rationaleEditor.anchorHash')}</span> <span className="font-mono">{data.final.anchorHash}</span></div>
               {data.final.ipfsUri ? (
                 <div className="break-all"><span className="text-[var(--text-secondary)]">{t('rationaleEditor.ipfs')}</span> <span className="font-mono">{data.final.ipfsUri}</span></div>
-              ) : (
-                <Button size="sm" variant="secondary" disabled={pin.isPending} onClick={() => pin.mutate({})}>
+              ) : keyStored ? (
+                /* A key is already stored for this committee — one-click pin. */
+                <Button size="sm" variant="secondary" disabled={pinBusy} onClick={() => pin.mutate({})}>
                   {pin.isPending ? t('rationaleEditor.pinning') : t('rationaleEditor.pinToIpfs')}
                 </Button>
+              ) : (
+                /* No key stored — ask the committee to add a Blockfrost key. */
+                <div className="space-y-2 rounded-token-md border border-[var(--border-default)] bg-[var(--bg-muted)] p-3">
+                  <h4 className="text-[12.5px] font-medium text-[var(--text-primary)]">
+                    {t('rationaleEditor.ipfsKeyRequired')}
+                  </h4>
+                  <p className="text-[11.5px] text-[var(--text-secondary)]">
+                    {t('rationaleEditor.ipfsKeyPromptBody')}
+                  </p>
+                  <a
+                    href="https://blockfrost.io"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-block text-[11.5px] text-[var(--brand-primary)] hover:underline"
+                  >
+                    {t('rationaleEditor.ipfsKeyGetLink')}
+                  </a>
+                  <input
+                    type="password"
+                    value={ipfsKeyInput}
+                    onChange={(e) => setIpfsKeyInput(e.target.value)}
+                    placeholder={t('rationaleEditor.ipfsKeyPlaceholder')}
+                    autoComplete="off"
+                    className={inputCls}
+                  />
+                  <Button size="sm" variant="primary" disabled={!ipfsKeyInput.trim() || pinBusy} onClick={saveKeyAndPin}>
+                    {pinBusy ? t('rationaleEditor.ipfsKeySaving') : t('rationaleEditor.ipfsKeySaveAndPin')}
+                  </Button>
+                  <p className="text-[11px] text-[var(--text-secondary)]">
+                    {t('rationaleEditor.ipfsKeySettingsHint')}
+                  </p>
+                </div>
+              )}
+              {storeKey.isError && (
+                <p className="text-[12px] text-[var(--danger)]">
+                  {t('rationaleEditor.ipfsKeyErrorPrefix')} {(storeKey.error as Error)?.message}
+                </p>
+              )}
+              {pin.isError && (
+                <p className="text-[12px] text-[var(--danger)]">
+                  {t('rationaleEditor.pinErrorPrefix')} {(pin.error as Error)?.message}
+                </p>
               )}
             </div>
           ) : (
