@@ -5,6 +5,7 @@ import { extractAuthContext } from '../../middleware/role-guard';
 import { writeAuditEvent } from '../../lib/audit';
 import { committeeMessages } from '../../lib/committeeMessages';
 import { ok, badRequest, unauthorized, forbidden, notFound, conflict, handleError } from '../_response';
+import { canBroadcastGovernanceVote } from '../../lib/stage';
 import {
   assertCommitteeLead,
   getStage,
@@ -22,12 +23,33 @@ interface ReceiptBody {
   mutationNonce: string;
   mutationSignature: string;
   mutationKey: string;
+  /**
+   * Acknowledgement that the caller understands this is a REAL mainnet
+   * vote. REQUIRED on stages where `canBroadcastGovernanceVote` is true and
+   * the stage is `'test'` — because test.drep.tools is wired to mainnet, a
+   * receipt on test means a real DRep vote was just cast. Must be the
+   * boolean literal `true` (not "true", not 1) to count.
+   */
+  confirmedRealMainnetVote?: boolean;
 }
 
 /**
- * Record an on-chain vote submission receipt. PROD-ONLY — a non-prod stage
- * cannot record a mainnet submission, the backstop for D1 (test does everything
- * up to broadcast but never actually submits). Lead only.
+ * Record an on-chain vote submission receipt. Permission to record is the
+ * same as permission to broadcast — gated by `canBroadcastGovernanceVote`:
+ *   - prod  → any lead may record (this is exactly the old behaviour).
+ *   - test  → restricted to `platform_admin` (the same wall as the
+ *             broadcast path; the receipt-only route can't be used to
+ *             persist a "fictional" txHash on test as a non-admin).
+ *
+ * The recorded `broadcastStage` reflects the stage the receipt was
+ * recorded on (`'prod'` or `'test'`), so an audit reader can see at a
+ * glance which environment cast each vote. A `'test'` stage receipt is
+ * still a record of a REAL mainnet vote — the stage marker just attributes
+ * provenance.
+ *
+ * On test, a `realMainnetVoteOnTest: true` audit row is written BEFORE the
+ * normal "submitted" row so the audit trail records the safety-critical
+ * intent even if the post-write path errors. Lead only.
  */
 export const handler = async (
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
@@ -39,8 +61,12 @@ export const handler = async (
     if (!drepId || !actionIdRaw) return badRequest('drepId and actionId path parameters are required');
     const actionId = decodeURIComponent(actionIdRaw);
 
-    if (getStage() !== 'prod') {
-      return forbidden('On-chain vote submissions can only be recorded from the production environment');
+    if (!canBroadcastGovernanceVote(authCtx)) {
+      return forbidden(
+        getStage() === 'test'
+          ? 'On-chain submission on the test environment is restricted to platform admins (test casts REAL mainnet votes). This feature is not yet available for your account.'
+          : 'On-chain vote submissions can only be recorded from the production environment',
+      );
     }
 
     if (!event.body) return badRequest('Request body is required');
@@ -52,6 +78,17 @@ export const handler = async (
     }
     if (!body.txHash || !/^[0-9a-fA-F]{64}$/.test(body.txHash)) {
       return badRequest('txHash must be a 64-char hex transaction hash');
+    }
+
+    // On `test`, require an explicit safety acknowledgement. The wire shape
+    // must be the boolean literal `true` — accepting "true"/1/other truthy
+    // forms would defeat the "deliberate, intentional click" guarantee
+    // this gate exists to enforce. On prod, the field is irrelevant (the
+    // production stage's whole purpose IS casting real mainnet votes).
+    if (getStage() === 'test' && body.confirmedRealMainnetVote !== true) {
+      return badRequest(
+        'confirmedRealMainnetVote=true is required on the test environment — recording a vote here writes a real mainnet vote receipt.',
+      );
     }
 
     const committee = await loadCommittee(drepId);
@@ -74,6 +111,7 @@ export const handler = async (
 
     const final = await loadRationaleFinal(voteScope);
     const now = new Date().toISOString();
+    const stage = getStage();
     const submission: CommitteeSubmissionItem = {
       voteScope,
       itemKey: 'SUBMISSION',
@@ -81,7 +119,11 @@ export const handler = async (
       actionId,
       position: proposal.proposedPosition,
       txHash: body.txHash.toLowerCase(),
-      broadcastStage: 'prod',
+      // Record the stage we recorded the receipt on. On `'test'` this is
+      // STILL a real mainnet vote — the marker only tells an audit reader
+      // which deploy environment the human-driver clicked from. Pinning
+      // this to `'prod'` would lose that provenance.
+      broadcastStage: stage,
       submittedBy: authCtx.walletAddress,
       submittedAt: now,
       ...(final?.anchorHash ? { anchorHash: final.anchorHash } : {}),
@@ -94,6 +136,28 @@ export const handler = async (
       ...(final?.canonicalJson ? { canonicalJson: final.canonicalJson } : {}),
       ...(final ? {} : { rationaleOverridden: true }),
     };
+
+    // Pre-write audit row on `test`. Recording a real mainnet vote from the
+    // test environment is a security-relevant event by itself — the row
+    // captures intent BEFORE the write, so even if the conditional Put
+    // racing with another receipt 409s, we have a trace of "a platform
+    // admin clicked through the safety acknowledgement on the test env at
+    // this exact time". `writeAuditEvent` is best-effort (never throws).
+    if (stage === 'test') {
+      await writeAuditEvent({
+        entityType: 'committee_vote',
+        entityId: voteScope,
+        eventType: 'committee.vote.realMainnetVoteOnTest',
+        actorWallet: authCtx.walletAddress,
+        metadata: {
+          drepId,
+          actionId,
+          txHash: submission.txHash,
+          position: proposal.proposedPosition,
+          realMainnetVoteOnTest: true,
+        },
+      });
+    }
 
     // Conditional Put — first receipt wins; a duplicate submission 409s.
     try {
@@ -119,7 +183,9 @@ export const handler = async (
         actionId,
         txHash: submission.txHash,
         position: proposal.proposedPosition,
+        broadcastStage: stage,
         signature: signatureSnapshot(body, message).mutationSignature,
+        ...(stage === 'test' ? { realMainnetVoteOnTest: true } : {}),
       },
     });
 

@@ -141,7 +141,13 @@ export function useSubmitReceipt(drepId: string, actionId: string) {
   const invalidate = useInvalidateVote(drepId, actionId);
   const stage = getStage();
   return useMutation({
-    mutationFn: async (vars: { txHash: string }) => {
+    mutationFn: async (vars: {
+      txHash: string;
+      /** Required on the `test` stage — see backend submitReceipt.ts. The
+       *  hook passes through whatever the panel supplies; backend rejects
+       *  with 400 when missing/false on test. */
+      confirmedRealMainnetVote?: boolean;
+    }) => {
       const signed = await sign((nonce) =>
         committeeMessages.submitReceipt(stage, drepId, actionId, vars.txHash, nonce, wallet ?? ''),
       );
