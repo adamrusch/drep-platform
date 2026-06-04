@@ -740,13 +740,12 @@
       "linked": "✓ Linked to your DRep. You're recognized as a DRep across the platform.",
       "linkedWithName": "✓ Linked to your DRep — {{name}}. You're recognized as a DRep across the platform.",
       "explainer": "Link your registered DRep to be recognized as one (no committee needed). Your name defaults to your DRep name unless you set one above.",
-      "drepIdPlaceholder": "drep1…",
-      "linking": "Linking…",
-      "link": "Link",
-      "reading": "Reading…",
-      "useWallet": "Use wallet (CIP-95)",
+      "cip95Note": "Linking uses CIP-95 proof-of-control — your wallet will ask you to sign a one-time message with your DRep key. No on-chain transaction or fees.",
+      "reading": "Reading DRep key…",
+      "signing": "Waiting for signature…",
+      "useWallet": "Link with wallet (CIP-95)",
       "reconnectError": "Reconnect your wallet first.",
-      "noKeyError": "This wallet did not return a DRep key (CIP-95 not supported?). Paste your drep id instead.",
+      "noKeyError": "This wallet did not return a DRep key. Make sure your wallet has a registered DRep, and that you're using a CIP-95-capable build (recent Eternl, Lace, or Nufi).",
       "readKeyError": "Could not read your DRep key."
     }
   },
