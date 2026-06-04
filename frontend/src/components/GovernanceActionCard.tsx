@@ -1,8 +1,10 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { ExternalLink } from 'lucide-react';
 import type { GovernanceAction, VoteTally, VotingRoles } from '@/types';
-import { formatRelativeTime, epochsToDate, cn } from '@/lib/utils';
+import { cn } from '@/lib/utils';
+import { useFormatters } from '@/hooks/useFormatters';
 import { StatusPill } from '@/components/ui/StatusPill';
 import { SentimentBar } from '@/components/ui/SentimentBar';
 import { useUiStore } from '@/stores/uiStore';
@@ -50,16 +52,6 @@ interface GovernanceActionCardProps {
   className?: string;
 }
 
-const TYPE_LABELS: Record<GovernanceAction['actionType'], string> = {
-  ParameterChange: 'Parameter Change',
-  HardForkInitiation: 'Hard Fork',
-  TreasuryWithdrawals: 'Treasury',
-  NoConfidence: 'No Confidence',
-  UpdateCommittee: 'Update Committee',
-  NewConstitution: 'New Constitution',
-  InfoAction: 'Info',
-};
-
 function shortActionId(actionId: string): string {
   const [hash, idx] = actionId.split('#');
   if (!hash) return actionId;
@@ -80,6 +72,8 @@ export function GovernanceActionCard({
   action,
   className,
 }: GovernanceActionCardProps): React.ReactElement {
+  const { t } = useTranslation();
+  const { formatRelativeTime, formatEpochDate } = useFormatters();
   const addToast = useUiStore((s) => s.addToast);
   const summary = action.summary && action.summary.length > 0 ? action.summary : undefined;
   // Until the backend re-enriches (Blockfrost daily quota gate), some rows
@@ -107,9 +101,9 @@ export function GovernanceActionCard({
     stopRowNav(e);
     try {
       await navigator.clipboard.writeText(action.actionId);
-      addToast({ title: 'Hash copied', variant: 'success' });
+      addToast({ title: t('actionCard.hashCopied'), variant: 'success' });
     } catch {
-      addToast({ title: 'Copy failed', variant: 'error' });
+      addToast({ title: t('actionCard.copyFailed'), variant: 'error' });
     }
   };
 
@@ -131,14 +125,14 @@ export function GovernanceActionCard({
       <div className="flex items-start justify-between gap-3 mb-2">
         <div className="flex items-center gap-2 flex-wrap min-w-0">
           <span className="text-[11.5px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">
-            {TYPE_LABELS[action.actionType]}
+            {t(`actionType.${action.actionType}`, { defaultValue: action.actionType })}
           </span>
           <StatusPill status={action.status} label={action.adminOverrideLabel ?? undefined} />
           {isPillarSourced && (
             <StatusPill
               status="discussion"
-              label="Discussion forum"
-              title="Title and abstract sourced from gov.tools proposal-discussion forum (no on-chain anchor)"
+              label={t('actionCard.discussionForum')}
+              title={t('actionCard.discussionForumTitle')}
             />
           )}
           {/* Yellow "Hash mismatch" pill: the off-chain body was retrievable
@@ -149,8 +143,8 @@ export function GovernanceActionCard({
           {action.anchorHashMismatch && (
             <StatusPill
               status="warning"
-              label="Hash mismatch"
-              title="The on-chain anchor hash doesn't match the served content. The content is shown for reference but its integrity cannot be cryptographically verified."
+              label={t('actionCard.hashMismatch')}
+              title={t('actionCard.hashMismatchTitle')}
             />
           )}
         </div>
@@ -163,7 +157,7 @@ export function GovernanceActionCard({
             className="flex-shrink-0 inline-flex items-center gap-1 text-[11.5px] text-[var(--text-tertiary)] hover:text-[var(--brand-primary)] hover:underline"
             title={action.anchorUrl}
           >
-            Metadata
+            {t('actionCard.metadata')}
             <ExternalLink size={11} strokeWidth={2} aria-hidden="true" />
           </a>
         ) : action.proposalPillarUrl ? (
@@ -173,9 +167,9 @@ export function GovernanceActionCard({
             rel="noopener noreferrer"
             onClick={stopRowNav}
             className="flex-shrink-0 inline-flex items-center gap-1 text-[11.5px] text-[var(--text-tertiary)] hover:text-[var(--brand-primary)] hover:underline"
-            title="View on gov.tools proposal-discussion forum"
+            title={t('actionCard.discussionLinkTitle')}
           >
-            Discussion
+            {t('actionCard.discussion')}
             <ExternalLink size={11} strokeWidth={2} aria-hidden="true" />
           </a>
         ) : (
@@ -195,13 +189,13 @@ export function GovernanceActionCard({
       ) : action.anchorUrl ? (
         <h3
           className="text-[14px] italic leading-snug text-[var(--text-tertiary)]"
-          title="The on-chain anchor exists but its body could not be retrieved from any public IPFS gateway."
+          title={t('actionCard.metadataUnavailableTitle')}
         >
-          Metadata unavailable
+          {t('actionCard.metadataUnavailable')}
         </h3>
       ) : (
         <h3 className="text-[14px] italic leading-snug text-[var(--text-tertiary)]">
-          (No off-chain metadata)
+          {t('actionCard.noOffChainMetadata')}
         </h3>
       )}
 
@@ -225,7 +219,7 @@ export function GovernanceActionCard({
       <button
         type="button"
         onClick={(e) => void handleCopyHash(e)}
-        title={`Click to copy: ${action.actionId}`}
+        title={t('actionCard.copyHashTitle', { id: action.actionId })}
         className={cn(
           'mt-2.5 inline-flex items-center text-[11px] font-mono',
           'text-[var(--text-muted)] hover:text-[var(--brand-primary)]',
@@ -237,7 +231,7 @@ export function GovernanceActionCard({
 
       {/* Footer: timestamp + sentiment bar + epoch + explorer links */}
       <div className="mt-3 pt-3 border-t border-[var(--border-subtle)] flex items-center justify-between gap-4 text-[11.5px] text-[var(--text-tertiary)] tabular-nums">
-        <span className="flex-shrink-0">Submitted {formatRelativeTime(action.submittedAt)}</span>
+        <span className="flex-shrink-0">{t('actionCard.submitted', { time: formatRelativeTime(action.submittedAt) })}</span>
         {action.votes && tallyPowerTotals(action.votes, action.votingRoles).totalActive !== '0' ? (
           <div className="flex-1 max-w-[180px]">
             <SentimentBar
@@ -251,7 +245,7 @@ export function GovernanceActionCard({
           </div>
         ) : null}
         <span className="flex-shrink-0">
-          Epoch {action.epochDeadline} ({epochsToDate(action.epochDeadline)})
+          {t('actionCard.epoch', { n: action.epochDeadline, date: formatEpochDate(action.epochDeadline) })}
         </span>
       </div>
 
