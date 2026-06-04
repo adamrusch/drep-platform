@@ -11,7 +11,6 @@ import {
   useDeclineAllInvitations,
   usePendingInvitations,
 } from '@/hooks/useCommitteeInvitations';
-import { pasteDrepLinkAllowed } from '@/lib/stage';
 import type { UserProfile } from '@/types';
 
 export function ProfileSetup(): React.ReactElement {
@@ -196,24 +195,38 @@ function DeclineAllInvitationsButton(): React.ReactElement | null {
 
 /**
  * Link your wallet to your on-chain DRep so you're recognized as a DRep across
- * the platform — no committee required. CIP-95 (proves control) or paste.
+ * the platform — no committee required.
+ *
+ * # Flow (CIP-95 proof-of-control, the only path)
+ *
+ *   1. The user clicks "Use wallet (CIP-95)".
+ *   2. We `enable({ extensions: [{ cip: 95 }] })` and call
+ *      `cip95.getPubDRepKey()` to read the wallet's DRep public key.
+ *   3. The link mutation walks challenge → wallet `signData` →
+ *      verify-and-link (see `linkDrepWithProof` in useCommitteeMembership).
+ *
+ * The previous "paste a drep id" path was removed because it proved only
+ * that a DRep existed, not that the caller controlled it. The backend now
+ * rejects any link attempt that doesn't carry a fresh COSE_Sign1.
  */
 function DrepLinkSection({ currentDrepId }: { currentDrepId?: string }): React.ReactElement {
   const { t } = useTranslation();
   const walletName = useAuthStore((s) => s.walletName);
   const link = useLinkDrep();
-  const [drepId, setDrepId] = useState('');
-  const [detecting, setDetecting] = useState(false);
-  const [detectErr, setDetectErr] = useState<string | null>(null);
+  const [reading, setReading] = useState(false);
+  const [readErr, setReadErr] = useState<string | null>(null);
   const [linked, setLinked] = useState<{ drepId: string; drepName?: string } | null>(null);
 
-  const detectAndLink = async (): Promise<void> => {
-    setDetecting(true);
-    setDetectErr(null);
+  const linkViaWallet = async (): Promise<void> => {
+    setReading(true);
+    setReadErr(null);
     try {
       const cardano = (
         window as unknown as {
-          cardano?: Record<string, { enable: (o?: unknown) => Promise<{ cip95?: { getPubDRepKey?: () => Promise<string> } }> }>;
+          cardano?: Record<
+            string,
+            { enable: (o?: unknown) => Promise<{ cip95?: { getPubDRepKey?: () => Promise<string> } }> }
+          >;
         }
       ).cardano;
       const connector = walletName ? cardano?.[walletName] : undefined;
@@ -223,15 +236,10 @@ function DrepLinkSection({ currentDrepId }: { currentDrepId?: string }): React.R
       if (!key) throw new Error(t('profileSetup.drepLink.noKeyError'));
       link.mutate({ drepKey: key }, { onSuccess: (r) => setLinked(r) });
     } catch (e) {
-      setDetectErr((e as Error)?.message ?? t('profileSetup.drepLink.readKeyError'));
+      setReadErr((e as Error)?.message ?? t('profileSetup.drepLink.readKeyError'));
     } finally {
-      setDetecting(false);
+      setReading(false);
     }
-  };
-
-  const linkPasted = (): void => {
-    if (!/^drep1[0-9a-z]{10,}$/.test(drepId.trim())) return;
-    link.mutate({ drepId: drepId.trim() }, { onSuccess: (r) => setLinked(r) });
   };
 
   const active = linked?.drepId ?? currentDrepId;
@@ -250,35 +258,24 @@ function DrepLinkSection({ currentDrepId }: { currentDrepId?: string }): React.R
           <p className="text-[12.5px] text-[var(--text-secondary)]">
             {t('profileSetup.drepLink.explainer')}
           </p>
+          <p className="text-[11.5px] text-[var(--text-secondary)]">
+            {t('profileSetup.drepLink.cip95Note')}
+          </p>
           <div className="flex flex-wrap gap-2">
-            {pasteDrepLinkAllowed() && (
-              <>
-                <input
-                  value={drepId}
-                  onChange={(e) => setDrepId(e.target.value)}
-                  placeholder={t('profileSetup.drepLink.drepIdPlaceholder')}
-                  className="flex-1 min-w-[220px] rounded-md border border-[var(--border-default)] bg-[var(--bg-canvas)] px-3 py-1.5 text-[12.5px] font-mono"
-                />
-                <button
-                  type="button"
-                  disabled={!/^drep1[0-9a-z]{10,}$/.test(drepId.trim()) || link.isPending}
-                  onClick={linkPasted}
-                  className="rounded-md bg-primary text-primary-foreground px-3 py-1.5 text-[12.5px] font-medium disabled:opacity-50"
-                >
-                  {link.isPending ? t('profileSetup.drepLink.linking') : t('profileSetup.drepLink.link')}
-                </button>
-              </>
-            )}
             <button
               type="button"
-              disabled={detecting || link.isPending}
-              onClick={() => void detectAndLink()}
-              className="rounded-md border border-[var(--border-default)] px-3 py-1.5 text-[12.5px] font-medium disabled:opacity-50"
+              disabled={reading || link.isPending}
+              onClick={() => void linkViaWallet()}
+              className="rounded-md bg-primary text-primary-foreground px-3 py-1.5 text-[12.5px] font-medium disabled:opacity-50"
             >
-              {detecting ? t('profileSetup.drepLink.reading') : t('profileSetup.drepLink.useWallet')}
+              {reading
+                ? t('profileSetup.drepLink.reading')
+                : link.isPending
+                  ? t('profileSetup.drepLink.signing')
+                  : t('profileSetup.drepLink.useWallet')}
             </button>
           </div>
-          {detectErr && <p className="text-[11.5px] text-[var(--danger)]">{detectErr}</p>}
+          {readErr && <p className="text-[11.5px] text-[var(--danger)]">{readErr}</p>}
           {link.isError && <p className="text-[11.5px] text-[var(--danger)]">{(link.error as Error)?.message}</p>}
         </>
       )}

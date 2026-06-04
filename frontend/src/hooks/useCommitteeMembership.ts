@@ -4,6 +4,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { useMutationSign } from '@/hooks/useMutationSign';
 import { committeeMessages } from '@/lib/committeeMessages';
 import { getStage } from '@/lib/stage';
+import { tryCip95SignData, type WalletApiWithCip95 } from '@/lib/cip95DrepLink';
 import type {
   RationaleMode,
   CheckMembersResponse,
@@ -34,18 +35,86 @@ export function useRegisterCommittee() {
   });
 }
 
-/** Link the connected wallet to its on-chain DRep (no committee required) so the
- *  user is recognized as a DRep across the platform. CIP-95 key (proves control)
- *  or pasted drep id (verified registered). */
+/**
+ * Link the connected wallet to its on-chain DRep (no committee required) so
+ * the user is recognized as a DRep across the platform.
+ *
+ * As of Feature 2 (2026-06) this is CIP-95 proof-of-control only. The wallet
+ * must sign a server-issued challenge with its DRep key; the backend
+ * verifies the COSE_Sign1 against the claimed drepKey before setting
+ * `users.drepId`. The whole flow (challenge → wallet sign → verify) is
+ * orchestrated by `linkDrepWithProof` below — this hook just packages it as
+ * a `useMutation` so callers get pending/error UX for free.
+ */
 export function useLinkDrep() {
   const qc = useQueryClient();
+  const walletName = useAuthStore((s) => s.walletName);
   return useMutation({
-    mutationFn: (vars: { drepKey?: string; drepId?: string }) =>
-      post<{ drepId: string; drepName?: string }>('/drep/link', vars),
+    mutationFn: (vars: { drepKey: string }) => linkDrepWithProof(vars.drepKey, walletName),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['auth', 'me'] });
       void qc.invalidateQueries({ queryKey: ['profile'] });
     },
+  });
+}
+
+/**
+ * End-to-end CIP-95 link flow:
+ *
+ *   1. POST /drep/link/challenge { drepKey } → { nonce, message, drepId }
+ *   2. Re-enable the wallet with the CIP-95 extension and call
+ *      `cip95.signData(<drepId-or-fallback>, hex(message))`. The first-arg
+ *      ambiguity is handled by `tryCip95SignData` — see its docstring.
+ *   3. POST /drep/link { drepKey, nonce, signature, key }.
+ *
+ * Throws on any step with a user-readable message — the caller surfaces it
+ * inline.
+ */
+async function linkDrepWithProof(
+  drepKey: string,
+  walletName: string | null,
+): Promise<{ drepId: string; drepName?: string }> {
+  if (!walletName) {
+    throw new Error(
+      'Wallet identity not retained from your last login. Please disconnect and re-connect your wallet, then try again.',
+    );
+  }
+
+  const cardano = (
+    window as unknown as {
+      cardano?: Record<
+        string,
+        { enable?: (o?: unknown) => Promise<WalletApiWithCip95> }
+      >;
+    }
+  ).cardano;
+  const connector = cardano?.[walletName];
+  if (!connector?.enable) {
+    throw new Error(
+      `Wallet "${walletName}" is not available — re-connect from the wallet menu and try again.`,
+    );
+  }
+  const api = await connector.enable({ extensions: [{ cip: 95 }] });
+  if (!api?.cip95) {
+    throw new Error('This wallet does not support CIP-95. Try Eternl, Lace, or Nufi.');
+  }
+
+  const challenge = await post<{ nonce: string; message: string; drepId: string }>(
+    '/drep/link/challenge',
+    { drepKey },
+  );
+
+  const sig = await tryCip95SignData({
+    api,
+    drepId: challenge.drepId,
+    message: challenge.message,
+  });
+
+  return post<{ drepId: string; drepName?: string }>('/drep/link', {
+    drepKey,
+    nonce: challenge.nonce,
+    signature: sig.signature,
+    key: sig.key,
   });
 }
 

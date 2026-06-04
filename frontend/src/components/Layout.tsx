@@ -22,7 +22,6 @@ import { useUiStore } from '@/stores/uiStore';
 import { useThemeStore } from '@/stores/themeStore';
 import { LanguageSwitcher } from '@/components/LanguageSwitcher';
 import { useEpoch } from '@/hooks/useEpoch';
-import { useAutoLinkDrep } from '@/hooks/useAutoLinkDrep';
 import { usePendingInvitations } from '@/hooks/useCommitteeInvitations';
 import { del } from '@/lib/api';
 import { Button } from '@/components/ui/Button';
@@ -150,9 +149,6 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
   const toggleTheme = useThemeStore((s) => s.toggle);
   const { data: epochInfo } = useEpoch();
 
-  // Auto-detect + link the connected wallet's DRep via CIP-95 (no user action).
-  useAutoLinkDrep();
-
   const clearAuth = useAuthStore((s) => s.clearAuth);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -179,11 +175,6 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
       await del('/auth/session'); // clears the session cookie server-side
     } catch {
       /* clear local state regardless */
-    }
-    try {
-      sessionStorage.removeItem('drep_autolink_attempted_for'); // re-detect on next login
-    } catch {
-      /* ignore */
     }
     clearAuth();
     navigate('/');
