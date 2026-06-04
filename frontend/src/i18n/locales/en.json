@@ -12,7 +12,9 @@
     "next": "Next",
     "confirm": "Confirm",
     "loading": "Loading…",
-    "reload": "Reload"
+    "reload": "Reload",
+    "showMore": "Show more",
+    "showLess": "Show less"
   },
   "language": {
     "label": "Language",
@@ -43,6 +45,52 @@
     "mainnet": "Mainnet",
     "epoch": "Epoch",
     "syncedKoios": "Synced from Koios"
+  },
+  "time": {
+    "justNow": "just now",
+    "minutesAgo": "{{count}}m ago",
+    "hoursAgo": "{{count}}h ago",
+    "daysAgo": "{{count}}d ago"
+  },
+  "status": {
+    "active": "Active",
+    "enacted": "Enacted",
+    "expired": "Expired",
+    "dropped": "Dropped",
+    "passed": "Passed",
+    "failed": "Failed",
+    "voting": "Voting",
+    "discussion": "Discussion",
+    "review": "Review",
+    "warning": "Warning",
+    "neutral": "Neutral",
+    "trusted": "Trusted"
+  },
+  "actionType": {
+    "ParameterChange": "Parameter Change",
+    "HardForkInitiation": "Hard Fork",
+    "TreasuryWithdrawals": "Treasury",
+    "NoConfidence": "No Confidence",
+    "UpdateCommittee": "Update Committee",
+    "NewConstitution": "New Constitution",
+    "InfoAction": "Info"
+  },
+  "actionCard": {
+    "discussionForum": "Discussion forum",
+    "discussionForumTitle": "Title and abstract sourced from gov.tools proposal-discussion forum (no on-chain anchor)",
+    "hashMismatch": "Hash mismatch",
+    "hashMismatchTitle": "The on-chain anchor hash doesn't match the served content. The content is shown for reference but its integrity cannot be cryptographically verified.",
+    "metadata": "Metadata",
+    "discussion": "Discussion",
+    "discussionLinkTitle": "View on gov.tools proposal-discussion forum",
+    "metadataUnavailable": "Metadata unavailable",
+    "metadataUnavailableTitle": "The on-chain anchor exists but its body could not be retrieved from any public IPFS gateway.",
+    "noOffChainMetadata": "(No off-chain metadata)",
+    "submitted": "Submitted {{time}}",
+    "epoch": "Epoch {{n}} ({{date}})",
+    "copyHashTitle": "Click to copy: {{id}}",
+    "hashCopied": "Hash copied",
+    "copyFailed": "Copy failed"
   },
   "guest": {
     "eyebrow": "Cardano Governance",
