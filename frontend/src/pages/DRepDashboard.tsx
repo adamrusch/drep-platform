@@ -1,5 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { FileText, Users, Calendar, RefreshCw } from 'lucide-react';
 import { useGovernanceActions, useGovernanceSync } from '@/hooks/useGovernanceActions';
 import { useEpoch } from '@/hooks/useEpoch';
@@ -11,17 +12,20 @@ import { StatTile } from '@/components/ui/StatTile';
 import { Button } from '@/components/ui/Button';
 import { DashboardRail } from '@/components/rails/DashboardRail';
 import { PageWithRail } from '@/components/Layout';
-import { formatRelativeTime } from '@/lib/utils';
-
-function formatCountdown(seconds: number): string {
-  const d = Math.floor(seconds / 86_400);
-  const h = Math.floor((seconds % 86_400) / 3600);
-  if (d > 0) return `Ends in ${d}d ${h}h`;
-  const m = Math.floor((seconds % 3600) / 60);
-  return `Ends in ${h}h ${m}m`;
-}
+import { useFormatters } from '@/hooks/useFormatters';
 
 export function DRepDashboard(): React.ReactElement {
+  const { t } = useTranslation();
+  const { formatRelativeTime } = useFormatters();
+
+  const formatCountdown = (seconds: number): string => {
+    const d = Math.floor(seconds / 86_400);
+    const h = Math.floor((seconds % 86_400) / 3600);
+    if (d > 0) return t('dashboard.countdown.days', { days: d, hours: h });
+    const m = Math.floor((seconds % 3600) / 60);
+    return t('dashboard.countdown.hours', { hours: h, minutes: m });
+  };
+
   const { drepId, roles } = useAuthStore();
   const { data, isLoading } = useGovernanceActions('active');
   const { data: epoch } = useEpoch();
@@ -47,13 +51,17 @@ export function DRepDashboard(): React.ReactElement {
   const center = (
     <>
       <HeroBand
-        title={`Welcome back${roles.includes('lead_drep') ? ', DRep' : ''}`}
-        subtitle="Review active governance, track your committee's positions, and respond to delegators."
+        title={
+          roles.includes('lead_drep')
+            ? t('dashboard.welcomeBackDrep')
+            : t('dashboard.welcomeBack')
+        }
+        subtitle={t('dashboard.drepSubtitle')}
         actions={
           <>
             {drepId && (
               <Button asChild variant="secondary" size="sm">
-                <Link to={`/drep/${drepId}`}>My Committee</Link>
+                <Link to={`/drep/${drepId}`}>{t('dashboard.myCommittee')}</Link>
               </Button>
             )}
             {isLeadDRep && (
@@ -64,7 +72,7 @@ export function DRepDashboard(): React.ReactElement {
                 disabled={syncMutation.isPending}
               >
                 <RefreshCw size={14} strokeWidth={2} />
-                {syncMutation.isPending ? 'Syncing…' : 'Sync Governance'}
+                {syncMutation.isPending ? t('dashboard.syncing') : t('dashboard.syncGovernance')}
               </Button>
             )}
           </>
@@ -74,19 +82,19 @@ export function DRepDashboard(): React.ReactElement {
       {/* Stat grid — 4 tiles, auto-fit minmax(180px, 1fr) per design */}
       <div className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(180px,1fr))]">
         <StatTile
-          label="Active Proposals"
+          label={t('dashboard.stat.activeProposals')}
           value={isLoading ? '—' : activeCount}
           icon={FileText}
           iconVariant="indigo"
         />
         <StatTile
-          label="Your DRep ID"
-          value={drepId ? `${drepId.slice(0, 10)}…` : 'Not registered'}
+          label={t('dashboard.stat.yourDrepId')}
+          value={drepId ? `${drepId.slice(0, 10)}…` : t('dashboard.stat.notRegistered')}
           icon={Users}
           iconVariant="violet"
         />
         <StatTile
-          label="Current Epoch"
+          label={t('dashboard.stat.currentEpoch')}
           value={epoch ? epoch.epoch : '—'}
           icon={Calendar}
           iconVariant="cyan"
@@ -97,7 +105,7 @@ export function DRepDashboard(): React.ReactElement {
           }
         />
         <StatTile
-          label="Last Sync"
+          label={t('dashboard.stat.lastSync')}
           value={lastSyncedAt ? formatRelativeTime(lastSyncedAt) : '—'}
           icon={RefreshCw}
           iconVariant="amber"
@@ -114,13 +122,13 @@ export function DRepDashboard(): React.ReactElement {
       <div>
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-[15px] font-semibold text-[var(--text-primary)]">
-            Hot Actions
+            {t('dashboard.hotActions')}
           </h2>
           <Link
             to="/governance"
             className="text-sm text-[var(--brand-primary)] hover:underline"
           >
-            View all →
+            {t('dashboard.viewAll')}
           </Link>
         </div>
         {isLoading ? (
@@ -134,7 +142,7 @@ export function DRepDashboard(): React.ReactElement {
           </div>
         ) : hotActions.length === 0 ? (
           <div className="text-center py-12 text-[var(--text-tertiary)] text-sm rounded-token-xl border border-[var(--border-default)] bg-[var(--bg-canvas)]">
-            No active governance actions right now.
+            {t('dashboard.noActiveActions')}
           </div>
         ) : (
           <div className="space-y-3">

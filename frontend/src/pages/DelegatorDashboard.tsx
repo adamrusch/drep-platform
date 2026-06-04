@@ -1,5 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
 import { FileText, Users, Calendar, RefreshCw } from 'lucide-react';
 import { useGovernanceActions } from '@/hooks/useGovernanceActions';
@@ -13,19 +14,23 @@ import { StatTile } from '@/components/ui/StatTile';
 import { Button } from '@/components/ui/Button';
 import { DashboardRail } from '@/components/rails/DashboardRail';
 import { PageWithRail } from '@/components/Layout';
-import { formatRelativeTime, formatWalletAddress } from '@/lib/utils';
+import { useFormatters } from '@/hooks/useFormatters';
+import { formatWalletAddress } from '@/lib/utils';
 import { get } from '@/lib/api';
 import type { DRepDetail } from '@/types';
 
-function formatCountdown(seconds: number): string {
-  const d = Math.floor(seconds / 86_400);
-  const h = Math.floor((seconds % 86_400) / 3600);
-  if (d > 0) return `Ends in ${d}d ${h}h`;
-  const m = Math.floor((seconds % 3600) / 60);
-  return `Ends in ${h}h ${m}m`;
-}
-
 export function DelegatorDashboard(): React.ReactElement {
+  const { t } = useTranslation();
+  const { formatRelativeTime } = useFormatters();
+
+  const formatCountdown = (seconds: number): string => {
+    const d = Math.floor(seconds / 86_400);
+    const h = Math.floor((seconds % 86_400) / 3600);
+    if (d > 0) return t('dashboard.countdown.days', { days: d, hours: h });
+    const m = Math.floor((seconds % 3600) / 60);
+    return t('dashboard.countdown.hours', { hours: h, minutes: m });
+  };
+
   useAuthStore();
   const { data: profile } = useMe();
   const { data, isLoading } = useGovernanceActions('active');
@@ -93,18 +98,22 @@ export function DelegatorDashboard(): React.ReactElement {
   const center = (
     <>
       <HeroBand
-        title={`Welcome${profile?.displayName ? `, ${profile.displayName}` : ' back'}`}
-        subtitle="Track active governance, follow your DRep, and weigh in on proposals you care about."
+        title={
+          profile?.displayName
+            ? t('dashboard.welcomeNamed', { name: profile.displayName })
+            : t('dashboard.welcomeBack')
+        }
+        subtitle={t('dashboard.delegatorSubtitle')}
         actions={
           <Button asChild variant="secondary" size="sm">
-            <Link to="/profile/setup">Edit Profile</Link>
+            <Link to="/profile/setup">{t('dashboard.editProfile')}</Link>
           </Button>
         }
       />
 
       <div className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(180px,1fr))]">
         <StatTile
-          label="Active Proposals"
+          label={t('dashboard.stat.activeProposals')}
           value={isLoading ? '—' : activeCount}
           icon={FileText}
           iconVariant="indigo"
@@ -113,10 +122,10 @@ export function DelegatorDashboard(): React.ReactElement {
           <Link
             to={`/drep/${encodeURIComponent(currentDrep.drepId)}`}
             className="block rounded-token-xl outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)] focus-visible:ring-offset-2 transition-colors hover:[&>div]:border-[var(--brand-primary)]"
-            aria-label={`View ${currentDrepName} profile`}
+            aria-label={t('dashboard.viewProfileAria', { name: currentDrepName })}
           >
             <StatTile
-              label="Your DRep"
+              label={t('dashboard.stat.yourDrep')}
               value={currentDrepName}
               icon={Users}
               iconVariant="violet"
@@ -124,14 +133,14 @@ export function DelegatorDashboard(): React.ReactElement {
           </Link>
         ) : (
           <StatTile
-            label="Your DRep"
-            value="Not delegated"
+            label={t('dashboard.stat.yourDrep')}
+            value={t('dashboard.stat.notDelegated')}
             icon={Users}
             iconVariant="violet"
           />
         )}
         <StatTile
-          label="Current Epoch"
+          label={t('dashboard.stat.currentEpoch')}
           value={epoch ? epoch.epoch : '—'}
           icon={Calendar}
           iconVariant="cyan"
@@ -142,7 +151,7 @@ export function DelegatorDashboard(): React.ReactElement {
           }
         />
         <StatTile
-          label="Last Sync"
+          label={t('dashboard.stat.lastSync')}
           value={lastSyncedAt ? formatRelativeTime(lastSyncedAt) : '—'}
           icon={RefreshCw}
           iconVariant="amber"
@@ -158,13 +167,13 @@ export function DelegatorDashboard(): React.ReactElement {
       <div>
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-[15px] font-semibold text-[var(--text-primary)]">
-            Hot Actions
+            {t('dashboard.hotActions')}
           </h2>
           <Link
             to="/governance"
             className="text-sm text-[var(--brand-primary)] hover:underline"
           >
-            View all →
+            {t('dashboard.viewAll')}
           </Link>
         </div>
         {isLoading ? (
@@ -178,7 +187,7 @@ export function DelegatorDashboard(): React.ReactElement {
           </div>
         ) : hotActions.length === 0 ? (
           <div className="text-center py-10 text-[var(--text-tertiary)] text-sm rounded-token-xl border border-[var(--border-default)] bg-[var(--bg-canvas)]">
-            No active governance actions right now.
+            {t('dashboard.noActiveActions')}
           </div>
         ) : (
           <div className="space-y-3">

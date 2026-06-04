@@ -25,6 +25,9 @@
 import { afterEach } from 'vitest';
 import { cleanup } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
+// Initialize i18next so components calling `t(...)` render the English source
+// strings in tests (rather than the raw key). Defaults to `en` (fallbackLng).
+import '@/i18n';
 
 afterEach(() => {
   cleanup();

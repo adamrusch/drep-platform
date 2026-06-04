@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import { useIsAuthenticated, useAuthStore } from '@/stores/authStore';
 import { useCreateComment } from '@/hooks/useComments';
 import { useMutationSign } from '@/hooks/useMutationSign';
@@ -25,6 +26,7 @@ export function CommentForm({
   onClose,
   className,
 }: CommentFormProps): React.ReactElement {
+  const { t } = useTranslation();
   const [body, setBody] = useState('');
   const [isPublic, setIsPublic] = useState(true);
   const [signing, setSigning] = useState(false);
@@ -49,9 +51,9 @@ export function CommentForm({
     try {
       signed = await signMutation();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to sign comment';
+      const msg = err instanceof Error ? err.message : t('comments.signFailedFallback');
       setError(msg);
-      addToast({ title: 'Signing failed', description: msg, variant: 'error' });
+      addToast({ title: t('comments.signingFailed'), description: msg, variant: 'error' });
       return;
     } finally {
       setSigning(false);
@@ -70,14 +72,14 @@ export function CommentForm({
       });
       setBody('');
       addToast({
-        title: isReply ? 'Reply posted' : 'Comment posted',
+        title: isReply ? t('comments.replyPosted') : t('comments.commentPosted'),
         variant: 'success',
       });
       onClose?.();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to post comment';
+      const msg = err instanceof Error ? err.message : t('comments.postFailedFallback');
       setError(msg);
-      addToast({ title: 'Error', description: msg, variant: 'error' });
+      addToast({ title: t('comments.error'), description: msg, variant: 'error' });
     }
   };
 
@@ -93,7 +95,7 @@ export function CommentForm({
           className,
         )}
       >
-        Connect your wallet to leave a comment.
+        {t('comments.connectToComment')}
       </div>
     );
   }
@@ -110,9 +112,10 @@ export function CommentForm({
           className,
         )}
       >
-        <strong className="font-semibold text-[var(--text-primary)]">Re-connect required.</strong>{' '}
-        Posting comments now requires a fresh wallet signature. Please disconnect
-        your wallet from the top bar, reconnect it, then come back here.
+        <Trans
+          i18nKey="comments.reconnectFull"
+          components={{ strong: <strong className="font-semibold text-[var(--text-primary)]" /> }}
+        />
       </div>
     );
   }
@@ -135,8 +138,8 @@ export function CommentForm({
         onChange={(e) => setBody(e.target.value)}
         placeholder={
           isReply
-            ? 'Write a reply…'
-            : 'Share your perspective on this governance action…'
+            ? t('comments.replyPlaceholder')
+            : t('comments.commentPlaceholder')
         }
         rows={isReply ? 3 : 4}
         maxLength={10_000}
@@ -160,12 +163,12 @@ export function CommentForm({
               disabled={isBusy}
               className="rounded accent-[var(--brand-primary)]"
             />
-            Make comment public
+            {t('comments.makePublic')}
           </label>
         )}
         <div className={cn('flex items-center gap-3', isReply && 'ml-auto')}>
           <span className="text-xs text-[var(--text-tertiary)] tabular-nums">
-            {body.length}/10,000
+            {t('comments.charCount', { count: body.length })}
           </span>
           {isReply && onClose && (
             <button
@@ -174,7 +177,7 @@ export function CommentForm({
               disabled={isBusy}
               className="text-xs text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:underline"
             >
-              Cancel
+              {t('comments.cancel')}
             </button>
           )}
           <Button
@@ -184,12 +187,12 @@ export function CommentForm({
             disabled={isBusy || !body.trim()}
           >
             {signing
-              ? 'Signing…'
+              ? t('comments.signing')
               : createComment.isPending
-                ? 'Posting…'
+                ? t('comments.posting')
                 : isReply
-                  ? 'Post Reply'
-                  : 'Post Comment'}
+                  ? t('comments.postReply')
+                  : t('comments.postComment')}
           </Button>
         </div>
       </div>
@@ -203,9 +206,7 @@ export function CommentForm({
       )}
       {!isReply && (
         <p className="text-[11px] text-[var(--text-muted)] leading-relaxed">
-          Posting requires a fresh wallet signature. Your wallet will prompt you
-          to sign a one-time message — this does not cost any fees and does not
-          broadcast a transaction.
+          {t('comments.signatureNote')}
         </p>
       )}
     </form>

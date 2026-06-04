@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import {
@@ -16,10 +17,10 @@ import { useUiStore } from '@/stores/uiStore';
 import type { CheckMemberResult, RationaleMode } from '@/types/committee';
 import type { CommitteeMember } from '@/types';
 
-const MODES: { value: RationaleMode; label: string }[] = [
-  { value: 'lead', label: 'Lead authors' },
-  { value: 'assigned', label: 'Lead assigns an editor' },
-  { value: 'collaborative', label: 'Collaborative (all members)' },
+const MODES: { value: RationaleMode; labelKey: string }[] = [
+  { value: 'lead', labelKey: 'committeeAdmin.rationaleMode.lead' },
+  { value: 'assigned', labelKey: 'committeeAdmin.rationaleMode.assigned' },
+  { value: 'collaborative', labelKey: 'committeeAdmin.rationaleMode.collaborative' },
 ];
 
 const inputCls =
@@ -42,6 +43,7 @@ export function CommitteeSettings({ drepId }: { drepId: string }): React.ReactEl
  * backend enforces the minimum-3 floor and the 1..N range.
  */
 function RosterCard({ drepId }: { drepId: string }): React.ReactElement {
+  const { t } = useTranslation();
   const details = useCommitteeDetails(drepId);
   const walletAddress = useAuthStore((s) => s.walletAddress);
   const addToast = useUiStore((s) => s.addToast);
@@ -102,10 +104,10 @@ function RosterCard({ drepId }: { drepId: string }): React.ReactElement {
     return (
       <Card>
         <CardHeader>
-          <CardTitle>Members</CardTitle>
+          <CardTitle>{t('committeeAdmin.roster.membersTitle')}</CardTitle>
         </CardHeader>
         <CardContent>
-          <p className="text-[13px] text-[var(--text-secondary)]">Loading…</p>
+          <p className="text-[13px] text-[var(--text-secondary)]">{t('committeeAdmin.roster.loading')}</p>
         </CardContent>
       </Card>
     );
@@ -114,11 +116,11 @@ function RosterCard({ drepId }: { drepId: string }): React.ReactElement {
     return (
       <Card>
         <CardHeader>
-          <CardTitle>Members</CardTitle>
+          <CardTitle>{t('committeeAdmin.roster.membersTitle')}</CardTitle>
         </CardHeader>
         <CardContent>
           <p className="text-[13px] text-[var(--danger)]">
-            {(details.error as Error)?.message ?? 'Could not load the committee.'}
+            {(details.error as Error)?.message ?? t('committeeAdmin.roster.loadError')}
           </p>
         </CardContent>
       </Card>
@@ -150,13 +152,13 @@ function RosterCard({ drepId }: { drepId: string }): React.ReactElement {
       },
       {
         onSuccess: () => {
-          addToast({ title: 'Member added', variant: 'success' });
+          addToast({ title: t('committeeAdmin.roster.memberAdded'), variant: 'success' });
           setNewAddress('');
           setNewCheck(null);
         },
         onError: (err) => {
           addToast({
-            title: 'Could not add member',
+            title: t('committeeAdmin.roster.addFailed'),
             description: (err as Error)?.message,
             variant: 'error',
           });
@@ -176,13 +178,13 @@ function RosterCard({ drepId }: { drepId: string }): React.ReactElement {
       { walletAddress: target, approvalThreshold: removalX },
       {
         onSuccess: () => {
-          addToast({ title: 'Member removed', variant: 'success' });
+          addToast({ title: t('committeeAdmin.roster.memberRemoved'), variant: 'success' });
           setRemovalTarget(null);
           setRemovalX(null);
         },
         onError: (err) => {
           addToast({
-            title: 'Could not remove member',
+            title: t('committeeAdmin.roster.removeFailed'),
             description: (err as Error)?.message,
             variant: 'error',
           });
@@ -194,12 +196,15 @@ function RosterCard({ drepId }: { drepId: string }): React.ReactElement {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Members</CardTitle>
+        <CardTitle>{t('committeeAdmin.roster.membersTitle')}</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         <p className="text-[12.5px] text-[var(--text-primary)]">
-          Approval rule: <strong>{currentX}</strong> of <strong>{N}</strong> members must
-          vote Agree for Committee Approved.
+          <Trans
+            i18nKey="committeeAdmin.roster.approvalRule"
+            values={{ x: currentX, n: N }}
+            components={{ strong: <strong /> }}
+          />
         </p>
         <ul className="space-y-1.5">
           {members.map((m, i) => (
@@ -211,8 +216,10 @@ function RosterCard({ drepId }: { drepId: string }): React.ReactElement {
               <div className="min-w-0 flex-1">
                 <div className="font-medium text-[var(--text-primary)]">
                   {m.role === 'lead_drep'
-                    ? `Chair${m.displayName ? ` — ${m.displayName}` : ''}`
-                    : (m.displayName ?? (m.active ? 'Active member' : 'Member'))}
+                    ? (m.displayName
+                        ? t('committeeAdmin.roster.chairNamed', { name: m.displayName })
+                        : t('committeeAdmin.roster.chair'))
+                    : (m.displayName ?? (m.active ? t('committeeAdmin.roster.activeMember') : t('committeeAdmin.roster.member')))}
                 </div>
                 <div className="truncate font-mono text-[11.5px] text-[var(--text-secondary)]">
                   {m.walletAddress}
@@ -226,7 +233,7 @@ function RosterCard({ drepId }: { drepId: string }): React.ReactElement {
                   onClick={() => beginRemove(m)}
                   disabled={removeMember.isPending}
                 >
-                  Remove
+                  {t('committeeAdmin.roster.remove')}
                 </Button>
               )}
             </li>
@@ -237,12 +244,15 @@ function RosterCard({ drepId }: { drepId: string }): React.ReactElement {
         {isLead && removalTarget && (
           <div className="space-y-2 rounded-token-md border border-[var(--danger)] bg-[var(--bg-muted)] p-3">
             <p className="text-[12.5px] text-[var(--text-primary)]">
-              Removing this member leaves <strong>{N - 1}</strong> members. Restate the
-              approval rule for the new committee size:
+              <Trans
+                i18nKey="committeeAdmin.roster.removalNotice"
+                values={{ n: N - 1 }}
+                components={{ strong: <strong /> }}
+              />
             </p>
             <div className="flex items-end gap-2">
               <label className="text-[12px] text-[var(--text-secondary)]">
-                X (1–{N - 1})
+                {t('committeeAdmin.roster.removalXLabel', { max: N - 1 })}
                 <input
                   type="number"
                   min={1}
@@ -262,7 +272,9 @@ function RosterCard({ drepId }: { drepId: string }): React.ReactElement {
                 disabled={removeMember.isPending || removalX === null || removalX < 1 || removalX > N - 1}
                 onClick={() => submitRemove(removalTarget)}
               >
-                {removeMember.isPending ? 'Signing…' : `Remove (sets ${removalX ?? '?'} of ${N - 1})`}
+                {removeMember.isPending
+                  ? t('committeeAdmin.roster.signing')
+                  : t('committeeAdmin.roster.removeSets', { x: removalX ?? '?', n: N - 1 })}
               </Button>
               <Button
                 size="sm"
@@ -273,7 +285,7 @@ function RosterCard({ drepId }: { drepId: string }): React.ReactElement {
                 }}
                 disabled={removeMember.isPending}
               >
-                Cancel
+                {t('committeeAdmin.roster.cancel')}
               </Button>
             </div>
           </div>
@@ -282,15 +294,15 @@ function RosterCard({ drepId }: { drepId: string }): React.ReactElement {
         {/* Add member: type address → live status → restate X for the new size N+1 */}
         {isLead && (
           <section className="space-y-2 border-t border-[var(--border-default)] pt-3">
-            <h3 className="text-[13px] font-medium text-[var(--text-primary)]">Add member</h3>
+            <h3 className="text-[13px] font-medium text-[var(--text-primary)]">{t('committeeAdmin.roster.addMember')}</h3>
             <div className="flex flex-wrap items-end gap-2">
               <div className="min-w-[240px] flex-1">
                 <label className="block text-[12px] text-[var(--text-secondary)]">
-                  Cardano address (payment or stake)
+                  {t('committeeAdmin.roster.addressLabel')}
                   <input
                     value={newAddress}
                     onChange={(e) => setNewAddress(e.target.value)}
-                    placeholder="addr1… or stake1…"
+                    placeholder={t('committeeAdmin.roster.addressPlaceholder')}
                     className={`${inputCls} mt-1 font-mono`}
                     autoComplete="off"
                     spellCheck={false}
@@ -308,7 +320,7 @@ function RosterCard({ drepId }: { drepId: string }): React.ReactElement {
                 />
               </div>
               <label className="text-[12px] text-[var(--text-secondary)]">
-                Restate X (1–{newCommitteeSize})
+                {t('committeeAdmin.roster.restateXLabel', { max: newCommitteeSize })}
                 <input
                   type="number"
                   min={1}
@@ -328,14 +340,13 @@ function RosterCard({ drepId }: { drepId: string }): React.ReactElement {
                 disabled={!addPossible || !xValid || addMember.isPending}
                 onClick={submitAdd}
               >
-                {addMember.isPending ? 'Signing…' : `Add (sets ${pendingX ?? '?'} of ${newCommitteeSize})`}
+                {addMember.isPending
+                  ? t('committeeAdmin.roster.signing')
+                  : t('committeeAdmin.roster.addSets', { x: pendingX ?? '?', n: newCommitteeSize })}
               </Button>
             </div>
             <p className="text-[11.5px] text-[var(--text-secondary)]">
-              Adding a member changes N to {newCommitteeSize}, so you must restate the X-of-N
-              rule. The address can be a payment address (addr1…) or stake address (stake1…).
-              "Not active" addresses are still addable — they just need to be invited to sign
-              in.
+              {t('committeeAdmin.roster.addHelp', { n: newCommitteeSize })}
             </p>
             {addMember.isError && (
               <p className="text-[12px] text-[var(--danger)]">
@@ -350,13 +361,14 @@ function RosterCard({ drepId }: { drepId: string }): React.ReactElement {
 }
 
 function MemberActiveBadge({ active }: { active: boolean }): React.ReactElement {
+  const { t } = useTranslation();
   return active ? (
     <span className="shrink-0 rounded-full bg-[var(--success)] px-2 py-0.5 text-[11px] font-medium text-white">
-      Active ✓
+      {t('committeeAdmin.memberBadge.active')}
     </span>
   ) : (
     <span className="shrink-0 rounded-full border border-[var(--danger)] px-2 py-0.5 text-[11px] font-medium text-[var(--danger)]">
-      Not active ✗
+      {t('committeeAdmin.memberBadge.notActive')}
     </span>
   );
 }
@@ -368,29 +380,30 @@ function AddMemberStatus({
   result: CheckMemberResult | null;
   alreadyMember: boolean;
 }): React.ReactElement | null {
+  const { t } = useTranslation();
   if (!result) return null;
   if (!result.valid) {
     return (
       <p className="mt-1 text-[11.5px] text-[var(--danger)]">
-        Not a valid Cardano payment or stake address.
+        {t('committeeAdmin.addStatus.invalid')}
       </p>
     );
   }
   if (alreadyMember) {
     return (
       <p className="mt-1 text-[11.5px] text-[var(--danger)]">
-        This address is already a member of the committee.
+        {t('committeeAdmin.addStatus.alreadyMember')}
       </p>
     );
   }
   return (
     <p className="mt-1 text-[11.5px] text-[var(--text-secondary)]">
       {result.active ? (
-        <span className="text-[var(--success)]">✓ Active</span>
+        <span className="text-[var(--success)]">{t('committeeAdmin.addStatus.active')}</span>
       ) : (
-        <span className="text-[var(--danger)]">✗ Not active — they'll need to sign in</span>
+        <span className="text-[var(--danger)]">{t('committeeAdmin.addStatus.notActive')}</span>
       )}
-      {result.displayName ? ` — ${result.displayName}` : ''}
+      {result.displayName ? t('committeeAdmin.addStatus.named', { name: result.displayName }) : ''}
     </p>
   );
 }
@@ -404,6 +417,7 @@ function AddMemberStatus({
  * removing a member is where the rule changes.
  */
 function CommitteeOtherSettingsCard({ drepId }: { drepId: string }): React.ReactElement {
+  const { t } = useTranslation();
   const config = useUpdateVotingConfig(drepId);
   const storeKey = useStoreIpfsKey(drepId);
   const keyStatus = useIpfsKeyStatus(drepId);
@@ -424,15 +438,15 @@ function CommitteeOtherSettingsCard({ drepId }: { drepId: string }): React.React
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Other settings</CardTitle>
+        <CardTitle>{t('committeeAdmin.other.title')}</CardTitle>
       </CardHeader>
       <CardContent className="space-y-6">
         {/* Rationale mode */}
         <section className="space-y-2">
-          <h3 className="text-[13px] font-medium text-[var(--text-primary)]">Rationale authoring</h3>
+          <h3 className="text-[13px] font-medium text-[var(--text-primary)]">{t('committeeAdmin.other.rationaleAuthoring')}</h3>
           <div className="flex flex-wrap items-end gap-3">
             <label className="text-[12px] text-[var(--text-secondary)]">
-              Mode
+              {t('committeeAdmin.other.modeLabel')}
               <select
                 value={rationaleMode}
                 onChange={(e) => setRationaleMode(e.target.value as RationaleMode)}
@@ -440,14 +454,14 @@ function CommitteeOtherSettingsCard({ drepId }: { drepId: string }): React.React
               >
                 {MODES.map((m) => (
                   <option key={m.value} value={m.value}>
-                    {m.label}
+                    {t(m.labelKey)}
                   </option>
                 ))}
               </select>
             </label>
             {rationaleMode === 'assigned' && (
               <label className="flex-1 text-[12px] text-[var(--text-secondary)]">
-                Assigned editor wallet
+                {t('committeeAdmin.other.assignedEditorLabel')}
                 <input
                   value={assignedEditor}
                   onChange={(e) => setAssignedEditor(e.target.value)}
@@ -472,7 +486,7 @@ function CommitteeOtherSettingsCard({ drepId }: { drepId: string }): React.React
                 })
               }
             >
-              {config.isPending ? 'Signing…' : 'Save rationale mode'}
+              {config.isPending ? t('committeeAdmin.other.signing') : t('committeeAdmin.other.saveRationaleMode')}
             </Button>
           </div>
           {config.isError && (
@@ -482,18 +496,18 @@ function CommitteeOtherSettingsCard({ drepId }: { drepId: string }): React.React
 
         {/* IPFS key */}
         <section className="space-y-2">
-          <h3 className="text-[13px] font-medium text-[var(--text-primary)]">IPFS pinning key</h3>
+          <h3 className="text-[13px] font-medium text-[var(--text-primary)]">{t('committeeAdmin.other.ipfsTitle')}</h3>
           <p className="text-[11.5px] text-[var(--text-secondary)]">
             {keyStatus.data?.stored
-              ? 'A key is stored (encrypted).'
-              : 'No key stored. Recommended: a Blockfrost IPFS project id.'}
+              ? t('committeeAdmin.other.ipfsStored')
+              : t('committeeAdmin.other.ipfsNone')}
           </p>
           <div className="flex flex-wrap items-end gap-2">
             <input
               type="password"
               value={ipfsKey}
               onChange={(e) => setIpfsKey(e.target.value)}
-              placeholder="IPFS project id"
+              placeholder={t('committeeAdmin.other.ipfsPlaceholder')}
               className={`${inputCls} flex-1`}
             />
             <Button
@@ -507,7 +521,7 @@ function CommitteeOtherSettingsCard({ drepId }: { drepId: string }): React.React
                 )
               }
             >
-              {storeKey.isPending ? 'Saving…' : 'Save key'}
+              {storeKey.isPending ? t('committeeAdmin.other.saving') : t('committeeAdmin.other.saveKey')}
             </Button>
           </div>
         </section>
@@ -521,6 +535,7 @@ function CommitteeOtherSettingsCard({ drepId }: { drepId: string }): React.React
  *  lead even though the parent already gates: defense-in-depth keeps the form
  *  off the screen for non-leads in any future caller. */
 function CommitteeDetailsCard({ drepId }: { drepId: string }): React.ReactElement | null {
+  const { t } = useTranslation();
   const walletAddress = useAuthStore((s) => s.walletAddress);
   const addToast = useUiStore((s) => s.addToast);
   const details = useCommitteeDetails(drepId);
@@ -542,10 +557,10 @@ function CommitteeDetailsCard({ drepId }: { drepId: string }): React.ReactElemen
     return (
       <Card>
         <CardHeader>
-          <CardTitle>Committee details</CardTitle>
+          <CardTitle>{t('committeeAdmin.details.title')}</CardTitle>
         </CardHeader>
         <CardContent>
-          <p className="text-[13px] text-[var(--text-secondary)]">Loading…</p>
+          <p className="text-[13px] text-[var(--text-secondary)]">{t('committeeAdmin.details.loading')}</p>
         </CardContent>
       </Card>
     );
@@ -555,11 +570,11 @@ function CommitteeDetailsCard({ drepId }: { drepId: string }): React.ReactElemen
     return (
       <Card>
         <CardHeader>
-          <CardTitle>Committee details</CardTitle>
+          <CardTitle>{t('committeeAdmin.details.title')}</CardTitle>
         </CardHeader>
         <CardContent>
           <p className="text-[13px] text-[var(--danger)]">
-            {(details.error as Error)?.message ?? 'Could not load committee details.'}
+            {(details.error as Error)?.message ?? t('committeeAdmin.details.loadError')}
           </p>
         </CardContent>
       </Card>
@@ -583,11 +598,11 @@ function CommitteeDetailsCard({ drepId }: { drepId: string }): React.ReactElemen
     if (Object.keys(body).length === 0) return;
     update.mutate(body, {
       onSuccess: () => {
-        addToast({ title: 'Committee details updated', variant: 'success' });
+        addToast({ title: t('committeeAdmin.details.updated'), variant: 'success' });
       },
       onError: (err) => {
         addToast({
-          title: 'Could not update committee',
+          title: t('committeeAdmin.details.updateFailed'),
           description: (err as Error)?.message,
           variant: 'error',
         });
@@ -598,30 +613,30 @@ function CommitteeDetailsCard({ drepId }: { drepId: string }): React.ReactElemen
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Committee details</CardTitle>
+        <CardTitle>{t('committeeAdmin.details.title')}</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
         <label className="block text-[12px] text-[var(--text-secondary)]">
-          Committee name
+          {t('committeeAdmin.details.nameLabel')}
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
             className={`${inputCls} mt-1`}
-            placeholder="Committee name"
+            placeholder={t('committeeAdmin.details.namePlaceholder')}
           />
         </label>
         <label className="block text-[12px] text-[var(--text-secondary)]">
-          Description
+          {t('committeeAdmin.details.descriptionLabel')}
           <textarea
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             className={`${inputCls} mt-1 min-h-[90px] resize-y`}
-            placeholder="What this committee stands for…"
+            placeholder={t('committeeAdmin.details.descriptionPlaceholder')}
           />
         </label>
         <div className="flex items-center gap-2">
           <Button size="sm" variant="primary" disabled={!canSave} onClick={submit}>
-            {update.isPending ? 'Saving…' : 'Save changes'}
+            {update.isPending ? t('committeeAdmin.details.saving') : t('committeeAdmin.details.saveChanges')}
           </Button>
           {dirty && !update.isPending && (
             <Button
@@ -632,13 +647,13 @@ function CommitteeDetailsCard({ drepId }: { drepId: string }): React.ReactElemen
                 setDescription(details.data?.description ?? '');
               }}
             >
-              Reset
+              {t('committeeAdmin.details.reset')}
             </Button>
           )}
         </div>
         {update.isError && (
           <p className="text-[12px] text-[var(--danger)]">
-            {(update.error as Error)?.message ?? 'Could not update committee.'}
+            {(update.error as Error)?.message ?? t('committeeAdmin.details.updateError')}
           </p>
         )}
       </CardContent>

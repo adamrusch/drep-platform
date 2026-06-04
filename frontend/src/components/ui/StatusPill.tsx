@@ -1,4 +1,5 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
 
 /**
@@ -25,7 +26,8 @@ const STATUS_TO_CLASSES: Record<string, string> = {
 
 interface StatusPillProps extends React.HTMLAttributes<HTMLSpanElement> {
   status: string;
-  /** Optional label override; defaults to capitalized `status`. */
+  /** Optional label override. When omitted, the translated `status.<key>`
+   *  label is used (falling back to a capitalized `status`). */
   label?: string;
 }
 
@@ -35,9 +37,13 @@ export function StatusPill({
   className,
   ...props
 }: StatusPillProps): React.ReactElement {
+  const { t } = useTranslation();
   const key = status.toLowerCase();
   const classes = STATUS_TO_CLASSES[key] ?? STATUS_TO_CLASSES.neutral;
-  const display = label ?? status.charAt(0).toUpperCase() + status.slice(1);
+  // Explicit label wins; otherwise translate the known status key, falling back
+  // to a capitalized version of the raw status string.
+  const fallback = status.charAt(0).toUpperCase() + status.slice(1);
+  const display = label ?? t(`status.${key}`, { defaultValue: fallback });
   return (
     <span
       className={cn(

@@ -1,4 +1,5 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import { useParams, Link } from 'react-router-dom';
 import { ChevronLeft, ExternalLink, Lock, Share2, Vote } from 'lucide-react';
 import * as Tabs from '@radix-ui/react-tabs';
@@ -18,7 +19,8 @@ import { ProposalRail } from '@/components/rails/ProposalRail';
 import { PageWithRail } from '@/components/Layout';
 import { useAuthStore } from '@/stores/authStore';
 import { useUiStore } from '@/stores/uiStore';
-import { cn, epochsToDate, formatRelativeTime } from '@/lib/utils';
+import { useFormatters } from '@/hooks/useFormatters';
+import { cn } from '@/lib/utils';
 import type { GovernanceAction } from '@/types';
 
 /** Header title slot. The page also renders a fallback (synthesized
@@ -93,6 +95,8 @@ const TAB_TRIGGER_CLASSES = cn(
 );
 
 export function GovernanceActionPage(): React.ReactElement {
+  const { t } = useTranslation();
+  const { formatRelativeTime, formatEpochDate } = useFormatters();
   const { actionId } = useParams<{ actionId: string }>();
   const { data: action, isLoading, error } = useGovernanceAction(actionId ?? '');
   const { data: commentsData, isLoading: commentsLoading } = useComments(actionId ?? '');
@@ -118,12 +122,12 @@ export function GovernanceActionPage(): React.ReactElement {
   if (error || !action) {
     return (
       <div className="text-center py-16">
-        <h2 className="text-xl font-semibold mb-2">Governance action not found</h2>
+        <h2 className="text-xl font-semibold mb-2">{t('governanceAction.notFound')}</h2>
         <Link
           to="/governance"
           className="text-[var(--brand-primary)] hover:underline text-sm"
         >
-          Back to governance list
+          {t('governanceAction.backToList')}
         </Link>
       </div>
     );
@@ -135,7 +139,9 @@ export function GovernanceActionPage(): React.ReactElement {
   // label so we never blast the raw 64-char hash into a share dialog.
   const shareTitle =
     title ??
-    (action.summary && action.summary.length > 0 ? action.summary : 'Governance action');
+    (action.summary && action.summary.length > 0
+      ? action.summary
+      : t('governanceAction.fallbackTitle'));
   const hasAnchorIndicator = typeof action.anchorVerified === 'boolean';
   // Tab badge counts TOP-LEVEL comments only — replies are hidden by
   // default behind a per-comment chevron, so counting them here would
@@ -151,9 +157,9 @@ export function GovernanceActionPage(): React.ReactElement {
   const handleCopyHash = async (): Promise<void> => {
     try {
       await navigator.clipboard.writeText(action.actionId);
-      addToast({ title: 'Hash copied', variant: 'success' });
+      addToast({ title: t('governanceAction.hashCopied'), variant: 'success' });
     } catch {
-      addToast({ title: 'Copy failed', variant: 'error' });
+      addToast({ title: t('governanceAction.copyFailed'), variant: 'error' });
     }
   };
 
@@ -166,7 +172,7 @@ export function GovernanceActionPage(): React.ReactElement {
           className="flex items-center gap-1 hover:text-[var(--brand-primary)]"
         >
           <ChevronLeft size={14} strokeWidth={1.75} />
-          <span>Governance</span>
+          <span>{t('governanceAction.breadcrumb')}</span>
         </Link>
         <span className="crumbs__sep">/</span>
         <span className="text-[var(--text-primary)] truncate">{shareTitle}</span>
@@ -176,7 +182,7 @@ export function GovernanceActionPage(): React.ReactElement {
       <div className="space-y-2.5">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-[11.5px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">
-            {action.actionType}
+            {t(`actionType.${action.actionType}`, { defaultValue: action.actionType })}
           </span>
           <StatusPill
             status={action.status}
@@ -197,19 +203,19 @@ export function GovernanceActionPage(): React.ReactElement {
           {action.anchorHashMismatch ? (
             <StatusPill
               status="warning"
-              label="Hash mismatch"
-              title="The on-chain anchor hash doesn't match the served content. The content is shown for reference but its integrity cannot be cryptographically verified."
+              label={t('governanceAction.hashMismatch')}
+              title={t('governanceAction.hashMismatchTooltip')}
             />
           ) : hasAnchorIndicator && action.anchorVerified ? (
-            <StatusPill status="passed" label="Anchor verified" />
+            <StatusPill status="passed" label={t('governanceAction.anchorVerified')} />
           ) : hasAnchorIndicator ? (
-            <StatusPill status="warning" label="Anchor mismatch" />
+            <StatusPill status="warning" label={t('governanceAction.anchorMismatch')} />
           ) : null}
           {action.metadataSource === 'proposal-pillar' && (
             <StatusPill
               status="discussion"
-              label="Discussion forum"
-              title="Title and abstract sourced from gov.tools proposal-discussion forum (no on-chain anchor)"
+              label={t('governanceAction.discussionForum')}
+              title={t('governanceAction.discussionForumTooltip')}
             />
           )}
           <span className="ml-auto flex items-center gap-1.5">
@@ -221,7 +227,7 @@ export function GovernanceActionPage(): React.ReactElement {
                 className="inline-flex items-center gap-1 text-[12px] text-[var(--text-tertiary)] hover:text-[var(--brand-primary)] hover:underline"
                 title={action.anchorUrl}
               >
-                Metadata
+                {t('governanceAction.metadata')}
                 <ExternalLink size={12} strokeWidth={2} aria-hidden="true" />
               </a>
             )}
@@ -231,7 +237,7 @@ export function GovernanceActionPage(): React.ReactElement {
                 trigger={
                   <Button variant="primary" size="sm">
                     <Vote size={14} strokeWidth={2} />
-                    Cast Vote
+                    {t('governanceAction.castVote')}
                   </Button>
                 }
               />
@@ -243,8 +249,8 @@ export function GovernanceActionPage(): React.ReactElement {
                 <Button
                   variant="ghost"
                   size="icon"
-                  aria-label="Share proposal"
-                  title="Share proposal"
+                  aria-label={t('governanceAction.shareProposal')}
+                  title={t('governanceAction.shareProposal')}
                 >
                   <Share2 size={16} strokeWidth={1.75} />
                 </Button>
@@ -267,9 +273,9 @@ export function GovernanceActionPage(): React.ReactElement {
           <div className="flex items-baseline gap-2 flex-wrap">
             <h1
               className="text-[20px] italic font-medium leading-tight text-[var(--text-tertiary)]"
-              title="The on-chain anchor exists but its body could not be retrieved from any public IPFS gateway."
+              title={t('governanceAction.metadataUnavailableTooltip')}
             >
-              Metadata unavailable
+              {t('governanceAction.metadataUnavailable')}
             </h1>
             <a
               href={action.anchorUrl}
@@ -278,13 +284,13 @@ export function GovernanceActionPage(): React.ReactElement {
               className="inline-flex items-center gap-1 text-[12px] text-[var(--text-tertiary)] hover:text-[var(--brand-primary)] hover:underline"
               title={action.anchorUrl}
             >
-              View anchor URL
+              {t('governanceAction.viewAnchorUrl')}
               <ExternalLink size={11} strokeWidth={2} aria-hidden="true" />
             </a>
           </div>
         ) : (
           <h1 className="text-[20px] italic font-medium leading-tight text-[var(--text-tertiary)]">
-            (No off-chain metadata)
+            {t('governanceAction.noOffChainMetadata')}
           </h1>
         )}
         {action.summary && action.summary.length > 0 && (
@@ -296,7 +302,7 @@ export function GovernanceActionPage(): React.ReactElement {
           <button
             type="button"
             onClick={() => void handleCopyHash()}
-            title={`Click to copy: ${action.actionId}`}
+            title={t('governanceAction.copyToClipboard', { value: action.actionId })}
             className={cn(
               'text-[11px] font-mono text-[var(--text-muted)] break-all',
               'hover:text-[var(--brand-primary)] text-left',
@@ -329,9 +335,9 @@ export function GovernanceActionPage(): React.ReactElement {
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1 text-[11.5px] text-[var(--text-tertiary)] hover:text-[var(--brand-primary)] hover:underline"
-              title="View discussion thread on gov.tools"
+              title={t('governanceAction.viewDiscussionThreadTooltip')}
             >
-              View discussion thread
+              {t('governanceAction.viewDiscussionThread')}
               <ExternalLink size={11} strokeWidth={2} aria-hidden="true" />
             </a>
           )}
@@ -342,7 +348,7 @@ export function GovernanceActionPage(): React.ReactElement {
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 rounded-token-lg border border-[var(--border-default)] bg-[var(--bg-subtle)] p-4 text-sm">
         <div>
           <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)] mb-0.5">
-            Submitted
+            {t('governanceAction.submitted')}
           </div>
           <div className="font-medium text-[var(--text-primary)]">
             {formatRelativeTime(action.submittedAt)}
@@ -350,16 +356,19 @@ export function GovernanceActionPage(): React.ReactElement {
         </div>
         <div>
           <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)] mb-0.5">
-            Epoch Deadline
+            {t('governanceAction.epochDeadline')}
           </div>
           <div className="font-medium text-[var(--text-primary)]">
-            Epoch {action.epochDeadline} ({epochsToDate(action.epochDeadline)})
+            {t('governanceAction.epochDeadlineValue', {
+              epoch: action.epochDeadline,
+              date: formatEpochDate(action.epochDeadline),
+            })}
           </div>
         </div>
         {action.lastSyncedAt && (
           <div>
             <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)] mb-0.5">
-              Last Synced
+              {t('governanceAction.lastSynced')}
             </div>
             <div className="font-medium text-[var(--text-primary)]">
               {formatRelativeTime(action.lastSyncedAt)}
@@ -375,16 +384,16 @@ export function GovernanceActionPage(): React.ReactElement {
             'flex items-end gap-1 border-b border-[var(--border-default)]',
             'overflow-x-auto -mb-px',
           )}
-          aria-label="Governance action sections"
+          aria-label={t('governanceAction.sectionsAriaLabel')}
         >
           <Tabs.Trigger value="overview" className={TAB_TRIGGER_CLASSES}>
-            Overview
+            {t('governanceAction.tabOverview')}
           </Tabs.Trigger>
           <Tabs.Trigger value="rationale" className={TAB_TRIGGER_CLASSES}>
-            Rationale
+            {t('governanceAction.tabRationale')}
           </Tabs.Trigger>
           <Tabs.Trigger value="comments" className={TAB_TRIGGER_CLASSES}>
-            Public Comments
+            {t('governanceAction.tabComments')}
             {commentCount > 0 && (
               <span className="ml-1.5 inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-token-full bg-[var(--bg-muted)] text-[11px] font-semibold text-[var(--text-tertiary)] tabular-nums">
                 {commentCount}
@@ -392,7 +401,7 @@ export function GovernanceActionPage(): React.ReactElement {
             )}
           </Tabs.Trigger>
           <Tabs.Trigger value="votes" className={TAB_TRIGGER_CLASSES}>
-            Votes
+            {t('governanceAction.tabVotes')}
             {action.voteList && action.voteList.length > 0 && (
               <span className="ml-1.5 inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-token-full bg-[var(--bg-muted)] text-[11px] font-semibold text-[var(--text-tertiary)] tabular-nums">
                 {action.voteList.length}
@@ -400,7 +409,7 @@ export function GovernanceActionPage(): React.ReactElement {
             )}
           </Tabs.Trigger>
           <Tabs.Trigger value="clubhouse" className={TAB_TRIGGER_CLASSES}>
-            Delegator Clubhouse
+            {t('governanceAction.tabClubhouse')}
           </Tabs.Trigger>
         </Tabs.List>
 
@@ -410,18 +419,18 @@ export function GovernanceActionPage(): React.ReactElement {
           <Card>
             {action.votes ? (
               <SentimentBlock
-                title="On-Chain Votes"
-                caption="DRep / SPO / Constitutional Committee"
+                title={t('governanceAction.onChainVotes')}
+                caption={t('governanceAction.onChainVotesCaption')}
                 tally={action.votes}
                 votingRoles={action.votingRoles}
               />
             ) : (
               <div className="py-8 text-center text-sm text-[var(--text-tertiary)]">
                 <div className="font-semibold text-[var(--text-primary)] mb-1">
-                  Vote tallies will appear after the next sync
+                  {t('governanceAction.tallyPendingTitle')}
                 </div>
                 <div>
-                  This action has not been re-enriched with on-chain vote data yet.
+                  {t('governanceAction.tallyPendingBody')}
                 </div>
               </div>
             )}
@@ -431,7 +440,7 @@ export function GovernanceActionPage(): React.ReactElement {
           {action.abstract && (
             <Card>
               <h2 className="font-semibold text-[15px] mb-2 text-[var(--text-primary)]">
-                Abstract
+                {t('governanceAction.abstract')}
               </h2>
               <Markdown>{action.abstract}</Markdown>
             </Card>
@@ -441,7 +450,7 @@ export function GovernanceActionPage(): React.ReactElement {
           {action.motivation && (
             <Card>
               <h2 className="font-semibold text-[15px] mb-2 text-[var(--text-primary)]">
-                Motivation
+                {t('governanceAction.motivation')}
               </h2>
               <Markdown>{action.motivation}</Markdown>
             </Card>
@@ -451,7 +460,7 @@ export function GovernanceActionPage(): React.ReactElement {
           {action.details && action.details.length > 0 && (
             <Card>
               <h2 className="font-semibold text-[15px] mb-2 text-[var(--text-primary)]">
-                On-chain Details
+                {t('governanceAction.onChainDetails')}
               </h2>
               <dl className="grid grid-cols-1 sm:grid-cols-[max-content_1fr] gap-x-6 gap-y-2 text-sm">
                 {action.details.map((d, i) => (
@@ -470,7 +479,7 @@ export function GovernanceActionPage(): React.ReactElement {
           {!action.abstract && !action.motivation && !action.rationale && action.description && (
             <Card>
               <h2 className="font-semibold text-[15px] mb-2 text-[var(--text-primary)]">
-                Description
+                {t('governanceAction.description')}
               </h2>
               <ProseBlock text={action.description} />
             </Card>
@@ -480,7 +489,7 @@ export function GovernanceActionPage(): React.ReactElement {
           {action.references && action.references.length > 0 && (
             <Card>
               <h2 className="font-semibold text-[15px] mb-2 text-[var(--text-primary)]">
-                References
+                {t('governanceAction.references')}
               </h2>
               <ul className="space-y-1.5">
                 {action.references.map((ref, i) =>
@@ -501,7 +510,7 @@ export function GovernanceActionPage(): React.ReactElement {
                       className="text-sm text-[var(--text-tertiary)] break-all"
                     >
                       {ref.label || ref.uri}{' '}
-                      <span className="text-xs">(unsupported scheme)</span>
+                      <span className="text-xs">{t('governanceAction.unsupportedScheme')}</span>
                     </li>
                   ),
                 )}
@@ -513,7 +522,7 @@ export function GovernanceActionPage(): React.ReactElement {
           {action.anchorUrl && (
             <Card className="text-xs text-[var(--text-tertiary)] space-y-1">
               <div>
-                <span className="font-medium text-[var(--text-secondary)]">Anchor URL: </span>
+                <span className="font-medium text-[var(--text-secondary)]">{t('governanceAction.anchorUrlLabel')}</span>
                 <span className="break-all">{action.anchorUrl}</span>
               </div>
               {action.anchorRecoveredFromCommit && (
@@ -525,7 +534,7 @@ export function GovernanceActionPage(): React.ReactElement {
                    user where the bytes came from. */
                 <div>
                   <span className="font-medium text-[var(--text-secondary)]">
-                    Recovered from historical commit:{' '}
+                    {t('governanceAction.recoveredFromCommit')}
                   </span>
                   <span className="font-mono">{action.anchorRecoveredFromCommit}</span>
                   {action.anchorRecoveredFromCommitDate && (
@@ -538,14 +547,14 @@ export function GovernanceActionPage(): React.ReactElement {
               )}
               {action.anchorHash && (
                 <div>
-                  <span className="font-medium text-[var(--text-secondary)]">Anchor hash: </span>
+                  <span className="font-medium text-[var(--text-secondary)]">{t('governanceAction.anchorHashLabel')}</span>
                   <span className="break-all font-mono">{action.anchorHash}</span>
                 </div>
               )}
               {action.proposerAddress && (
                 <div>
                   <span className="font-medium text-[var(--text-secondary)]">
-                    Deposit return address:{' '}
+                    {t('governanceAction.depositReturnAddress')}
                   </span>
                   <span className="break-all font-mono">{action.proposerAddress}</span>
                 </div>
@@ -573,7 +582,7 @@ export function GovernanceActionPage(): React.ReactElement {
           ) : (
             <Card>
               <div className="py-6 text-center text-sm text-[var(--text-tertiary)]">
-                No rationale published for this action.
+                {t('governanceAction.noRationale')}
               </div>
             </Card>
           )}
@@ -600,12 +609,10 @@ export function GovernanceActionPage(): React.ReactElement {
                 className="mx-auto mb-3 text-[var(--text-muted)]"
               />
               <div className="font-semibold text-[var(--text-primary)] mb-1">
-                Delegator clubhouse — coming soon
+                {t('governanceAction.clubhouseComingSoon')}
               </div>
               <p className="text-sm text-[var(--text-tertiary)] max-w-md mx-auto">
-                Per-DRep clubhouse threads tied to this governance action will land in a
-                future release. For now, public discussion happens in the Public Comments
-                tab.
+                {t('governanceAction.clubhouseBody')}
               </p>
             </div>
           </Card>
