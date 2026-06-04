@@ -218,6 +218,7 @@ export class ApiStack extends cdk.Stack {
     const drepGetFn = fn('DRepGetFn', 'handlers/drep/get.ts');
     const drepRegisterFn = fn('DRepRegisterFn', 'handlers/drep/register.ts');
     const drepLinkFn = fn('DRepLinkFn', 'handlers/drep/linkDrep.ts');
+    const drepLinkChallengeFn = fn('DRepLinkChallengeFn', 'handlers/drep/linkChallenge.ts');
     const drepUpdateFn = fn('DRepUpdateFn', 'handlers/drep/update.ts');
 
     // ---- Committee voting handlers (Phase 2) ----
@@ -450,6 +451,7 @@ export class ApiStack extends cdk.Stack {
     addRoute(apigwv2.HttpMethod.GET, '/drep', drepListFn, 'DRepList');
     addRoute(apigwv2.HttpMethod.POST, '/drep', drepRegisterFn, 'DRepRegister', true);
     addRoute(apigwv2.HttpMethod.POST, '/drep/link', drepLinkFn, 'DRepLink', true);
+    addRoute(apigwv2.HttpMethod.POST, '/drep/link/challenge', drepLinkChallengeFn, 'DRepLinkChallenge', true);
     addRoute(apigwv2.HttpMethod.GET, '/drep/{drepId}', drepGetFn, 'DRepGet');
     addRoute(apigwv2.HttpMethod.PUT, '/drep/{drepId}', drepUpdateFn, 'DRepUpdate', true);
 
