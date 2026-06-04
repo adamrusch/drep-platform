@@ -389,6 +389,31 @@
       "approvedBadge": "委員会で承認 ✓"
     }
   },
+  "committeeSubmit": {
+    "testWarning": {
+      "title": "test.drep.tools は本番（メインネット）に送信されます",
+      "body": "このページから送信すると、実際の DRep 投票がライブのガバナンスアクションに対して実行され、実際の ADA が消費されます。プレビュー／プレプロッドのテスト経路はありません — 送信が成功すれば結果は取り消せず、Cardanoscan や gov.tools にも公開されます。",
+      "acknowledge": "これが本番（メインネット）への実投票であることを理解しました。"
+    },
+    "notAvailable": "オンチェーン送信は、まだあなたのアカウントでは利用できません。",
+    "phase": {
+      "building": "トランザクションを構築中…",
+      "signing": "ウォレットで署名中…",
+      "submitting": "ブロードキャスト中…",
+      "recording": "受領情報を記録中…"
+    },
+    "button": {
+      "signAndBroadcast": "投票に署名してブロードキャスト"
+    },
+    "broadcastSuccess": "投票をブロードキャストしました — txHash {{txHash}}",
+    "errors": {
+      "noWalletName": "前回ログイン時のウォレット情報が保持されていません。ウォレットを一度切断してから再接続のうえ、もう一度お試しください。",
+      "lowBalance": "ウォレットの残高が約 0.5 ADA を下回っています。投票トランザクションには手数料分の ADA が必要です。ブロードキャストする前に入金してください — そうしないとウォレットが署名を拒否します。",
+      "declined": "ウォレットが署名を拒否しました — 投票は実行されていません。",
+      "broadcastFailed": "投票を実行できませんでした: {{message}}",
+      "receiptFailed": "投票はブロードキャストされました（txHash {{txHash}}）が、プラットフォーム側で受領情報を記録できませんでした: {{message}}。txHash を控えたうえで、プラットフォーム管理者にご連絡ください。"
+    }
+  },
   "committeeAdmin": {
     "rationaleMode": {
       "lead": "リードが作成",
