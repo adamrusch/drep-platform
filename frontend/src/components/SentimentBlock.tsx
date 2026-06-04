@@ -1,4 +1,6 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { Check, X, MoreHorizontal, Minus } from 'lucide-react';
 import { Donut, type DonutSegment } from '@/components/ui/Donut';
 import { cn } from '@/lib/utils';
@@ -58,16 +60,16 @@ function pctOfPower(part: bigint, total: bigint): number {
 
 /** Headcount label. Singular when count == 1 ("1 voter") for a tiny dignity
  *  bump on early-voting actions. */
-function voterLabel(role: 'drep' | 'spo' | 'cc', count: number): string {
-  if (role === 'cc') return count === 1 ? '1 member' : `${count.toLocaleString('en-US')} members`;
-  if (role === 'spo') return count === 1 ? '1 SPO' : `${count.toLocaleString('en-US')} SPOs`;
-  return count === 1 ? '1 DRep' : `${count.toLocaleString('en-US')} DReps`;
+function voterLabel(role: 'drep' | 'spo' | 'cc', count: number, t: TFunction): string {
+  if (role === 'cc') return t(count === 1 ? 'sentiment.memberOne' : 'sentiment.memberOther', { count });
+  if (role === 'spo') return t(count === 1 ? 'sentiment.spoOne' : 'sentiment.spoOther', { count });
+  return t(count === 1 ? 'sentiment.drepOne' : 'sentiment.drepOther', { count });
 }
 
-function totalLabel(role: 'drep' | 'spo' | 'cc'): string {
-  if (role === 'cc') return 'committee members';
-  if (role === 'spo') return 'active SPOs';
-  return 'active DReps';
+function totalLabel(role: 'drep' | 'spo' | 'cc', t: TFunction): string {
+  if (role === 'cc') return t('sentiment.totalCommitteeMembers');
+  if (role === 'spo') return t('sentiment.totalActiveSpos');
+  return t('sentiment.totalActiveDreps');
 }
 
 /** Per-role 3-slice donut + breakdown + abstain footnote. The center of
@@ -89,6 +91,7 @@ function RoleSection({
   role: VoteRoleTally;
   roleKey: 'drep' | 'spo' | 'cc';
 }): React.ReactElement {
+  const { t } = useTranslation();
   const isCount = roleKey === 'cc';
   const yesPower = parseSlicePower(role.yes);
   const noPower = parseSlicePower(role.no);
@@ -113,10 +116,10 @@ function RoleSection({
     isCount ? Number(p) : Number(p / 1_000_000n);
 
   const segments: DonutSegment[] = [
-    { label: 'Yes', value: sliceForDonut(yesPower), color: SUCCESS_COLOR },
-    { label: 'No', value: sliceForDonut(noPower), color: DANGER_COLOR },
+    { label: t('sentiment.choiceYes'), value: sliceForDonut(yesPower), color: SUCCESS_COLOR },
+    { label: t('sentiment.choiceNo'), value: sliceForDonut(noPower), color: DANGER_COLOR },
     {
-      label: 'Not Voted',
+      label: t('sentiment.choiceNotVoted'),
       value: sliceForDonut(notVotedPower),
       color: NOT_VOTED_COLOR,
     },
@@ -128,7 +131,7 @@ function RoleSection({
   // "Active Governance Stake" is the user-facing name for the CIP-1694
   // ratification denominator. CC has no stake-weighted denominator, so we
   // keep that label as a member count.
-  const centerLabel = isCount ? 'CC members' : 'active gov. stake';
+  const centerLabel = isCount ? t('sentiment.ccMembers') : t('sentiment.activeGovStake');
 
   // Abstain percentage — expressed against `totalActive` (the ratification
   // denominator) plus the explicit abstain count itself. We deliberately
@@ -146,7 +149,7 @@ function RoleSection({
           {label}
         </h4>
         <span className="text-[11.5px] text-[var(--text-tertiary)] tabular-nums">
-          {voterLabel(roleKey, role.totalActive.count)} {totalLabel(roleKey)}
+          {voterLabel(roleKey, role.totalActive.count, t)} {totalLabel(roleKey, t)}
         </span>
       </header>
 
@@ -167,7 +170,7 @@ function RoleSection({
           <BreakdownRow
             icon={<Check size={14} strokeWidth={2.25} />}
             iconClass="text-[var(--success)]"
-            label="Yes"
+            label={t('sentiment.choiceYes')}
             count={role.yes.count}
             secondaryLabel={isCount ? '' : formatLovelaceAda(yesPower)}
             pct={yesPct}
@@ -176,7 +179,7 @@ function RoleSection({
           <BreakdownRow
             icon={<X size={14} strokeWidth={2.25} />}
             iconClass="text-[var(--danger)]"
-            label="No"
+            label={t('sentiment.choiceNo')}
             count={role.no.count}
             secondaryLabel={isCount ? '' : formatLovelaceAda(noPower)}
             pct={noPct}
@@ -185,7 +188,7 @@ function RoleSection({
           <BreakdownRow
             icon={<MoreHorizontal size={14} strokeWidth={2.25} />}
             iconClass="text-[var(--text-muted)]"
-            label="Not Voted"
+            label={t('sentiment.choiceNotVoted')}
             count={role.notVoted.count}
             secondaryLabel={isCount ? '' : formatLovelaceAda(notVotedPower)}
             pct={notVotedPct}
@@ -207,22 +210,20 @@ function RoleSection({
                   className="text-[var(--text-muted)] flex-shrink-0"
                   aria-hidden="true"
                 />
-                <span className="font-semibold">Abstain</span>
+                <span className="font-semibold">{t('sentiment.abstain')}</span>
                 <span className="tabular-nums">
                   {role.abstain.count > 0
-                    ? `${role.abstain.count.toLocaleString('en-US')} ${
-                        role.abstain.count === 1
-                          ? roleKey === 'drep'
-                            ? 'DRep actively abstained'
-                            : roleKey === 'spo'
-                              ? 'SPO actively abstained'
-                              : 'member actively abstained'
-                          : roleKey === 'drep'
-                            ? 'DReps actively abstained'
-                            : roleKey === 'spo'
-                              ? 'SPOs actively abstained'
-                              : 'members actively abstained'
-                      }`
+                    ? t(
+                        (() => {
+                          const isOne = role.abstain.count === 1;
+                          if (roleKey === 'drep')
+                            return isOne ? 'sentiment.abstainedDrepOne' : 'sentiment.abstainedDrepOther';
+                          if (roleKey === 'spo')
+                            return isOne ? 'sentiment.abstainedSpoOne' : 'sentiment.abstainedSpoOther';
+                          return isOne ? 'sentiment.abstainedCcOne' : 'sentiment.abstainedCcOther';
+                        })(),
+                        { count: role.abstain.count },
+                      )
                     : ''}
                 </span>
                 {!isCount && (
@@ -237,7 +238,7 @@ function RoleSection({
                 )}
               </div>
               <div className="text-[11px] text-[var(--text-muted)] leading-snug pl-6">
-                Not part of the ratification denominator.
+                {t('sentiment.notInDenominator')}
               </div>
             </div>
           )}
@@ -266,8 +267,11 @@ function BreakdownRow({
   pct,
   roleKey,
 }: BreakdownRowProps): React.ReactElement {
-  const unit = roleKey === 'cc' ? 'member' : 'voter';
-  const unitPlural = roleKey === 'cc' ? 'members' : 'voters';
+  const { t } = useTranslation();
+  const countLabel =
+    roleKey === 'cc'
+      ? t(count === 1 ? 'sentiment.ccMemberOne' : 'sentiment.ccMemberOther', { count })
+      : t(count === 1 ? 'sentiment.voterOne' : 'sentiment.voterOther', { count });
   return (
     <div className="flex items-center gap-2 text-[13px]">
       <span
@@ -280,7 +284,7 @@ function BreakdownRow({
         {label}
       </span>
       <span className="text-[12px] text-[var(--text-tertiary)] tabular-nums w-24 flex-shrink-0">
-        {count.toLocaleString('en-US')} {count === 1 ? unit : unitPlural}
+        {countLabel}
       </span>
       {secondaryLabel && (
         <span className="text-[12px] text-[var(--text-tertiary)] tabular-nums flex-1">
@@ -327,6 +331,7 @@ export function SentimentBlock({
   votingRoles,
   className,
 }: SentimentBlockProps): React.ReactElement {
+  const { t } = useTranslation();
   // Default to all-applicable when the backend hasn't provided the map
   // yet — older stored items omit the field, and showing all three
   // sections matches pre-v9 behavior.
@@ -340,17 +345,19 @@ export function SentimentBlock({
   const sections: React.ReactElement[] = [];
   if (showDrep) {
     sections.push(
-      <RoleSection key="drep" label="DRep" roleKey="drep" role={tally.drep} />,
+      <RoleSection key="drep" label={t('sentiment.roleDrep')} roleKey="drep" role={tally.drep} />,
     );
   }
   if (showSpo) {
-    sections.push(<RoleSection key="spo" label="SPO" roleKey="spo" role={tally.spo} />);
+    sections.push(
+      <RoleSection key="spo" label={t('sentiment.roleSpo')} roleKey="spo" role={tally.spo} />,
+    );
   }
   if (showCc) {
     sections.push(
       <RoleSection
         key="cc"
-        label="Constitutional Committee"
+        label={t('sentiment.roleCc')}
         roleKey="cc"
         role={tally.cc}
       />,
@@ -367,7 +374,7 @@ export function SentimentBlock({
           )}
         </h3>
         <span className="text-[11.5px] text-[var(--text-muted)]">
-          % of Active Governance Stake (CIP-1694)
+          {t('sentiment.percentOfStake')}
         </span>
       </header>
 
@@ -376,7 +383,7 @@ export function SentimentBlock({
         // CIP-1694 matrix. A visible "no applicable voters" message beats
         // a silently-blank panel if a future action type ever lands here.
         <div className="text-sm text-[var(--text-tertiary)]">
-          No governance bodies are called to vote on this action.
+          {t('sentiment.noBodies')}
         </div>
       ) : (
         sections.flatMap((section, i) =>

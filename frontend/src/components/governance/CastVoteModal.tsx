@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Check, ThumbsUp, ThumbsDown, MinusCircle, Shield, X } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
@@ -11,29 +12,29 @@ type VoteChoice = 'yes' | 'no' | 'abstain';
 
 const OPTIONS: {
   id: VoteChoice;
-  label: string;
-  desc: string;
+  labelKey: string;
+  descKey: string;
   Icon: typeof ThumbsUp;
   color: string;
 }[] = [
   {
     id: 'yes',
-    label: 'Support',
-    desc: 'Approve this proposal',
+    labelKey: 'castVote.optionSupportLabel',
+    descKey: 'castVote.optionSupportDesc',
     Icon: ThumbsUp,
     color: 'var(--success)',
   },
   {
     id: 'no',
-    label: 'Oppose',
-    desc: 'Reject this proposal',
+    labelKey: 'castVote.optionOpposeLabel',
+    descKey: 'castVote.optionOpposeDesc',
     Icon: ThumbsDown,
     color: 'var(--danger)',
   },
   {
     id: 'abstain',
-    label: 'Abstain',
-    desc: 'Neither support nor oppose',
+    labelKey: 'castVote.optionAbstainLabel',
+    descKey: 'castVote.optionAbstainDesc',
     Icon: MinusCircle,
     color: 'var(--text-tertiary)',
   },
@@ -59,6 +60,7 @@ interface CastVoteModalProps {
  * `governance.jsx:346–385` for the rail trigger style.
  */
 export function CastVoteModal({ actionTitle, trigger }: CastVoteModalProps): React.ReactElement {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [choice, setChoice] = useState<VoteChoice | null>(null);
   const [rationale, setRationale] = useState('');
@@ -76,17 +78,16 @@ export function CastVoteModal({ actionTitle, trigger }: CastVoteModalProps): Rea
       // proves the wallet is live and matches the auth cookie.
       await sign();
       addToast({
-        title: 'Vote recorded',
-        description:
-          'Your choice has been recorded locally — on-chain submission coming in the next phase.',
+        title: t('castVote.recordedTitle'),
+        description: t('castVote.recordedDescription'),
         variant: 'success',
       });
       setOpen(false);
       setChoice(null);
       setRationale('');
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Wallet signing failed';
-      addToast({ title: 'Could not sign vote', description: msg, variant: 'error' });
+      const msg = err instanceof Error ? err.message : t('castVote.signFailedFallback');
+      addToast({ title: t('castVote.couldNotSign'), description: msg, variant: 'error' });
     } finally {
       setSubmitting(false);
     }
@@ -110,7 +111,7 @@ export function CastVoteModal({ actionTitle, trigger }: CastVoteModalProps): Rea
           <div className="flex items-start justify-between gap-3 mb-4">
             <div>
               <Dialog.Title className="text-[18px] font-bold text-[var(--text-primary)] m-0">
-                Cast your vote
+                {t('castVote.title')}
               </Dialog.Title>
               <Dialog.Description className="text-sm text-[var(--text-secondary)] mt-1 truncate max-w-[420px]">
                 {actionTitle}
@@ -118,7 +119,7 @@ export function CastVoteModal({ actionTitle, trigger }: CastVoteModalProps): Rea
             </div>
             <Dialog.Close asChild>
               <button
-                aria-label="Close"
+                aria-label={t('castVote.close')}
                 className="text-[var(--text-tertiary)] hover:text-[var(--text-primary)] transition-colors -mt-1 -mr-1 p-1"
               >
                 <X size={18} strokeWidth={1.75} />
@@ -130,7 +131,7 @@ export function CastVoteModal({ actionTitle, trigger }: CastVoteModalProps): Rea
           <div className="rounded-token-md bg-[var(--bg-subtle)] border border-[var(--border-subtle)] p-3 text-[12.5px] text-[var(--text-secondary)] mb-4 grid grid-cols-2 gap-3">
             <div>
               <div className="text-[10.5px] uppercase tracking-wider text-[var(--text-tertiary)] mb-0.5">
-                Voter
+                {t('castVote.voter')}
               </div>
               <div className="font-mono text-[11px] truncate text-[var(--text-primary)]">
                 {drepId ?? (walletAddress ? formatWalletAddress(walletAddress, 6) : '—')}
@@ -138,10 +139,10 @@ export function CastVoteModal({ actionTitle, trigger }: CastVoteModalProps): Rea
             </div>
             <div>
               <div className="text-[10.5px] uppercase tracking-wider text-[var(--text-tertiary)] mb-0.5">
-                Voting power
+                {t('castVote.votingPower')}
               </div>
               <div className="font-medium text-[var(--text-primary)]">
-                Coming soon
+                {t('castVote.comingSoon')}
               </div>
             </div>
           </div>
@@ -173,10 +174,10 @@ export function CastVoteModal({ actionTitle, trigger }: CastVoteModalProps): Rea
                   </span>
                   <span className="flex-1 min-w-0">
                     <span className="block text-sm font-semibold text-[var(--text-primary)]">
-                      {opt.label}
+                      {t(opt.labelKey)}
                     </span>
                     <span className="block text-[12px] text-[var(--text-tertiary)]">
-                      {opt.desc}
+                      {t(opt.descKey)}
                     </span>
                   </span>
                   <span
@@ -205,7 +206,7 @@ export function CastVoteModal({ actionTitle, trigger }: CastVoteModalProps): Rea
               htmlFor="vote-rationale"
               className="block text-[12px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)] mb-1.5"
             >
-              Rationale (optional)
+              {t('castVote.rationaleLabel')}
             </label>
             <textarea
               id="vote-rationale"
@@ -213,7 +214,7 @@ export function CastVoteModal({ actionTitle, trigger }: CastVoteModalProps): Rea
               onChange={(e) => setRationale(e.target.value)}
               rows={3}
               maxLength={2000}
-              placeholder="Why are you voting this way? Your delegators may see this."
+              placeholder={t('castVote.rationalePlaceholder')}
               className="w-full rounded-token-md border border-[var(--border-default)] bg-[var(--bg-canvas)] px-3 py-2 text-[13.5px] resize-y focus:outline-none focus-visible:shadow-token-focus"
             />
           </div>
@@ -227,15 +228,14 @@ export function CastVoteModal({ actionTitle, trigger }: CastVoteModalProps): Rea
               aria-hidden="true"
             />
             <div>
-              Voting requires a fresh wallet signature. On-chain submission lands in
-              an upcoming phase — for now your choice is recorded locally and toast-confirmed.
+              {t('castVote.reminder')}
             </div>
           </div>
 
           <div className="flex justify-end gap-2">
             <Dialog.Close asChild>
               <Button variant="ghost" size="sm">
-                Cancel
+                {t('castVote.cancel')}
               </Button>
             </Dialog.Close>
             <Button
@@ -245,7 +245,7 @@ export function CastVoteModal({ actionTitle, trigger }: CastVoteModalProps): Rea
               disabled={!choice || submitting}
             >
               <Check size={14} strokeWidth={2.4} />
-              {submitting ? 'Signing…' : 'Sign & Submit'}
+              {submitting ? t('castVote.signing') : t('castVote.signSubmit')}
             </Button>
           </div>
         </Dialog.Content>

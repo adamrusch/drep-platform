@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { MessageCircle, HelpCircle, BarChart3, Plus, X, Lock } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { useUiStore } from '@/stores/uiStore';
@@ -10,10 +11,10 @@ interface ComposerProps {
   drepId: string;
 }
 
-const KIND_OPTIONS: { id: ClubhousePostType; label: string; Icon: typeof MessageCircle }[] = [
-  { id: 'discussion', label: 'Discussion', Icon: MessageCircle },
-  { id: 'question', label: 'Question', Icon: HelpCircle },
-  { id: 'poll', label: 'Poll', Icon: BarChart3 },
+const KIND_OPTIONS: { id: ClubhousePostType; labelKey: string; Icon: typeof MessageCircle }[] = [
+  { id: 'discussion', labelKey: 'composer.kind.discussion', Icon: MessageCircle },
+  { id: 'question', labelKey: 'composer.kind.question', Icon: HelpCircle },
+  { id: 'poll', labelKey: 'composer.kind.poll', Icon: BarChart3 },
 ];
 
 const MAX_BODY = 10_000;
@@ -38,6 +39,7 @@ function defaultClosesAt(): string {
  *  - Submit posts via `useCreateClubhousePost`
  */
 export function Composer({ drepId }: ComposerProps): React.ReactElement {
+  const { t } = useTranslation();
   const [draftKind, setDraftKind] = useState<ClubhousePostType>('discussion');
   const [body, setBody] = useState('');
   const [title, setTitle] = useState('');
@@ -82,7 +84,7 @@ export function Composer({ drepId }: ComposerProps): React.ReactElement {
             }
           : {}),
       });
-      addToast({ title: 'Posted to clubhouse', variant: 'success' });
+      addToast({ title: t('composer.toast.postedTitle'), variant: 'success' });
       setBody('');
       setTitle('');
       setPollOptions(['', '']);
@@ -90,8 +92,8 @@ export function Composer({ drepId }: ComposerProps): React.ReactElement {
       setPollClosesAt(defaultClosesAt());
       setDraftKind('discussion');
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to post';
-      addToast({ title: 'Could not post', description: msg, variant: 'error' });
+      const msg = err instanceof Error ? err.message : t('composer.toast.failedToPost');
+      addToast({ title: t('composer.toast.couldNotPostTitle'), description: msg, variant: 'error' });
     }
   };
 
@@ -117,13 +119,13 @@ export function Composer({ drepId }: ComposerProps): React.ReactElement {
               aria-pressed={active}
             >
               <Icon size={13} strokeWidth={2} />
-              {k.label}
+              {t(k.labelKey)}
             </button>
           );
         })}
         <span className="ml-auto text-[11px] text-[var(--text-tertiary)] inline-flex items-center gap-1">
           <Lock size={11} strokeWidth={2} aria-hidden="true" />
-          Private to delegators
+          {t('composer.privateBadge')}
         </span>
       </div>
 
@@ -133,7 +135,7 @@ export function Composer({ drepId }: ComposerProps): React.ReactElement {
           type="text"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
-          placeholder="Poll question (optional)"
+          placeholder={t('composer.pollQuestionPlaceholder')}
           className="w-full rounded-token-md border border-[var(--border-default)] bg-[var(--bg-canvas)] px-3 h-10 text-[13.5px] focus:outline-none focus-visible:shadow-token-focus"
           maxLength={300}
         />
@@ -146,17 +148,20 @@ export function Composer({ drepId }: ComposerProps): React.ReactElement {
           onChange={(e) => setBody(e.target.value)}
           placeholder={
             isPoll
-              ? 'Add context for your poll…'
+              ? t('composer.bodyPlaceholder.poll')
               : draftKind === 'question'
-                ? 'Ask the clubhouse a question…'
-                : 'Start a discussion…'
+                ? t('composer.bodyPlaceholder.question')
+                : t('composer.bodyPlaceholder.discussion')
           }
           rows={3}
           className="w-full rounded-token-md border border-[var(--border-default)] bg-[var(--bg-canvas)] px-3 py-2 text-[13.5px] resize-y focus:outline-none focus-visible:shadow-token-focus"
           maxLength={MAX_BODY}
         />
         <div className="text-right text-[11px] text-[var(--text-tertiary)] tabular-nums mt-1">
-          {body.length.toLocaleString()} / {MAX_BODY.toLocaleString()}
+          {t('composer.charCount', {
+            current: body.length.toLocaleString(),
+            max: MAX_BODY.toLocaleString(),
+          })}
         </div>
       </div>
 
@@ -164,7 +169,7 @@ export function Composer({ drepId }: ComposerProps): React.ReactElement {
       {isPoll && (
         <div className="rounded-token-md border border-[var(--border-subtle)] bg-[var(--bg-subtle)] p-3 space-y-2.5">
           <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">
-            Options
+            {t('composer.options')}
           </div>
           {pollOptions.map((opt, i) => (
             <div key={i} className="flex items-center gap-2">
@@ -175,7 +180,7 @@ export function Composer({ drepId }: ComposerProps): React.ReactElement {
                 type="text"
                 value={opt}
                 onChange={(e) => handleOptionChange(i, e.target.value)}
-                placeholder={`Option ${i + 1}`}
+                placeholder={t('composer.optionPlaceholder', { index: i + 1 })}
                 maxLength={200}
                 className="flex-1 rounded-token-md border border-[var(--border-default)] bg-[var(--bg-canvas)] px-3 h-9 text-[13px] focus:outline-none focus-visible:shadow-token-focus"
               />
@@ -183,7 +188,7 @@ export function Composer({ drepId }: ComposerProps): React.ReactElement {
                 <button
                   type="button"
                   onClick={() => handleRemoveOption(i)}
-                  aria-label={`Remove option ${i + 1}`}
+                  aria-label={t('composer.removeOption', { index: i + 1 })}
                   className="w-7 h-7 rounded-token-md text-[var(--text-tertiary)] hover:text-[var(--danger)] hover:bg-[var(--danger-soft)] inline-flex items-center justify-center transition-colors"
                 >
                   <X size={14} />
@@ -198,7 +203,7 @@ export function Composer({ drepId }: ComposerProps): React.ReactElement {
               className="inline-flex items-center gap-1 text-[12px] font-semibold text-[var(--brand-primary)] hover:underline"
             >
               <Plus size={12} strokeWidth={2.4} />
-              Add option
+              {t('composer.addOption')}
             </button>
           )}
           <div className="flex items-center justify-between gap-3 pt-2 border-t border-[var(--border-subtle)]">
@@ -209,10 +214,10 @@ export function Composer({ drepId }: ComposerProps): React.ReactElement {
                 onChange={(e) => setPollMultiple(e.target.checked)}
                 className="rounded-sm"
               />
-              Allow multiple choices
+              {t('composer.allowMultiple')}
             </label>
             <label className="flex items-center gap-2 text-[12.5px] text-[var(--text-secondary)]">
-              Closes
+              {t('composer.closes')}
               <input
                 type="datetime-local"
                 value={pollClosesAt}
@@ -231,7 +236,11 @@ export function Composer({ drepId }: ComposerProps): React.ReactElement {
           onClick={() => void handleSubmit()}
           disabled={!submittable || createPost.isPending}
         >
-          {createPost.isPending ? 'Posting…' : isPoll ? 'Post poll' : 'Post'}
+          {createPost.isPending
+            ? t('composer.posting')
+            : isPoll
+              ? t('composer.postPoll')
+              : t('composer.post')}
         </Button>
       </div>
     </div>
