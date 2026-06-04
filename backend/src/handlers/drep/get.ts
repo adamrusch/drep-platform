@@ -1,7 +1,11 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { getItem, tableNames } from '../../lib/dynamodb';
 import type { DRepCommitteeItem } from '../../lib/types';
-import { currentApprovalRule, withMemberActivity } from '../committee/_committee';
+import {
+  currentApprovalRule,
+  listCommitteeInvites,
+  withMemberActivity,
+} from '../committee/_committee';
 import { ok, badRequest, notFound, internalError } from '../_response';
 
 export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> => {
@@ -11,8 +15,10 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
       return badRequest('drepId path parameter is required');
     }
 
+    const decodedDrepId = decodeURIComponent(drepId);
+
     const item = await getItem<DRepCommitteeItem>(tableNames.drepCommittees, {
-      drepId: decodeURIComponent(drepId),
+      drepId: decodedDrepId,
       SK: 'COMMITTEE',
     });
 
@@ -25,7 +31,21 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     const members = await withMemberActivity(item.members);
     const rule = currentApprovalRule({ ...item, members });
 
-    return ok({ ...item, members, approvalThreshold: rule.approvalThreshold, memberCount: rule.memberCount });
+    // Load every invitation under this committee — the settings UI uses the
+    // PENDING subset to render the Chair-side "revoke" list; the
+    // ACCEPTED/REJECTED rows are kept for audit visibility too. Sparse
+    // single-partition Query, returns a few rows at most (max invites ≈
+    // intendedMemberCount).
+    const invitations = await listCommitteeInvites(decodedDrepId);
+
+    return ok({
+      ...item,
+      members,
+      approvalThreshold: rule.approvalThreshold,
+      memberCount: rule.memberCount,
+      intendedMemberCount: item.intendedMemberCount ?? members.length,
+      invitations,
+    });
   } catch (err) {
     console.error('drep/get handler error:', err);
     return internalError('Failed to fetch DRep');

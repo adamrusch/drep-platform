@@ -268,12 +268,48 @@ export interface DRepCommittee {
   description: string;
   onChainMetadata?: Record<string, unknown>;
   members: CommitteeMember[];
-  /** X — number of Agree votes required for "Committee Approved". */
+  /** X — number of Agree votes required for "Committee Approved". Decision B
+   *  ("Chair's full X stands"): the Chair's intended threshold over their
+   *  intended roster — it does NOT shrink as invitations are pending. */
   approvalThreshold: number;
-  /** N — current committee size (echoed by the backend on /drep/{drepId}). */
+  /** N — current ACCEPTED committee size (`members.length`). */
   memberCount: number;
+  /** The Chair's INTENDED committee size: 1 (Chair) + every invited member,
+   *  regardless of accept/decline status. UI surfaces "X of N — currently
+   *  {memberCount} accepted" against this denominator. Optional for back-
+   *  compat with rows synced before the invitation feature. */
+  intendedMemberCount?: number;
+  /** Every invitation belonging to this committee (any status). Returned
+   *  on `GET /drep/{drepId}` so the Chair-side settings UI can render the
+   *  pending list with a Revoke button. Empty when no invites have ever
+   *  been issued. */
+  invitations?: CommitteeInvitation[];
   createdAt: string;
   updatedAt: string;
+}
+
+/** One INVITE row from the platform's invitation surface. The platform
+ *  promotes accepted invitees into `DRepCommittee.members[]`; this shape
+ *  carries the audit trail of every invitation (pending, accepted,
+ *  rejected, revoked). */
+export interface CommitteeInvitation {
+  drepId: string;
+  inviteeStake: string;
+  status: 'pending' | 'accepted' | 'rejected' | 'revoked';
+  role: 'committee_member' | 'trusted_delegator';
+  displayName?: string;
+  invitedBy: string;
+  invitedAt: string;
+  respondedAt?: string;
+}
+
+/** Slim per-invitation view returned on `/auth/me` for the bell badge and
+ *  Accept-Reject dashboard card. Mirrors the backend's PendingInvitationView. */
+export interface PendingInvitationSummary {
+  drepId: string;
+  committeeName: string;
+  role: 'committee_member' | 'trusted_delegator';
+  invitedAt: string;
 }
 
 export interface CommitteeMember {
@@ -427,6 +463,18 @@ export interface UserProfile {
    *     or this is a brand-new stake account.
    */
   delegatedToDrepId?: string | null;
+  /** Every committee invitation the wallet currently has pending. Empty
+   *  array when there are none. Set by the `/auth/me` handler via a single
+   *  Query against the sparse `inviteeStake-status-index` GSI. The bell
+   *  badge in the topbar surfaces the count; the dashboard Invitation card
+   *  renders one row per entry with Accept/Reject buttons. */
+  pendingInvitations?: PendingInvitationSummary[];
+  /** When true, any NEW committee invitation issued to this wallet is
+   *  auto-rejected at creation (no membership slot claimed). Existing
+   *  pending invitations are NOT touched by flipping this toggle — use the
+   *  "Decline all pending" button (POST /me/invitations/decline-all) for
+   *  that. Absent / false → invitations land as pending normally. */
+  autoDeclineInvites?: boolean;
 }
 
 export interface SocialLinks {
