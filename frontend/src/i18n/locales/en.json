@@ -394,6 +394,31 @@
       "approvedBadge": "Committee Approved ✓"
     }
   },
+  "committeeSubmit": {
+    "testWarning": {
+      "title": "test.drep.tools submits to MAINNET",
+      "body": "Broadcasting from this page casts a REAL DRep vote on the live governance action and spends real ADA. There is no preview/preprod path — every successful submission is permanent and visible on Cardanoscan and gov.tools.",
+      "acknowledge": "I understand this is a real mainnet vote."
+    },
+    "notAvailable": "On-chain submission isn't available for your account yet.",
+    "phase": {
+      "building": "Building transaction…",
+      "signing": "Signing with wallet…",
+      "submitting": "Broadcasting…",
+      "recording": "Recording receipt…"
+    },
+    "button": {
+      "signAndBroadcast": "Sign & broadcast vote"
+    },
+    "broadcastSuccess": "Vote broadcast — txHash {{txHash}}",
+    "errors": {
+      "noWalletName": "Wallet identity not retained from your last login. Please disconnect and re-connect your wallet, then try again.",
+      "lowBalance": "Your wallet has less than ~0.5 ADA. The vote transaction needs ada for the fee — top up before broadcasting or the wallet will refuse to sign.",
+      "declined": "Wallet declined the signature — vote not cast.",
+      "broadcastFailed": "Vote not cast: {{message}}",
+      "receiptFailed": "The vote was broadcast (txHash {{txHash}}) but the platform failed to record the receipt: {{message}}. Save the txHash and contact a platform admin."
+    }
+  },
   "committeeAdmin": {
     "rationaleMode": {
       "lead": "Lead authors",

@@ -958,7 +958,12 @@ export interface CommitteeSubmissionItem {
    *  on-chain anchor independently of the (now-locked) RATIONALE#FINAL row. */
   canonicalJson?: string;
   txHash: string;
-  broadcastStage: string; // 'prod' — test never broadcasts
+  /** Deploy stage the receipt was recorded on — `'prod'` or `'test'`
+   *  today. Both point at MAINNET, so a `'test'` receipt is still a real
+   *  mainnet vote; the marker only attributes provenance. The
+   *  `canBroadcastGovernanceVote` gate (lib/stage.ts) restricts `'test'`
+   *  writes to platform_admin. */
+  broadcastStage: string;
   submittedBy: string;
   submittedAt: string;
   rationaleOverridden?: boolean; // submitted without a rationale via override
