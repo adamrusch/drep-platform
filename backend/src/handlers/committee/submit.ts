@@ -1,7 +1,8 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import type { CommitteePosition } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
-import { ok, badRequest, forbidden, notFound, conflict, handleError } from '../_response';
+import { ok, badRequest, notFound, conflict, handleError } from '../_response';
+import { canBroadcastGovernanceVote } from '../../lib/stage';
 import {
   assertCommitteeLead,
   getStage,
@@ -24,9 +25,17 @@ function positionToVoteKind(p: CommitteePosition): number {
 
 /**
  * Build the on-chain submission payload for a passed proposal and decide
- * whether broadcast is allowed. Broadcast is gated to prod: on every other
- * stage the payload is fully assembled but `broadcastAllowed=false`, and the
- * UI tells the lead the vote must be submitted from production. Lead only.
+ * whether broadcast is allowed. The broadcast decision is delegated to
+ * `canBroadcastGovernanceVote(authCtx)`:
+ *   - prod  → any lead may broadcast (the lead check is its own gate).
+ *   - test  → restricted to `platform_admin`, because the test environment
+ *             is wired to MAINNET and a successful broadcast casts a real,
+ *             irrevocable DRep vote that costs real ADA. Non-admin leads on
+ *             test see a "not yet available for your account" message; the
+ *             payload still assembles (so the UI can show the readiness
+ *             card) but the wallet build/sign/broadcast flow stays hidden.
+ *   - other → never (dev / unset stages have no production data to vote on).
+ * Lead only — `assertCommitteeLead` continues to gate THIS committee's lead.
  */
 export const handler = async (
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
@@ -74,7 +83,22 @@ export const handler = async (
     }
 
     const stage = getStage();
-    const broadcastAllowed = stage === 'prod';
+    const broadcastAllowed = canBroadcastGovernanceVote(authCtx);
+
+    // Messaging:
+    //   - prod + allowed: business as usual.
+    //   - test + non-admin lead: "not yet available for your account" — we
+    //     deliberately do NOT say "this works on prod", because there is no
+    //     separate prod copy of this committee's vote: prod and test point
+    //     at the same mainnet governance action, so a "switch to prod"
+    //     instruction would be misleading.
+    //   - dev / unset: fall back to the historical "submit from production"
+    //     message — these stages have no governance data to cast against.
+    const message = broadcastAllowed
+      ? 'Ready to submit. Sign the vote transaction with your wallet.'
+      : stage === 'test'
+        ? 'On-chain submission on the test environment is restricted to platform admins (test casts REAL mainnet votes). This feature is not yet available for your account.'
+        : 'This vote is assembled and ready — but it must be submitted from the production environment.';
 
     return ok({
       ready: true,
@@ -89,9 +113,7 @@ export const handler = async (
         anchorUrl: final?.ipfsUri ?? null,
         anchorHash: final?.anchorHash ?? null,
       },
-      message: broadcastAllowed
-        ? 'Ready to submit. Sign the vote transaction with your wallet.'
-        : 'This vote is assembled and ready — but it must be submitted from the production environment.',
+      message,
     });
   } catch (err) {
     console.error('committee/submit error:', err);
