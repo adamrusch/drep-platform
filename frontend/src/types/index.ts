@@ -475,6 +475,22 @@ export interface UserProfile {
    *  "Decline all pending" button (POST /me/invitations/decline-all) for
    *  that. Absent / false → invitations land as pending normally. */
   autoDeclineInvites?: boolean;
+  /**
+   * The user's JOINED committee (role 'lead' or 'member'), or null when
+   * they belong to no committee. Set by `/auth/me` from the
+   * committee_membership table.
+   *
+   * This is the source of truth for granting committee-space access — in
+   * particular to a non-lead MEMBER, who has NO `drepId` of their own (the
+   * committee's drepId belongs to the lead). UI must gate the committee
+   * landing/room off THIS field for members, not `drepId` (always absent
+   * for members) or a JWT role (stale until the member re-logs in).
+   */
+  committeeMembership?: {
+    drepId: string;
+    role: 'lead' | 'member';
+    committeeName: string;
+  } | null;
 }
 
 export interface SocialLinks {
