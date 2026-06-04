@@ -224,6 +224,9 @@ export class ApiStack extends cdk.Stack {
     const committeeCheckMembersFn = fn('CommitteeCheckMembersFn', 'handlers/committee/checkAddresses.ts');
     const committeeAddMemberFn = fn('CommitteeAddMemberFn', 'handlers/committee/addMember.ts');
     const committeeRemoveMemberFn = fn('CommitteeRemoveMemberFn', 'handlers/committee/removeMember.ts');
+    // Feature 1 — committee invitations: response (accept/reject) + Chair revoke.
+    const committeeRespondInviteFn = fn('CommitteeRespondInviteFn', 'handlers/committee/respondInvitation.ts');
+    const committeeRevokeInviteFn = fn('CommitteeRevokeInviteFn', 'handlers/committee/revokeInvitation.ts');
     const committeeVotingConfigFn = fn('CommitteeVotingConfigFn', 'handlers/committee/updateVotingConfig.ts');
     const committeeListVotesFn = fn('CommitteeListVotesFn', 'handlers/committee/listVotes.ts');
     const committeeGetVoteFn = fn('CommitteeGetVoteFn', 'handlers/committee/getVote.ts');
@@ -297,6 +300,13 @@ export class ApiStack extends cdk.Stack {
     const profileDelegationHistoryFn = fn(
       'ProfileDelegationHistoryFn',
       'handlers/profile/delegationHistory.ts',
+    );
+    // Feature 1 — committee invitations: decline every pending invite for
+    // the caller in one click (distinct from the autoDeclineInvites profile
+    // toggle, which only blocks future invites).
+    const profileDeclineAllInvitesFn = fn(
+      'ProfileDeclineAllInvitesFn',
+      'handlers/profile/declineAllInvitations.ts',
     );
 
     // ---- JWT Authorizer Lambda ----
@@ -447,6 +457,9 @@ export class ApiStack extends cdk.Stack {
     addRoute(apigwv2.HttpMethod.POST, '/committee/check-members', committeeCheckMembersFn, 'CommitteeCheckMembers', true);
     addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/members', committeeAddMemberFn, 'CommitteeAddMember', true);
     addRoute(apigwv2.HttpMethod.DELETE, '/committee/{drepId}/members/{walletAddress}', committeeRemoveMemberFn, 'CommitteeRemoveMember', true);
+    // Feature 1: invitee accepts/rejects (re-signed); Chair revokes a pending invite.
+    addRoute(apigwv2.HttpMethod.POST, '/committee/{drepId}/invitations/respond', committeeRespondInviteFn, 'CommitteeRespondInvitation', true);
+    addRoute(apigwv2.HttpMethod.DELETE, '/committee/{drepId}/invitations/{walletAddress}', committeeRevokeInviteFn, 'CommitteeRevokeInvitation', true);
     addRoute(apigwv2.HttpMethod.PUT, '/committee/{drepId}/voting-config', committeeVotingConfigFn, 'CommitteeVotingConfig', true);
     addRoute(apigwv2.HttpMethod.GET, '/committee/{drepId}/votes', committeeListVotesFn, 'CommitteeListVotes');
     addRoute(apigwv2.HttpMethod.GET, '/committee/{drepId}/votes/{actionId}', committeeGetVoteFn, 'CommitteeGetVote');
@@ -581,6 +594,16 @@ export class ApiStack extends cdk.Stack {
       '/profile/{walletAddress}/delegation-history',
       profileDelegationHistoryFn,
       'ProfileDelegationHistory',
+      true,
+    );
+    // Feature 1: reject every pending committee invitation for the caller
+    // in one click. Distinct from `autoDeclineInvites` (which only blocks
+    // FUTURE invites). Auth-only.
+    addRoute(
+      apigwv2.HttpMethod.POST,
+      '/me/invitations/decline-all',
+      profileDeclineAllInvitesFn,
+      'ProfileDeclineAllInvitations',
       true,
     );
 

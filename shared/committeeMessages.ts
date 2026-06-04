@@ -47,6 +47,10 @@ export function buildCommitteeMessage(
 
 export type CloseOutcome = 'pass' | 'fail' | 'withdraw';
 export type MemberAction = 'add' | 'remove';
+/** Decision encoded in the invitation-response signed message. The committee
+ *  membership system binds Committee + Decision into the plaintext so a
+ *  captured Accept signature cannot be replayed as a Reject. */
+export type InviteDecision = 'accept' | 'reject';
 
 export const committeeMessages = {
   register: (stage: string, committeeName: string, nonce: string, wallet: string) =>
@@ -93,6 +97,19 @@ export const committeeMessages = {
       stage,
       'member',
       [['Committee', drepId], ['MemberAction', action], ['Target', targetWallet]],
+      nonce,
+      wallet,
+    ),
+
+  /** Invitation accept / reject — binds Committee + Decision into the signed
+   *  plaintext so an Accept signature cannot be replayed as a Reject (or
+   *  vice versa) on the same nonce. The invitee's own wallet signs; the
+   *  backend verifies the canonical bytes character-for-character. */
+  invitationResponse: (stage: string, drepId: string, decision: InviteDecision, nonce: string, wallet: string) =>
+    buildCommitteeMessage(
+      stage,
+      'invitation-response',
+      [['Committee', drepId], ['Decision', decision]],
       nonce,
       wallet,
     ),

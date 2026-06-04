@@ -57,9 +57,18 @@ export const handler = async (
     // The live "X of N" rule. Snapshotted onto the proposal so a later
     // membership/threshold change can't move this proposal's bar.
     const rule = currentApprovalRule(committee);
-    if (rule.memberCount < 1 || rule.approvalThreshold < 1 || rule.approvalThreshold > rule.memberCount) {
+    if (rule.approvalThreshold < 1) {
       return badRequest(
         'This committee has no valid approval rule (X of N). Set the consensus rule before opening a proposal.',
+      );
+    }
+    // Decision B guard: a proposal can only open when ENOUGH members have
+    // accepted to make reaching the Chair's intended X actually achievable
+    // against the frozen eligible-voter set. X does NOT shrink to fit
+    // pending invitations — invite acceptances must catch up.
+    if (rule.memberCount < rule.approvalThreshold) {
+      return badRequest(
+        `Not enough members have accepted yet to open a proposal — X of N needs at least ${rule.approvalThreshold} accepted members (currently ${rule.memberCount}).`,
       );
     }
 

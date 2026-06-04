@@ -12,10 +12,11 @@ import {
   useCommitteeDetails,
   useUpdateCommittee,
 } from '@/hooks/useCommitteeMembership';
+import { useRevokeInvitation } from '@/hooks/useCommitteeInvitations';
 import { useAuthStore } from '@/stores/authStore';
 import { useUiStore } from '@/stores/uiStore';
 import type { CheckMemberResult, RationaleMode } from '@/types/committee';
-import type { CommitteeMember } from '@/types';
+import type { CommitteeInvitation, CommitteeMember } from '@/types';
 
 const MODES: { value: RationaleMode; labelKey: string }[] = [
   { value: 'lead', labelKey: 'committeeAdmin.rationaleMode.lead' },
@@ -31,8 +32,90 @@ export function CommitteeSettings({ drepId }: { drepId: string }): React.ReactEl
     <div className="space-y-4">
       <CommitteeDetailsCard drepId={drepId} />
       <RosterCard drepId={drepId} />
+      <PendingInvitationsCard drepId={drepId} />
       <CommitteeOtherSettingsCard drepId={drepId} />
     </div>
+  );
+}
+
+/**
+ * Lead-only card listing every PENDING invitation under this committee with
+ * a "Revoke" button per row. Mirrors the auth model of removeMember
+ * (lead-only + re-sign). Hidden for non-leads AND when there are no pending
+ * invitations — the Chair shouldn't see an empty card.
+ */
+function PendingInvitationsCard({ drepId }: { drepId: string }): React.ReactElement | null {
+  const { t } = useTranslation();
+  const details = useCommitteeDetails(drepId);
+  const revoke = useRevokeInvitation(drepId);
+  const addToast = useUiStore((s) => s.addToast);
+  const walletAddress = useAuthStore((s) => s.walletAddress);
+
+  const isLead = Boolean(
+    walletAddress && details.data && walletAddress === details.data.leadWallet,
+  );
+  if (!isLead) return null;
+
+  const pending: CommitteeInvitation[] =
+    (details.data?.invitations ?? []).filter((i) => i.status === 'pending');
+  if (pending.length === 0) return null;
+
+  const submitRevoke = (target: string): void => {
+    revoke.mutate(
+      { walletAddress: target },
+      {
+        onSuccess: () => {
+          addToast({
+            title: t('invitations.revokedToast'),
+            variant: 'success',
+          });
+        },
+        onError: (err) => {
+          addToast({
+            title: t('invitations.revokeFailedToast'),
+            description: (err as Error)?.message,
+            variant: 'error',
+          });
+        },
+      },
+    );
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>
+          {t('invitations.pendingCardTitle', { count: pending.length })}
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <ul className="space-y-1.5">
+          {pending.map((invite) => (
+            <li
+              key={invite.inviteeStake}
+              className="flex flex-wrap items-center gap-3 rounded-token-md border border-[var(--border-default)] px-3 py-2 text-[12.5px]"
+            >
+              <div className="min-w-0 flex-1">
+                <div className="font-medium text-[var(--text-primary)]">
+                  {invite.displayName ?? t('invitations.pendingDefaultLabel')}
+                </div>
+                <div className="truncate font-mono text-[11.5px] text-[var(--text-secondary)]">
+                  {invite.inviteeStake}
+                </div>
+              </div>
+              <Button
+                size="xs"
+                variant="ghost"
+                onClick={() => submitRevoke(invite.inviteeStake)}
+                disabled={revoke.isPending}
+              >
+                {revoke.isPending ? t('invitations.signing') : t('invitations.revoke')}
+              </Button>
+            </li>
+          ))}
+        </ul>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -63,20 +146,26 @@ function RosterCard({ drepId }: { drepId: string }): React.ReactElement {
   const [removalTarget, setRemovalTarget] = useState<string | null>(null);
   const [removalX, setRemovalX] = useState<number | null>(null);
 
+  // Decision B math: X is restated over the INTENDED size (chair + every
+  // invited member) — `intendedMemberCount` when present, falling back to
+  // `memberCount` for legacy committees synced before the invitation feature.
+  const intendedN = details.data?.intendedMemberCount ?? details.data?.memberCount ?? 0;
+
   // Default X (when the lead opens the form) = current X (clamped to the new
-  // N) — they're explicitly restating it but the current value is sensible.
+  // intended N) — they're explicitly restating it but the current value is
+  // sensible.
   useEffect(() => {
     if (details.data && pendingX === null) {
-      setPendingX(Math.min(details.data.approvalThreshold, details.data.memberCount + 1));
+      setPendingX(Math.min(details.data.approvalThreshold, intendedN + 1));
     }
-  }, [details.data, pendingX]);
+  }, [details.data, intendedN, pendingX]);
 
   useEffect(() => {
     if (details.data && removalTarget && removalX === null) {
-      const newN = Math.max(1, details.data.memberCount - 1);
-      setRemovalX(Math.min(details.data.approvalThreshold, newN));
+      const newIntendedN = Math.max(1, intendedN - 1);
+      setRemovalX(Math.min(details.data.approvalThreshold, newIntendedN));
     }
-  }, [details.data, removalTarget, removalX]);
+  }, [details.data, intendedN, removalTarget, removalX]);
 
   // Live status check (on-blur via useEffect on trimmed value, debounced).
   useEffect(() => {
@@ -131,11 +220,20 @@ function RosterCard({ drepId }: { drepId: string }): React.ReactElement {
   const N = details.data.memberCount;
   const currentX = details.data.approvalThreshold;
 
-  const newCommitteeSize = N + 1;
+  // Validate X against the INTENDED size (matches backend `addMember.ts`
+  // under decision B). The displayed approval-rule line still surfaces
+  // X against the LIVE accepted count (N) — that's what the user is voting
+  // against today; the intended N just gates the add path.
+  const newCommitteeSize = intendedN + 1;
   const addPossible =
     Boolean(newCheck?.valid) &&
     !members.some(
       (m) => m.walletAddress === (newCheck?.stakeAddress ?? newAddress.trim()),
+    ) &&
+    // Reject duplicate INVITE rows up front — backend would 409 anyway,
+    // but it's friendlier to surface in the UI.
+    !(details.data.invitations ?? []).some(
+      (i) => i.status === 'pending' && i.inviteeStake === (newCheck?.stakeAddress ?? newAddress.trim()),
     );
   const xValid =
     pendingX !== null &&
@@ -240,28 +338,28 @@ function RosterCard({ drepId }: { drepId: string }): React.ReactElement {
           ))}
         </ul>
 
-        {/* Removal: restate X for the new size N-1 */}
+        {/* Removal: restate X for the new INTENDED size (intendedN-1) */}
         {isLead && removalTarget && (
           <div className="space-y-2 rounded-token-md border border-[var(--danger)] bg-[var(--bg-muted)] p-3">
             <p className="text-[12.5px] text-[var(--text-primary)]">
               <Trans
                 i18nKey="committeeAdmin.roster.removalNotice"
-                values={{ n: N - 1 }}
+                values={{ n: intendedN - 1 }}
                 components={{ strong: <strong /> }}
               />
             </p>
             <div className="flex items-end gap-2">
               <label className="text-[12px] text-[var(--text-secondary)]">
-                {t('committeeAdmin.roster.removalXLabel', { max: N - 1 })}
+                {t('committeeAdmin.roster.removalXLabel', { max: intendedN - 1 })}
                 <input
                   type="number"
                   min={1}
-                  max={Math.max(1, N - 1)}
+                  max={Math.max(1, intendedN - 1)}
                   value={removalX ?? ''}
                   onChange={(e) => {
                     const n = Number.parseInt(e.target.value, 10);
                     if (Number.isNaN(n)) return;
-                    setRemovalX(Math.max(1, Math.min(N - 1, n)));
+                    setRemovalX(Math.max(1, Math.min(intendedN - 1, n)));
                   }}
                   className={`${inputCls} mt-1 w-24`}
                 />
@@ -269,12 +367,12 @@ function RosterCard({ drepId }: { drepId: string }): React.ReactElement {
               <Button
                 size="sm"
                 variant="destructive"
-                disabled={removeMember.isPending || removalX === null || removalX < 1 || removalX > N - 1}
+                disabled={removeMember.isPending || removalX === null || removalX < 1 || removalX > intendedN - 1}
                 onClick={() => submitRemove(removalTarget)}
               >
                 {removeMember.isPending
                   ? t('committeeAdmin.roster.signing')
-                  : t('committeeAdmin.roster.removeSets', { x: removalX ?? '?', n: N - 1 })}
+                  : t('committeeAdmin.roster.removeSets', { x: removalX ?? '?', n: intendedN - 1 })}
               </Button>
               <Button
                 size="sm"
