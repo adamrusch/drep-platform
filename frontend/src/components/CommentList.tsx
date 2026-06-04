@@ -1,7 +1,9 @@
 import React, { useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Star, User, ChevronDown, ChevronRight, ArrowBigUp, ArrowBigDown, MessageSquare } from 'lucide-react';
 import type { Comment, MyCommentVotes } from '@/types';
-import { formatRelativeTime, formatWalletAddress, cn } from '@/lib/utils';
+import { formatWalletAddress, cn } from '@/lib/utils';
+import { useFormatters } from '@/hooks/useFormatters';
 import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
 import {
   useDeleteComment,
@@ -51,6 +53,7 @@ function formatSupportAda(lovelaceStr: string | undefined): string {
  * compatible: pills only render when their field is present.
  */
 function CommentHeader({ comment }: { comment: Comment }): React.ReactElement {
+  const { t } = useTranslation();
   return (
     <div className="flex items-center gap-2 flex-wrap">
       <span className="text-sm font-semibold text-[var(--text-primary)]">
@@ -59,21 +62,25 @@ function CommentHeader({ comment }: { comment: Comment }): React.ReactElement {
       {comment.starred && (
         <span
           className="inline-flex items-center gap-1 text-[10.5px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-token-full bg-[rgba(245,158,11,0.12)] text-[var(--warning)]"
-          title={`Recognized${comment.drep ? ` by ${comment.drep}` : ''}`}
+          title={
+            comment.drep
+              ? t('comments.recognizedByTooltip', { drep: comment.drep })
+              : t('comments.recognizedTooltip')
+          }
         >
           <Star size={11} strokeWidth={2.4} />
-          Recognized
+          {t('comments.recognized')}
         </span>
       )}
       {comment.stakeAda && (
         <span className="inline-flex items-center text-[11px] font-semibold px-2 py-0.5 rounded-token-full bg-[var(--bg-muted)] text-[var(--text-secondary)] tabular-nums">
-          {comment.stakeAda} stake
+          {t('comments.stakeSuffix', { value: comment.stakeAda })}
         </span>
       )}
       {comment.drep && (
         <span
           className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-token-full bg-[var(--brand-primary-soft)] text-[var(--brand-primary)]"
-          title="Delegates to"
+          title={t('comments.delegatesToTooltip')}
         >
           <User size={10} strokeWidth={2.4} />
           {comment.drep}
@@ -81,12 +88,12 @@ function CommentHeader({ comment }: { comment: Comment }): React.ReactElement {
       )}
       {comment.isDRep && !comment.drep && (
         <span className="inline-flex items-center text-[11px] font-semibold px-2 py-0.5 rounded-token-full bg-[var(--brand-primary-soft)] text-[var(--brand-primary)]">
-          DRep
+          {t('comments.drepBadge')}
         </span>
       )}
       {!comment.isPublic && (
         <span className="inline-flex items-center text-[11px] font-semibold px-2 py-0.5 rounded-token-full bg-[var(--bg-muted)] text-[var(--text-secondary)]">
-          Members only
+          {t('comments.membersOnly')}
         </span>
       )}
     </div>
@@ -123,6 +130,8 @@ function CommentRow({
   walletAddress,
   canDelete,
 }: CommentRowProps): React.ReactElement {
+  const { t } = useTranslation();
+  const { formatRelativeTime } = useFormatters();
   const [repliesOpen, setRepliesOpen] = useState(false);
   const [replyFormOpen, setReplyFormOpen] = useState(false);
   const isAuthenticated = useIsAuthenticated();
@@ -134,7 +143,7 @@ function CommentRow({
 
   const handleVote = async (direction: 'up' | 'down'): Promise<void> => {
     if (!isAuthenticated) {
-      addToast({ title: 'Connect your wallet to vote', variant: 'default' });
+      addToast({ title: t('comments.connectToVote'), variant: 'default' });
       return;
     }
     // Click the already-active direction = retract.
@@ -146,8 +155,8 @@ function CommentRow({
         vote: next,
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Vote failed';
-      addToast({ title: 'Vote failed', description: msg, variant: 'error' });
+      const msg = err instanceof Error ? err.message : t('comments.voteFailed');
+      addToast({ title: t('comments.voteFailed'), description: msg, variant: 'error' });
     }
   };
 
@@ -204,7 +213,7 @@ function CommentRow({
               disabled={deleteComment.isPending}
               className="text-xs text-[var(--danger)] hover:underline disabled:opacity-50"
             >
-              Delete
+              {t('comments.delete')}
             </button>
           )}
         </div>
@@ -226,12 +235,12 @@ function CommentRow({
             }
             title={
               isOwnComment
-                ? "You can't vote on your own comment"
+                ? t('comments.cantVoteOwn')
                 : !isAuthenticated
-                  ? 'Connect your wallet to vote'
+                  ? t('comments.connectToVote')
                   : myVote === 'up'
-                    ? 'Retract upvote'
-                    : 'Upvote'
+                    ? t('comments.retractUpvote')
+                    : t('comments.upvote')
             }
             className={cn(
               'p-1 rounded-token-sm text-[var(--text-tertiary)] hover:text-[var(--success)]',
@@ -248,7 +257,11 @@ function CommentRow({
               supportTone === 'negative' && 'text-[var(--danger)]',
               supportTone === 'neutral' && 'text-[var(--text-tertiary)]',
             )}
-            title={`Support Level: ${supportDisplay} (${comment.upvoteCount ?? 0} up, ${comment.downvoteCount ?? 0} down)`}
+            title={t('comments.supportLevelTooltip', {
+              support: supportDisplay,
+              up: comment.upvoteCount ?? 0,
+              down: comment.downvoteCount ?? 0,
+            })}
           >
             {supportDisplay}
           </span>
@@ -259,10 +272,15 @@ function CommentRow({
               Tooltip retains the full up/down breakdown. */}
           <span
             className="text-xs font-medium tabular-nums text-[var(--text-tertiary)] px-1"
-            title={`${walletCount} backing wallet${walletCount === 1 ? '' : 's'} (upvotes); ${comment.downvoteCount ?? 0} downvote${(comment.downvoteCount ?? 0) === 1 ? '' : 's'}`}
+            title={t('comments.walletCountTooltip', {
+              count: walletCount,
+              down: comment.downvoteCount ?? 0,
+            })}
             data-testid="comment-wallet-count"
           >
-            · {walletCount} {walletCount === 1 ? 'wallet' : 'wallets'}
+            {t(walletCount === 1 ? 'comments.walletOne' : 'comments.walletOther', {
+              count: walletCount,
+            })}
           </span>
           <button
             type="button"
@@ -272,12 +290,12 @@ function CommentRow({
             }
             title={
               isOwnComment
-                ? "You can't vote on your own comment"
+                ? t('comments.cantVoteOwn')
                 : !isAuthenticated
-                  ? 'Connect your wallet to vote'
+                  ? t('comments.connectToVote')
                   : myVote === 'down'
-                    ? 'Retract downvote'
-                    : 'Downvote'
+                    ? t('comments.retractDownvote')
+                    : t('comments.downvote')
             }
             className={cn(
               'p-1 rounded-token-sm text-[var(--text-tertiary)] hover:text-[var(--danger)]',
@@ -299,7 +317,7 @@ function CommentRow({
               onClick={() => {
                 if (!isAuthenticated) {
                   addToast({
-                    title: 'Connect your wallet to reply',
+                    title: t('comments.connectToReply'),
                     variant: 'default',
                   });
                   return;
@@ -311,10 +329,10 @@ function CommentRow({
                 'text-[var(--text-tertiary)] hover:text-[var(--brand-primary)]',
                 'transition-colors',
               )}
-              title={isAuthenticated ? 'Reply to this comment' : 'Connect to reply'}
+              title={isAuthenticated ? t('comments.replyTooltip') : t('comments.connectToReplyTooltip')}
             >
               <MessageSquare size={13} strokeWidth={2} />
-              Reply
+              {t('comments.reply')}
             </button>
 
             {/* Replies toggle — only renders when there ARE replies.
@@ -336,7 +354,9 @@ function CommentRow({
                 ) : (
                   <ChevronRight size={13} strokeWidth={2} />
                 )}
-                {replyCount} {replyCount === 1 ? 'reply' : 'replies'}
+                {t(replyCount === 1 ? 'comments.replyCountOne' : 'comments.replyCountOther', {
+                  count: replyCount,
+                })}
               </button>
             )}
           </>
@@ -380,6 +400,7 @@ export function CommentList({
   actionId,
   isLoading,
 }: CommentListProps): React.ReactElement {
+  const { t } = useTranslation();
   const { walletAddress, roles } = useAuthStore();
   const { data: myVotesData } = useMyCommentVotes(actionId);
   const myVotes = myVotesData?.votes ?? {};
@@ -425,7 +446,7 @@ export function CommentList({
   if (topLevel.length === 0) {
     return (
       <div className="text-center py-8 text-[var(--text-tertiary)] text-sm">
-        No comments yet. Be the first to share your perspective.
+        {t('comments.emptyState')}
       </div>
     );
   }

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import {
   ChevronLeft as ChevronLeftIcon,
@@ -10,16 +11,18 @@ import {
 } from 'lucide-react';
 import { get } from '@/lib/api';
 import { StatusPill } from '@/components/ui/StatusPill';
-import { cn, formatLovelace, formatRelativeTime } from '@/lib/utils';
+import { useFormatters } from '@/hooks/useFormatters';
+import { cn } from '@/lib/utils';
 import type { DRepDirectoryEntry, PaginatedResponse } from '@/types';
 
 type SortKey = 'power' | 'delegators' | 'recent' | 'name';
 
-const SORT_OPTIONS: Array<{ id: SortKey; label: string }> = [
-  { id: 'name', label: 'Name' },
-  { id: 'power', label: 'Voting power' },
-  { id: 'recent', label: 'Last voted' },
-  { id: 'delegators', label: 'Delegators' },
+/** Sort options. Labels are resolved at render time via `t('drepDirectory.sort.<id>')`. */
+const SORT_OPTIONS: Array<{ id: SortKey }> = [
+  { id: 'name' },
+  { id: 'power' },
+  { id: 'recent' },
+  { id: 'delegators' },
 ];
 
 /** Allowed page-size choices. The backend caps at 100; values are
@@ -125,14 +128,16 @@ function LastVotedTag({
   lastVotedAt?: string;
   voteCount?: number;
 }): React.ReactElement {
+  const { t } = useTranslation();
+  const { formatRelativeTime } = useFormatters();
   if (!lastVotedAt) {
     return (
       <span
         className="inline-flex items-center gap-1 text-[var(--text-tertiary)]"
-        title="This DRep has never cast a vote"
+        title={t('drepDirectory.neverVotedTitle')}
       >
         <VoteIcon size={11} strokeWidth={2} aria-hidden="true" />
-        Never voted
+        {t('drepDirectory.neverVoted')}
       </span>
     );
   }
@@ -150,15 +155,20 @@ function LastVotedTag({
   }
   const tooltip =
     typeof voteCount === 'number' && voteCount > 0
-      ? `${voteCount.toLocaleString()} votes • last vote ${new Date(lastVotedAt).toLocaleString()}`
-      : `Last voted ${new Date(lastVotedAt).toLocaleString()}`;
+      ? t('drepDirectory.voteTooltipWithCount', {
+          count: voteCount,
+          date: new Date(lastVotedAt).toLocaleString(),
+        })
+      : t('drepDirectory.voteTooltipNoCount', {
+          date: new Date(lastVotedAt).toLocaleString(),
+        });
   return (
     <span
       className={cn('inline-flex items-center gap-1 tabular-nums', colorClass)}
       title={tooltip}
     >
       <VoteIcon size={11} strokeWidth={2} aria-hidden="true" />
-      Voted {formatRelativeTime(lastVotedAt)}
+      {t('drepDirectory.votedAgo', { time: formatRelativeTime(lastVotedAt) })}
     </span>
   );
 }
@@ -168,6 +178,8 @@ interface DRepCardProps {
 }
 
 function DRepCard({ drep }: DRepCardProps): React.ReactElement {
+  const { t } = useTranslation();
+  const { formatLovelace } = useFormatters();
   const power = (() => {
     try {
       return formatLovelace(drep.votingPower);
@@ -188,26 +200,26 @@ function DRepCard({ drep }: DRepCardProps): React.ReactElement {
   const statusBadge = drep.isPredefined ? (
     <StatusPill
       status="voting"
-      label="Predefined"
-      title="A built-in Cardano DRep used for auto-vote delegations. These pseudo-identities are not registered like normal DReps but hold significant voting power."
+      label={t('drepDirectory.status.predefined')}
+      title={t('drepDirectory.status.predefinedTitle')}
     />
   ) : drep.isRetired ? (
     <StatusPill
       status="neutral"
-      label="Retired"
-      title="This DRep has filed a retirement certificate. They cannot vote and their voting power is zero."
+      label={t('drepDirectory.status.retired')}
+      title={t('drepDirectory.status.retiredTitle')}
     />
   ) : drep.isActive ? (
-    <StatusPill status="active" label="Active" />
+    <StatusPill status="active" label={t('drepDirectory.status.active')} />
   ) : (
     <StatusPill
       status="expired"
       label={
         drep.expiresEpoch !== null
-          ? `Inactive · expires E${drep.expiresEpoch}`
-          : 'Inactive'
+          ? t('drepDirectory.status.inactiveExpires', { epoch: drep.expiresEpoch })
+          : t('drepDirectory.status.inactive')
       }
-      title="No vote in the last drepActivity epochs (~100 days). Voting power is excluded from the active stake denominator until they vote again."
+      title={t('drepDirectory.status.inactiveTitle')}
     />
   );
   return (
@@ -247,15 +259,15 @@ function DRepCard({ drep }: DRepCardProps): React.ReactElement {
               </h3>
             ) : (
               <h3 className="text-[14px] italic text-[var(--text-tertiary)] truncate">
-                (Unnamed DRep)
+                {t('drepDirectory.unnamed')}
               </h3>
             )}
             {statusBadge}
             {drep.hasScript && (
               <StatusPill
                 status="neutral"
-                label="Script"
-                title="Script-controlled DRep"
+                label={t('drepDirectory.status.script')}
+                title={t('drepDirectory.status.scriptTitle')}
               />
             )}
           </div>
@@ -264,7 +276,7 @@ function DRepCard({ drep }: DRepCardProps): React.ReactElement {
           </div>
           <div className="flex items-center gap-4 text-[12px] text-[var(--text-secondary)] tabular-nums flex-wrap">
             <span>
-              <span className="text-[var(--text-tertiary)]">Power: </span>
+              <span className="text-[var(--text-tertiary)]">{t('drepDirectory.powerLabel')}</span>
               <span className="font-semibold text-[var(--text-primary)]">{power}</span>
             </span>
             {typeof drep.delegatorCount === 'number' && (
@@ -352,6 +364,7 @@ interface ListPage {
 }
 
 export function DRepDirectoryPage(): React.ReactElement {
+  const { t } = useTranslation();
   // URL-backed state so toolbar, search, sort, page and page-size all
   // survive reloads and are deep-linkable. The URL stores 1-indexed
   // pages (more familiar to users) but we work with 0-indexed internally
@@ -486,25 +499,39 @@ export function DRepDirectoryPage(): React.ReactElement {
   const window = paginationWindow(effectivePage, totalPages);
 
   // Plural-aware count label so "1 active DRep" doesn't read awkwardly.
-  const noun = includeInactive ? 'DRep' : 'active DRep';
+  // i18next selects the _one / _other variant from `count`; ja has only _other.
   const counterLabel =
     total === 0
-      ? `No ${noun}s`
-      : `Showing ${startIndex.toLocaleString()}–${endIndex.toLocaleString()} of ${total.toLocaleString()} ${noun}${total === 1 ? '' : 's'}`;
+      ? includeInactive
+        ? t('drepDirectory.countDRep', { count: 0 })
+        : t('drepDirectory.countActiveDRep', { count: 0 })
+      : includeInactive
+        ? t('drepDirectory.showingAll', {
+            count: total,
+            start: startIndex.toLocaleString(),
+            end: endIndex.toLocaleString(),
+            total: total.toLocaleString(),
+          })
+        : t('drepDirectory.showingActive', {
+            count: total,
+            start: startIndex.toLocaleString(),
+            end: endIndex.toLocaleString(),
+            total: total.toLocaleString(),
+          });
 
   return (
     <div className="max-w-3xl mx-auto space-y-6">
       <header className="space-y-1">
         <h1 className="text-[26px] font-bold tracking-tight text-[var(--text-primary)]">
-          DReps
+          {t('drepDirectory.title')}
         </h1>
         <p className="text-sm text-[var(--text-secondary)]">
-          Every registered Cardano DRep, with bios from their CIP-119 anchor metadata.
+          {t('drepDirectory.subtitle')}
           {/* Cadence is set in infra/lib/scheduler-stack.ts; bumped from 5min
               to 30min as part of an emergency WCU-leak fix (commit f6acb024).
               Keep this string in sync with that schedule — it's the only
               user-visible signal of the directory's freshness. */}
-          {' '}Synced from Koios every 30 minutes.
+          {' '}{t('drepDirectory.syncedNote')}
         </p>
       </header>
 
@@ -521,8 +548,8 @@ export function DRepDirectoryPage(): React.ReactElement {
             type="search"
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
-            placeholder="Search DRep names…"
-            aria-label="Search DReps by name"
+            placeholder={t('drepDirectory.searchPlaceholder')}
+            aria-label={t('drepDirectory.searchAriaLabel')}
             className={cn(
               'w-full h-[38px] pl-9 pr-3 rounded-token-md text-[13.5px]',
               'bg-[var(--bg-canvas)] border border-[var(--border-default)]',
@@ -531,7 +558,7 @@ export function DRepDirectoryPage(): React.ReactElement {
             )}
           />
         </div>
-        <div role="tablist" className="tabs flex-shrink-0" aria-label="Sort DReps">
+        <div role="tablist" className="tabs flex-shrink-0" aria-label={t('drepDirectory.sortAriaLabel')}>
           {SORT_OPTIONS.map((opt) => (
             <button
               key={opt.id}
@@ -540,15 +567,15 @@ export function DRepDirectoryPage(): React.ReactElement {
               onClick={() => setSort(opt.id)}
               className={cn('tab', sort === opt.id && 'tab--active')}
             >
-              {opt.label}
+              {t(`drepDirectory.sort.${opt.id}`)}
             </button>
           ))}
         </div>
         <label
           className="inline-flex items-center gap-1.5 text-[12px] text-[var(--text-secondary)]"
-          title="Items per page"
+          title={t('drepDirectory.itemsPerPage')}
         >
-          <span className="hidden sm:inline">Per page:</span>
+          <span className="hidden sm:inline">{t('drepDirectory.perPage')}</span>
           <select
             value={pageSize}
             onChange={(e) => setPageSize(parsePageSize(e.target.value))}
@@ -558,7 +585,7 @@ export function DRepDirectoryPage(): React.ReactElement {
               'text-[var(--text-primary)]',
               'focus:outline-none focus:border-[var(--brand-primary)] focus:shadow-token-focus',
             )}
-            aria-label="Items per page"
+            aria-label={t('drepDirectory.itemsPerPage')}
           >
             {PAGE_SIZE_OPTIONS.map((s) => (
               <option key={s} value={s}>
@@ -576,16 +603,16 @@ export function DRepDirectoryPage(): React.ReactElement {
         </span>
         <label
           className="inline-flex items-center gap-2 cursor-pointer select-none"
-          title="Inactive DReps haven't voted in ~100 days; retired DReps have filed a retirement certificate. Voting power for both is excluded from the active stake denominator."
+          title={t('drepDirectory.showInactiveTitle')}
         >
           <input
             type="checkbox"
             checked={includeInactive}
             onChange={(e) => setIncludeInactive(e.target.checked)}
             className="h-3.5 w-3.5 accent-[var(--brand-primary)] cursor-pointer"
-            aria-label="Include inactive and retired DReps"
+            aria-label={t('drepDirectory.includeInactiveAriaLabel')}
           />
-          <span>Show inactive &amp; retired</span>
+          <span>{t('drepDirectory.showInactive')}</span>
         </label>
       </div>
 
@@ -613,7 +640,7 @@ export function DRepDirectoryPage(): React.ReactElement {
       {/* Error */}
       {error && (
         <div className="rounded-token-lg border border-[var(--danger)]/40 bg-[var(--danger-soft)] p-4 text-sm">
-          <p className="font-semibold text-[var(--danger)]">Failed to load DReps</p>
+          <p className="font-semibold text-[var(--danger)]">{t('drepDirectory.loadFailed')}</p>
           <p className="text-[var(--text-secondary)] mt-1">{error.message}</p>
         </div>
       )}
@@ -622,9 +649,9 @@ export function DRepDirectoryPage(): React.ReactElement {
       {!isLoading && !error && dreps.length === 0 && (
         <div className="text-center py-12 text-[var(--text-tertiary)]">
           {search ? (
-            <p>No DReps matched "{search}".</p>
+            <p>{t('drepDirectory.emptySearch', { search })}</p>
           ) : (
-            <p>No DReps found. The directory may still be syncing — check back shortly.</p>
+            <p>{t('drepDirectory.emptyNoSync')}</p>
           )}
         </div>
       )}
@@ -652,7 +679,7 @@ export function DRepDirectoryPage(): React.ReactElement {
       {totalPages > 1 && (
         <nav
           ref={navRef}
-          aria-label="DRep directory pagination"
+          aria-label={t('drepDirectory.pagination.navAriaLabel')}
           tabIndex={0}
           onKeyDown={onNavKeyDown}
           className={cn(
@@ -665,7 +692,7 @@ export function DRepDirectoryPage(): React.ReactElement {
             type="button"
             onClick={() => setPage(effectivePage - 1)}
             disabled={effectivePage === 0}
-            aria-label="Previous page"
+            aria-label={t('drepDirectory.pagination.previous')}
             className={cn(
               'inline-flex items-center justify-center h-8 px-2 rounded-token-md',
               'text-[12.5px] text-[var(--text-secondary)]',
@@ -676,7 +703,7 @@ export function DRepDirectoryPage(): React.ReactElement {
             )}
           >
             <ChevronLeftIcon size={14} strokeWidth={2} aria-hidden="true" />
-            <span className="ml-1 hidden sm:inline">Back</span>
+            <span className="ml-1 hidden sm:inline">{t('drepDirectory.pagination.back')}</span>
           </button>
           {window.map((entry, idx) => {
             if (entry === '…') {
@@ -697,7 +724,7 @@ export function DRepDirectoryPage(): React.ReactElement {
                 type="button"
                 onClick={() => setPage(entry)}
                 aria-current={isCurrent ? 'page' : undefined}
-                aria-label={`Page ${entry + 1}`}
+                aria-label={t('drepDirectory.pagination.pageLabel', { page: entry + 1 })}
                 className={cn(
                   'inline-flex items-center justify-center min-w-[32px] h-8 px-2 rounded-token-md',
                   'text-[12.5px] tabular-nums',
@@ -715,7 +742,7 @@ export function DRepDirectoryPage(): React.ReactElement {
             type="button"
             onClick={() => setPage(effectivePage + 1)}
             disabled={effectivePage >= totalPages - 1}
-            aria-label="Next page"
+            aria-label={t('drepDirectory.pagination.next')}
             className={cn(
               'inline-flex items-center justify-center h-8 px-2 rounded-token-md',
               'text-[12.5px] text-[var(--text-secondary)]',
@@ -725,7 +752,7 @@ export function DRepDirectoryPage(): React.ReactElement {
               'transition-colors',
             )}
           >
-            <span className="mr-1 hidden sm:inline">Next</span>
+            <span className="mr-1 hidden sm:inline">{t('drepDirectory.pagination.nextLabel')}</span>
             <ChevronRightIcon size={14} strokeWidth={2} aria-hidden="true" />
           </button>
         </nav>
