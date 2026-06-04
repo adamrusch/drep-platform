@@ -8,6 +8,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { GovernanceActionCard } from '@/components/GovernanceActionCard';
 import { GovernanceHistoryWidget } from '@/components/GovernanceHistoryWidget';
 import { HeroBand } from '@/components/HeroBand';
+import { InvitationsCard } from '@/components/InvitationsCard';
 import { StatTile } from '@/components/ui/StatTile';
 import { Button } from '@/components/ui/Button';
 import { DashboardRail } from '@/components/rails/DashboardRail';
@@ -78,6 +79,11 @@ export function DRepDashboard(): React.ReactElement {
           </>
         }
       />
+
+      {/* Pending committee invitation(s). Self-hides when empty. A DRep can
+          also be invited to ANOTHER committee, so this surface belongs here
+          too. */}
+      <InvitationsCard />
 
       {/* Stat grid — 4 tiles, auto-fit minmax(180px, 1fr) per design */}
       <div className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(180px,1fr))]">

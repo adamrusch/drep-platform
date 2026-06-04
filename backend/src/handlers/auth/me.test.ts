@@ -37,6 +37,13 @@ import type {
 
 vi.mock('../../lib/dynamodb', () => ({
   getItem: vi.fn(),
+  // Feature 1 (committee invitations) — `/auth/me` runs a GSI Query for
+  // pending invites and a batchGet to denormalize committee names onto
+  // the response. Stub both; tests that don't care about the invitation
+  // surface get empty results (the default mock returns
+  // `{ items: [], lastEvaluatedKey: undefined, count: 0 }`).
+  queryItems: vi.fn().mockResolvedValue({ items: [], lastEvaluatedKey: undefined, count: 0 }),
+  batchGetItems: vi.fn().mockResolvedValue([]),
   tableNames: {
     users: 'test-users',
     drepCommittees: 'test-drep_committees',
@@ -54,11 +61,13 @@ vi.mock('../../lib/recognition', () => ({
   lookupCurrentDrep: vi.fn(),
 }));
 
-import { getItem } from '../../lib/dynamodb';
+import { getItem, queryItems, batchGetItems } from '../../lib/dynamodb';
 import { lookupCurrentDrep } from '../../lib/recognition';
 import { handler } from './me';
 
 const mockGet = vi.mocked(getItem);
+const mockQuery = vi.mocked(queryItems);
+const mockBatchGet = vi.mocked(batchGetItems);
 const mockLookup = vi.mocked(lookupCurrentDrep);
 
 const WALLET = 'stake1uyvjdz9rxsfsmv44rtk75k2rqyqskrga96dgdfrqjvjjpwsefcjnp';
@@ -116,6 +125,12 @@ describe('GET /auth/me', () => {
   beforeEach(() => {
     mockGet.mockReset();
     mockLookup.mockReset();
+    mockQuery.mockReset();
+    mockBatchGet.mockReset();
+    // Default: no pending invitations. Tests that need a populated set
+    // override mockQuery for that specific case.
+    mockQuery.mockResolvedValue({ items: [], lastEvaluatedKey: undefined, count: 0 });
+    mockBatchGet.mockResolvedValue([]);
   });
 
   it('includes delegatedToDrepId when the upstream returned a real delegation', async () => {
@@ -194,5 +209,83 @@ describe('GET /auth/me', () => {
       buildEvent({ walletAddress: WALLET, roles: ['delegator'] }),
     )) as APIGatewayProxyResultV2;
     expect(res).toMatchObject({ statusCode: 404 });
+  });
+
+  // ---- Feature 1: pendingInvitations surface ----
+
+  it('always returns pendingInvitations (default: empty array)', async () => {
+    mockGet.mockResolvedValueOnce(buildUserRow() as never);
+    mockLookup.mockResolvedValueOnce({ drepId: null, source: 'koios' });
+
+    const res = (await handler(
+      buildEvent({ walletAddress: WALLET, roles: ['delegator'] }),
+    )) as APIGatewayProxyResultV2;
+    expect(res).toMatchObject({ statusCode: 200 });
+    const data = parseBody(res);
+    expect(Array.isArray(data['pendingInvitations'])).toBe(true);
+    expect((data['pendingInvitations'] as unknown[]).length).toBe(0);
+  });
+
+  it('returns pendingInvitations with committee names denormalised in', async () => {
+    mockGet.mockResolvedValueOnce(buildUserRow() as never);
+    mockLookup.mockResolvedValueOnce({ drepId: null, source: 'koios' });
+    // One pending invite from the GSI.
+    mockQuery.mockResolvedValueOnce({
+      items: [
+        {
+          drepId: 'drep1abc',
+          SK: `INVITE#${WALLET}`,
+          inviteeStake: WALLET,
+          status: 'pending',
+          role: 'committee_member',
+          invitedBy: 'stake1chair',
+          invitedAt: '2026-01-01T00:00:00Z',
+        },
+      ],
+      lastEvaluatedKey: undefined,
+      count: 1,
+    });
+    // batchGetItems on drep_committees → the COMMITTEE row for that drepId.
+    mockBatchGet.mockResolvedValueOnce([
+      {
+        drepId: 'drep1abc',
+        SK: 'COMMITTEE',
+        leadWallet: 'stake1chair',
+        committeeName: 'Cardano Builders Collective',
+        description: 'd',
+        members: [],
+        createdAt: '2026-01-01T00:00:00Z',
+        updatedAt: '2026-01-01T00:00:00Z',
+      },
+    ]);
+
+    const res = (await handler(
+      buildEvent({ walletAddress: WALLET, roles: ['delegator'] }),
+    )) as APIGatewayProxyResultV2;
+    expect(res).toMatchObject({ statusCode: 200 });
+    const data = parseBody(res);
+    const invs = data['pendingInvitations'] as Array<Record<string, unknown>>;
+    expect(invs).toHaveLength(1);
+    expect(invs[0]).toMatchObject({
+      drepId: 'drep1abc',
+      committeeName: 'Cardano Builders Collective',
+      role: 'committee_member',
+    });
+  });
+
+  it('does NOT 500 when the pending-invites GSI Query throws', async () => {
+    // Defensive: the bell badge / Accept-Reject card is a soft surface;
+    // any failure on the secondary read path serves an empty list rather
+    // than failing the entire /auth/me round-trip.
+    mockGet.mockResolvedValueOnce(buildUserRow() as never);
+    mockLookup.mockResolvedValueOnce({ drepId: null, source: 'koios' });
+    mockQuery.mockRejectedValueOnce(new Error('GSI down'));
+
+    const res = (await handler(
+      buildEvent({ walletAddress: WALLET, roles: ['delegator'] }),
+    )) as APIGatewayProxyResultV2;
+    expect(res).toMatchObject({ statusCode: 200 });
+    const data = parseBody(res);
+    expect(data['pendingInvitations']).toEqual([]);
   });
 });
