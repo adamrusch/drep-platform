@@ -730,13 +730,12 @@
       "linked": "✓ あなたのDRepにリンクしました。プラットフォーム全体でDRepとして認識されます。",
       "linkedWithName": "✓ あなたのDRep — {{name}} にリンクしました。プラットフォーム全体でDRepとして認識されます。",
       "explainer": "登録済みのDRepをリンクすると、DRepとして認識されます（委員会は不要です）。上で名前を設定しない限り、名前はDRep名がデフォルトになります。",
-      "drepIdPlaceholder": "drep1…",
-      "linking": "リンク中…",
-      "link": "リンク",
-      "reading": "読み取り中…",
-      "useWallet": "ウォレットを使用（CIP-95）",
+      "cip95Note": "リンクにはCIP-95による所有権証明を使用します。ウォレットがDRepキーで一度だけメッセージへの署名を求めます。オンチェーン取引や手数料は発生しません。",
+      "reading": "DRepキーを読み取り中…",
+      "signing": "署名を待っています…",
+      "useWallet": "ウォレットでリンク（CIP-95）",
       "reconnectError": "先にウォレットを再接続してください。",
-      "noKeyError": "このウォレットはDRepキーを返しませんでした（CIP-95に未対応？）。代わりにdrep idを貼り付けてください。",
+      "noKeyError": "このウォレットはDRepキーを返しませんでした。登録済みのDRepがあること、およびCIP-95対応のビルド（最新のEternl、Lace、Nufi）を使用していることを確認してください。",
       "readKeyError": "DRepキーを読み取れませんでした。"
     }
   },

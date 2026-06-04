@@ -7,13 +7,15 @@ import { putItem, getItem, deleteItem, tableNames } from './dynamodb';
 import {
   decodeCardanoAddress,
   publicKeyMatchesAddress,
+  blake2b224,
 } from './cardanoAddress';
+import { drepIdFromDRepKey } from './drepId';
 
 // ---- Auth nonce DynamoDB record ----
 
 interface AuthNonceItem extends Record<string, unknown> {
   nonce: string;
-  kind: 'challenge' | 'mutation' | 'circuit';
+  kind: 'challenge' | 'mutation' | 'circuit' | 'drep_link';
   walletAddress: string;
   expiresAt: number; // epoch seconds for DynamoDB TTL
 }
@@ -237,6 +239,131 @@ export function verifyWalletSignature(
   message: string,
   walletSig: WalletSignature,
 ): { valid: boolean; reason?: string } {
+  const core = verifyCoseSign1Core(message, walletSig);
+  if (!core.valid) return { valid: false, reason: core.reason };
+
+  // --- 5. Bind the verified pubkey to the claimed wallet address ---
+  // This is the load-bearing security check. Without it, an attacker can
+  // present a valid COSE_Sign1 signed by THEIR key and claim ANY
+  // walletAddress — the prior steps would all pass. See the function-
+  // header docblock for the full attack story.
+  //
+  // We catch decode errors so a malformed/unsupported address rejects
+  // cleanly (4xx-equivalent) rather than 5xx-ing through the handler's
+  // generic catch.
+  let decoded;
+  try {
+    decoded = decodeCardanoAddress(walletAddress);
+  } catch {
+    return {
+      valid: false,
+      reason: 'Claimed wallet address is malformed or unsupported',
+    };
+  }
+
+  const matchResult = publicKeyMatchesAddress(core.pubkeyBytes, decoded);
+  if (matchResult === 'mismatch') {
+    return {
+      valid: false,
+      reason: 'Public key does not match the claimed wallet address',
+    };
+  }
+  if (matchResult === 'script-credential') {
+    return {
+      valid: false,
+      reason: 'Script-credential addresses are not supported for login',
+    };
+  }
+  // matchResult === 'match' — fall through.
+
+  // --- 6. (Defense-in-depth) Cross-check the protected-header address.
+  //
+  // CIP-30 `signData` puts the signing address in the COSE_Sign1
+  // protected header (a bstr-wrapped CBOR map) under the string key
+  // "address", with the raw address bytes as the value. We decode the
+  // header and, when the address field is present, require it to equal
+  // `decoded.bytes`. If the field is absent (some older wallet builds
+  // omit it), we skip this check — step 5 above is already authoritative.
+  //
+  // Implementation notes:
+  //   - The protected header is itself a CBOR-encoded bstr; an empty
+  //     header (length 0) is valid CBOR and decodes to nothing. We
+  //     treat an empty header as "no address claim" and skip.
+  //   - `cbor-x` may decode the header map as a `Map<string, unknown>`
+  //     OR as a plain object (its behaviour depends on internal heuristics
+  //     about which keys appeared). We handle both shapes the same way
+  //     the COSE_Key extraction above does.
+  //   - Any decode failure on the header is logged at debug level and
+  //     skipped — it MUST NOT cause a hard fail, because step 5 already
+  //     bound the pubkey to the address. A malformed header from a
+  //     buggy wallet would otherwise lock a legitimate user out.
+  if (core.protectedBytes.length > 0) {
+    try {
+      const headerDecoded = cborDecode(core.protectedBytes);
+      let headerAddressBytes: Buffer | undefined;
+      if (headerDecoded instanceof Map) {
+        const raw = headerDecoded.get('address');
+        if (Buffer.isBuffer(raw)) headerAddressBytes = raw;
+        else if (raw instanceof Uint8Array) headerAddressBytes = Buffer.from(raw);
+      } else if (typeof headerDecoded === 'object' && headerDecoded !== null) {
+        const headerMap = headerDecoded as Record<string, unknown>;
+        const raw = headerMap['address'];
+        if (Buffer.isBuffer(raw)) headerAddressBytes = raw;
+        else if (raw instanceof Uint8Array) headerAddressBytes = Buffer.from(raw);
+      }
+      if (headerAddressBytes && !headerAddressBytes.equals(decoded.bytes)) {
+        return {
+          valid: false,
+          reason:
+            'COSE_Sign1 protected-header address does not match the claimed wallet address',
+        };
+      }
+      // headerAddressBytes === undefined → no address claim in the
+      // header; step 5 is authoritative.
+    } catch (err) {
+      // Don't fail closed on a header decode error — step 5 already
+      // bound the pubkey to the address.
+      console.debug(
+        'verifyWalletSignature: protected header decode failed; relying on credential binding alone:',
+        err,
+      );
+    }
+  }
+
+  return { valid: true };
+}
+
+/**
+ * Internal shared core for COSE_Sign1 verification — extracted so the
+ * CIP-30 wallet-login path AND the CIP-95 DRep-key proof-of-control path
+ * never drift on the cryptographic primitive.
+ *
+ * What this does (and ONLY this):
+ *   1. CBOR-decode the COSE_Sign1 array [protected, _, payload, sig].
+ *   2. Confirm the payload bytes equal the expected `message` (UTF-8).
+ *   3. Extract the 32-byte Ed25519 public key from the COSE_Key (`key`).
+ *   4. Reconstruct the Sig_Structure and Ed25519-verify the signature.
+ *
+ * What this DOES NOT do:
+ *   - Bind the pubkey to any address / credential. The CALLER does that
+ *     binding step using a path-specific check (wallet-address credential
+ *     match for login, drepKey hash equality for DRep proof).
+ *   - Validate the protected-header `address` field. That's an
+ *     address-credential cross-check; for the DRep path there's no address
+ *     so it's not meaningful, and for the login path it's still done in
+ *     `verifyWalletSignature`. Either way, this core stays neutral.
+ *
+ * On success returns the extracted pubkey + protected-header bytes so the
+ * caller can run path-specific cross-checks against them. On failure the
+ * `reason` is human-readable (suitable for surfacing to the caller as a
+ * 401/400 cause).
+ */
+function verifyCoseSign1Core(
+  message: string,
+  walletSig: WalletSignature,
+):
+  | { valid: false; reason: string }
+  | { valid: true; pubkeyBytes: Buffer; protectedBytes: Buffer } {
   if (!walletSig.signature || typeof walletSig.signature !== 'string') {
     return { valid: false, reason: 'Missing or invalid signature field' };
   }
@@ -320,99 +447,98 @@ export function verifyWalletSignature(
       return { valid: false, reason: 'Ed25519 signature verification failed' };
     }
 
-    // --- 5. Bind the verified pubkey to the claimed wallet address ---
-    // This is the load-bearing security check. Without it, an attacker can
-    // present a valid COSE_Sign1 signed by THEIR key and claim ANY
-    // walletAddress — the prior steps would all pass. See the function-
-    // header docblock for the full attack story.
-    //
-    // We catch decode errors so a malformed/unsupported address rejects
-    // cleanly (4xx-equivalent) rather than 5xx-ing through the handler's
-    // generic catch.
-    let decoded;
-    try {
-      decoded = decodeCardanoAddress(walletAddress);
-    } catch {
-      return {
-        valid: false,
-        reason: 'Claimed wallet address is malformed or unsupported',
-      };
-    }
-
-    const matchResult = publicKeyMatchesAddress(pubkeyBytes, decoded);
-    if (matchResult === 'mismatch') {
-      return {
-        valid: false,
-        reason: 'Public key does not match the claimed wallet address',
-      };
-    }
-    if (matchResult === 'script-credential') {
-      return {
-        valid: false,
-        reason: 'Script-credential addresses are not supported for login',
-      };
-    }
-    // matchResult === 'match' — fall through.
-
-    // --- 6. (Defense-in-depth) Cross-check the protected-header address.
-    //
-    // CIP-30 `signData` puts the signing address in the COSE_Sign1
-    // protected header (a bstr-wrapped CBOR map) under the string key
-    // "address", with the raw address bytes as the value. We decode the
-    // header and, when the address field is present, require it to equal
-    // `decoded.bytes`. If the field is absent (some older wallet builds
-    // omit it), we skip this check — step 5 above is already authoritative.
-    //
-    // Implementation notes:
-    //   - The protected header is itself a CBOR-encoded bstr; an empty
-    //     header (length 0) is valid CBOR and decodes to nothing. We
-    //     treat an empty header as "no address claim" and skip.
-    //   - `cbor-x` may decode the header map as a `Map<string, unknown>`
-    //     OR as a plain object (its behaviour depends on internal heuristics
-    //     about which keys appeared). We handle both shapes the same way
-    //     the COSE_Key extraction above does.
-    //   - Any decode failure on the header is logged at debug level and
-    //     skipped — it MUST NOT cause a hard fail, because step 5 already
-    //     bound the pubkey to the address. A malformed header from a
-    //     buggy wallet would otherwise lock a legitimate user out.
-    if (protectedBytes.length > 0) {
-      try {
-        const headerDecoded = cborDecode(protectedBytes);
-        let headerAddressBytes: Buffer | undefined;
-        if (headerDecoded instanceof Map) {
-          const raw = headerDecoded.get('address');
-          if (Buffer.isBuffer(raw)) headerAddressBytes = raw;
-          else if (raw instanceof Uint8Array) headerAddressBytes = Buffer.from(raw);
-        } else if (typeof headerDecoded === 'object' && headerDecoded !== null) {
-          const headerMap = headerDecoded as Record<string, unknown>;
-          const raw = headerMap['address'];
-          if (Buffer.isBuffer(raw)) headerAddressBytes = raw;
-          else if (raw instanceof Uint8Array) headerAddressBytes = Buffer.from(raw);
-        }
-        if (headerAddressBytes && !headerAddressBytes.equals(decoded.bytes)) {
-          return {
-            valid: false,
-            reason:
-              'COSE_Sign1 protected-header address does not match the claimed wallet address',
-          };
-        }
-        // headerAddressBytes === undefined → no address claim in the
-        // header; step 5 is authoritative.
-      } catch (err) {
-        // Don't fail closed on a header decode error — step 5 already
-        // bound the pubkey to the address.
-        console.debug(
-          'verifyWalletSignature: protected header decode failed; relying on credential binding alone:',
-          err,
-        );
-      }
-    }
-
-    return { valid: true };
+    return { valid: true, pubkeyBytes, protectedBytes };
   } catch (err) {
-    console.error('verifyWalletSignature error:', err);
+    console.error('verifyCoseSign1Core error:', err);
     return { valid: false, reason: 'Signature verification threw an error' };
   }
+}
+
+/**
+ * Verify a CIP-95 `signData` proof-of-control for a DRep key.
+ *
+ * # The problem this solves
+ *
+ * A DRep public key is on-chain, public information. Knowing it does NOT
+ * prove the holder has the corresponding private key. To link a wallet to
+ * a DRep we need a fresh signature, made with the DRep key, over a
+ * server-issued nonce that embeds the drep id (so the signed bytes can't
+ * be swapped between victims).
+ *
+ * # What this function checks
+ *
+ *   1. Run `verifyCoseSign1Core` — confirms the COSE_Sign1 payload bytes
+ *      equal `message` AND that the signature is a valid Ed25519 sig over
+ *      the Sig_Structure by the COSE_Key pubkey.
+ *   2. Bind the COSE_Key pubkey to the CLAIMED `drepKey`: derive a drep id
+ *      from each and require equality. Equivalently, the blake2b-224 hash
+ *      of the COSE_Key pubkey must equal the blake2b-224 hash of the
+ *      claimed `drepKey`. We compare via `drepIdFromDRepKey` (the same
+ *      derivation used for the `users.drepId` write) so this function and
+ *      the caller share the identity-derivation truth.
+ *
+ *   We deliberately do NOT do an address-credential check or a
+ *   protected-header address check here. There is no address — the proof
+ *   is the pubkey↔drepKey identity, full stop. CIP-95 wallets vary in
+ *   whether they include an `address` field in the protected header
+ *   (some put the DRep enterprise address, some omit), and treating that
+ *   as load-bearing would lock out conformant wallets.
+ *
+ * # Inputs
+ *
+ *   - `drepKey`: hex of the 32-byte Ed25519 DRep public key the user
+ *     claims to control (returned by `cip95.getPubDRepKey()`).
+ *   - `message`: the exact UTF-8 string the wallet signed — the message
+ *     this server issued via `generateDRepLinkNonce`.
+ *   - `walletSig`: `{ signature, key }` — CIP-95 `signData`'s return,
+ *     COSE_Sign1 and COSE_Key in hex respectively.
+ */
+export function verifyDRepKeySignature(
+  drepKey: string,
+  message: string,
+  walletSig: WalletSignature,
+): { valid: boolean; reason?: string } {
+  if (!/^[0-9a-fA-F]{64}$/.test(drepKey)) {
+    return { valid: false, reason: 'drepKey must be a 32-byte hex Ed25519 public key' };
+  }
+
+  const core = verifyCoseSign1Core(message, walletSig);
+  if (!core.valid) return { valid: false, reason: core.reason };
+
+  // Bind the COSE_Key pubkey to the CLAIMED drepKey by deriving the drep
+  // id from each and requiring equality. Cheaper alternatives (direct hash
+  // compare) would also work but routing through drepIdFromDRepKey keeps
+  // the truth in one place — the same helper the handler will use to
+  // compute the value it writes to users.drepId.
+  let claimedDRepId: string;
+  let signingDRepId: string;
+  try {
+    claimedDRepId = drepIdFromDRepKey(drepKey);
+    signingDRepId = drepIdFromDRepKey(core.pubkeyBytes.toString('hex'));
+  } catch (err) {
+    console.error('verifyDRepKeySignature drep id derivation failed:', err);
+    return { valid: false, reason: 'Failed to derive drep id from key' };
+  }
+
+  if (claimedDRepId !== signingDRepId) {
+    return {
+      valid: false,
+      reason: 'Signing key does not match the claimed DRep key',
+    };
+  }
+
+  // Belt-and-braces: hash equality (the relationship drep id implies).
+  // If this ever drifts from the id check above, both fail closed.
+  const claimedHash = blake2b224(Buffer.from(drepKey, 'hex'));
+  const signingHash = blake2b224(core.pubkeyBytes);
+  if (!claimedHash.equals(signingHash)) {
+    return {
+      valid: false,
+      reason: 'Signing key hash does not match the claimed DRep key hash',
+    };
+  }
+
+  return { valid: true };
 }
 
 // ---- JWT ----
@@ -628,6 +754,134 @@ export async function validateMutationNonce(
   } catch (err) {
     if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
       return { valid: false, reason: 'Mutation nonce not found or already used' };
+    }
+    throw err;
+  }
+  return { valid: true };
+}
+
+// ---- DRep-link proof-of-control nonce ----
+
+const DREP_LINK_NONCE_TTL_MS = 5 * 60 * 1_000; // 5 minutes
+
+/**
+ * Build the message a wallet must sign with the CIP-95 DRep key to prove
+ * it controls that key.
+ *
+ * # Why the drep id is embedded in the message
+ *
+ * Without it, the proof reduces to "I can sign some bytes with SOME DRep
+ * key" — sufficient to prove control of A key, but not of the SPECIFIC
+ * key the caller is claiming. An attacker who controls DRep B could sign
+ * a nonce-only message with key B, then submit it claiming victim
+ * DRep A. The handler would consume the nonce, verify the signature, and
+ * — without the embed — would have no way to refuse the swap before the
+ * downstream `drepKey` body field is acted on.
+ *
+ * With the drep id IN the signed bytes, that swap is detected at the
+ * signature-payload-equality check: the message the attacker signed
+ * contains DRep B's id, but the verifier is checking it against the
+ * server-issued message which embeds the caller-supplied `drepKey`'s
+ * derived id (DRep A). Payload mismatch → reject.
+ *
+ * # Why this format
+ *
+ *   - Stage-bound: `(stage=test)` etc. — a test signature can't be
+ *     replayed against prod even if nonce tables were unified.
+ *   - Two-pronged identity: BOTH the wallet stake address (the platform
+ *     identity) AND the DRep id appear, so the message attests "this
+ *     wallet is claiming control of this DRep" — readable to the user in
+ *     a wallet signing dialog AND verifiable server-side.
+ *   - Nonce: a single-use server-issued secret pins the proof to one
+ *     verification attempt.
+ *
+ * Issuer (`generateDRepLinkNonce`) and verifier (`drep/link` handler)
+ * BOTH call this helper, so the bytes stay identical.
+ */
+export function buildDRepLinkMessage(
+  nonce: string,
+  walletAddress: string,
+  drepId: string,
+): string {
+  const stage = process.env['STAGE'] ?? 'dev';
+  return (
+    `drep-platform DRep proof-of-control (stage=${stage}):\n\n` +
+    `Wallet: ${walletAddress}\n` +
+    `DRep: ${drepId}\n` +
+    `Nonce: ${nonce}`
+  );
+}
+
+/**
+ * Issue a single-use nonce for DRep proof-of-control. The wallet signs the
+ * returned `message` with the CIP-95 DRep key; the verifier reconstructs
+ * the message from { walletAddress, drepId, nonce } and rejects on any
+ * mismatch.
+ *
+ * Distinct `kind` from the login challenge / mutation nonces so a leaked
+ * challenge can't be cross-used here (and vice-versa).
+ */
+export async function generateDRepLinkNonce(
+  walletAddress: string,
+  drepId: string,
+): Promise<{ nonce: string; message: string; expiresAt: string }> {
+  const nonce = crypto.randomBytes(16).toString('hex');
+  const expiresAtDate = new Date(Date.now() + DREP_LINK_NONCE_TTL_MS);
+  const expiresAtSec = Math.floor(expiresAtDate.getTime() / 1000);
+
+  const item: AuthNonceItem = {
+    nonce,
+    kind: 'drep_link',
+    walletAddress,
+    expiresAt: expiresAtSec,
+  };
+
+  await putItem(tableNames.authNonces, item, 'attribute_not_exists(#nonce)', {
+    '#nonce': 'nonce',
+  });
+
+  const message = buildDRepLinkMessage(nonce, walletAddress, drepId);
+  return { nonce, message, expiresAt: expiresAtDate.toISOString() };
+}
+
+/**
+ * Peek + atomically consume a DRep-link nonce bound to `walletAddress`.
+ * Same shape as `validateMutationNonce` — splits peek and consume in one
+ * call because the caller has no reason to check existence without also
+ * consuming on success.
+ *
+ * The conditional delete ensures two concurrent link attempts can never
+ * both succeed against the same nonce.
+ */
+export async function validateDRepLinkNonce(
+  nonce: string,
+  walletAddress: string,
+): Promise<{ valid: boolean; reason?: string }> {
+  const stored = await getItem<AuthNonceItem>(tableNames.authNonces, { nonce });
+  if (!stored || stored.kind !== 'drep_link') {
+    return { valid: false, reason: 'DRep-link nonce not found or already used' };
+  }
+  if (Date.now() / 1000 > stored.expiresAt) {
+    try {
+      await deleteItem(tableNames.authNonces, { nonce });
+    } catch {
+      // Best-effort cleanup
+    }
+    return { valid: false, reason: 'DRep-link nonce has expired' };
+  }
+  if (stored.walletAddress !== walletAddress) {
+    return { valid: false, reason: 'DRep-link nonce does not match wallet address' };
+  }
+  try {
+    await deleteItem(
+      tableNames.authNonces,
+      { nonce },
+      'attribute_exists(#nonce)',
+      { '#nonce': 'nonce' },
+    );
+  } catch (err) {
+    if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
+      return { valid: false, reason: 'DRep-link nonce not found or already used' };
     }
     throw err;
   }
