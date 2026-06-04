@@ -3,30 +3,74 @@ import { getItem, updateItem, tableNames } from '../../lib/dynamodb';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { writeAuditEvent } from '../../lib/audit';
 import { drepIdFromDRepKey } from '../../lib/drepId';
-import { pasteDrepLinkAllowed } from '../../lib/stage';
-import { ok, badRequest, conflict, notFound, forbidden, handleError } from '../_response';
+import {
+  buildDRepLinkMessage,
+  validateDRepLinkNonce,
+  verifyDRepKeySignature,
+} from '../../lib/auth';
+import { ok, badRequest, unauthorized, conflict, notFound, handleError } from '../_response';
 
 interface LinkDrepBody {
-  /** CIP-95 DRep public key (hex) — derived server-side, proves control. */
+  /** CIP-95 DRep public key (hex). What `cip95.getPubDRepKey()` returned. */
   drepKey?: string;
-  /** Or a pasted drep id — verified registered, but does NOT prove control. */
-  drepId?: string;
+  /** The nonce issued by POST /drep/link/challenge for this drepKey. */
+  nonce?: string;
+  /** COSE_Sign1 hex from `cip95.signData(<drepId>, <message-as-hex>)`. */
+  signature?: string;
+  /** COSE_Key hex from the same `cip95.signData` return. */
+  key?: string;
 }
 
 /**
- * Link the caller's wallet to their on-chain DRep, so they're recognized as a
- * DRep across the platform (profile, clubhouse names) WITHOUT needing a
- * committee. Sets users.drepId.
+ * POST /drep/link
  *
- * SECURITY — neither current path PROVES control of the DRep:
- *   - `drepKey`: we DERIVE the drep id from a public key, but a DRep public key
- *     is public on-chain information — deriving its id proves the DRep exists,
- *     NOT that the caller holds the corresponding private key.
- *   - `drepId` (paste): same — proves existence, not control.
- * Real proof-of-control requires a CIP-95 signature over a fresh nonce, made
- * with the DRep key and verified against it. Until that's implemented, BOTH
- * paths are gated to non-prod (`pasteDrepLinkAllowed`), so a committee can never
- * bind to an unverified DRep in production.
+ * Link the caller's wallet to their on-chain DRep, so they're recognized as
+ * a DRep across the platform (profile, clubhouse names) WITHOUT needing a
+ * committee. Sets `users.drepId`.
+ *
+ * # Security (the whole point of this handler)
+ *
+ * The DRep public key is on-chain public information. Knowing it does NOT
+ * prove the caller controls the corresponding private key — and a DRep
+ * binding is sensitive (it grants the caller "is this on-chain DRep"
+ * status throughout the platform and may bind to committee membership).
+ * To link, the caller must:
+ *
+ *   1. Have called POST /drep/link/challenge with the same `drepKey` and
+ *      obtained a `nonce` + `message`. (The message embeds the wallet
+ *      address AND the drep id derived from drepKey — see
+ *      `buildDRepLinkMessage`.)
+ *   2. Sign that message with the CIP-95 DRep key via `cip95.signData`,
+ *      returning a COSE_Sign1 `{signature, key}`.
+ *   3. POST `{drepKey, nonce, signature, key}` here.
+ *
+ * This handler then:
+ *
+ *   a. Atomically consumes the nonce bound to the caller's wallet.
+ *   b. Reconstructs the EXACT message from { walletAddress, drepId, nonce }
+ *      — issuer and verifier share `buildDRepLinkMessage`.
+ *   c. Runs `verifyDRepKeySignature`, which:
+ *        - decodes COSE_Sign1 and confirms the payload equals the
+ *          reconstructed message,
+ *        - extracts the Ed25519 pubkey from the COSE_Key,
+ *        - confirms the pubkey hashes (blake2b-224) to the same
+ *          credential as `drepKey` — i.e. the SIGNING key IS the
+ *          claimed DRep key,
+ *        - Ed25519-verifies the Sig_Structure.
+ *      That binding is the load-bearing security check: without it,
+ *      an attacker could sign a victim-addressed message with their OWN
+ *      DRep key and present the resulting COSE_Sign1 alongside the
+ *      victim's drepKey in the body. The pubkey↔drepKey hash check kills
+ *      that swap.
+ *   d. Confirms the drep id is in the on-chain directory.
+ *   e. Writes users.drepId.
+ *
+ * # No paste path. No stage gating. No silent auto-link.
+ *
+ * The previous "paste a drep id" and "derive from drepKey alone" paths
+ * proved only that the DRep exists, not that the caller controlled it —
+ * they were gated to non-prod via a stage helper. With this rewrite the
+ * proof-of-control path is the ONLY path, on all stages.
  */
 export const handler = async (
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
@@ -42,33 +86,41 @@ export const handler = async (
       return badRequest('Invalid JSON body');
     }
 
+    const drepKey = body.drepKey?.trim();
+    const nonce = body.nonce?.trim();
+    const signature = body.signature?.trim();
+    const key = body.key?.trim();
+
+    if (!drepKey || !nonce || !signature || !key) {
+      return badRequest('drepKey, nonce, signature, and key are all required');
+    }
+    if (!/^[0-9a-fA-F]{64}$/.test(drepKey)) {
+      return badRequest('drepKey must be a 32-byte hex Ed25519 public key');
+    }
+
     let drepId: string;
-    if (body.drepKey) {
-      // Deriving a drep id from a public key does NOT prove control — gate to
-      // non-prod until a real CIP-95 signed proof-of-control is implemented.
-      if (!pasteDrepLinkAllowed()) {
-        return forbidden(
-          'Linking a DRep in production requires proof you control the DRep key, ' +
-            'which is not yet available. (Coming soon: CIP-95 signed proof-of-control.)',
-        );
-      }
-      try {
-        drepId = drepIdFromDRepKey(body.drepKey.trim());
-      } catch {
-        return badRequest('Invalid CIP-95 DRep key');
-      }
-    } else if (body.drepId && /^drep1[0-9a-z]{10,}$/.test(body.drepId.trim())) {
-      // Paste path proves the DRep exists, not that the caller controls it.
-      // Disabled in production to prevent impersonation — CIP-95 only there.
-      if (!pasteDrepLinkAllowed()) {
-        return forbidden(
-          'To link your DRep, connect a CIP-95 wallet so we can verify you control it. ' +
-            'Pasting a drep id is disabled here to prevent impersonation.',
-        );
-      }
-      drepId = body.drepId.trim();
-    } else {
-      return badRequest('Provide your CIP-95 DRep key (drepKey) or your registered drep id (drepId).');
+    try {
+      drepId = drepIdFromDRepKey(drepKey);
+    } catch {
+      return badRequest('Invalid CIP-95 DRep key');
+    }
+
+    // Consume the nonce BEFORE signature verification. Distinct-kind nonces
+    // (`drep_link` vs `mutation` / `challenge`) mean a stolen mutation
+    // nonce can never satisfy this check. If the consume succeeds the
+    // nonce is gone — replays die here.
+    const nonceResult = await validateDRepLinkNonce(nonce, authCtx.walletAddress);
+    if (!nonceResult.valid) {
+      return unauthorized(nonceResult.reason ?? 'Invalid DRep-link nonce');
+    }
+
+    // Reconstruct the EXACT message the wallet signed. Issuer + verifier
+    // share `buildDRepLinkMessage` so the bytes match.
+    const message = buildDRepLinkMessage(nonce, authCtx.walletAddress, drepId);
+
+    const sigResult = verifyDRepKeySignature(drepKey, message, { signature, key });
+    if (!sigResult.valid) {
+      return unauthorized(sigResult.reason ?? 'Invalid DRep-key signature');
     }
 
     // Must be a registered DRep on-chain (present in the synced directory).
@@ -104,7 +156,7 @@ export const handler = async (
       entityId: authCtx.walletAddress,
       eventType: 'drep.linked',
       actorWallet: authCtx.walletAddress,
-      metadata: { drepId, linkedVia: body.drepKey ? 'cip95' : 'drepId' },
+      metadata: { drepId, linkedVia: 'cip95-proof-of-control' },
     });
 
     return ok({ drepId, drepName: dir.givenName });
