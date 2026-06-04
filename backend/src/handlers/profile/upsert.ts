@@ -9,6 +9,12 @@ interface UpsertProfileBody {
   displayName?: string;
   bio?: string;
   socialLinks?: SocialLinks;
+  /** When true, future committee invitations are auto-rejected at creation
+   *  (no membership slot claimed). Does NOT touch existing pending invites
+   *  — use POST /me/invitations/decline-all for that. Setting to `false`
+   *  reverts to normal behavior; omitting the field leaves the prior value
+   *  unchanged. */
+  autoDeclineInvites?: boolean;
 }
 
 export const handler = async (
@@ -41,6 +47,10 @@ export const handler = async (
       return badRequest('bio exceeds maximum length of 2,000 characters');
     }
 
+    if (body.autoDeclineInvites !== undefined && typeof body.autoDeclineInvites !== 'boolean') {
+      return badRequest('autoDeclineInvites must be a boolean');
+    }
+
     const now = new Date().toISOString();
     const existing = await getItem<UserItem>(tableNames.users, {
       walletAddress: authCtx.walletAddress,
@@ -59,6 +69,13 @@ export const handler = async (
       sessionTokenHash: existing?.sessionTokenHash,
       sessionExpiry: existing?.sessionExpiry,
       delegationHistory: existing?.delegationHistory,
+      // Persist the new flag explicitly so a `false` from the FE correctly
+      // overrides a stored `true` (the spread-fallback would have lost it).
+      ...(body.autoDeclineInvites !== undefined
+        ? { autoDeclineInvites: body.autoDeclineInvites }
+        : existing?.autoDeclineInvites !== undefined
+          ? { autoDeclineInvites: existing.autoDeclineInvites }
+          : {}),
     };
 
     await putItem(tableNames.users, updated);
@@ -77,6 +94,7 @@ export const handler = async (
           ...(body.displayName !== undefined ? ['displayName'] : []),
           ...(body.bio !== undefined ? ['bio'] : []),
           ...(body.socialLinks !== undefined ? ['socialLinks'] : []),
+          ...(body.autoDeclineInvites !== undefined ? ['autoDeclineInvites'] : []),
         ],
       },
     });

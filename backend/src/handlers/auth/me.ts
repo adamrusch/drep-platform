@@ -35,10 +35,11 @@
  *     landing / "your DRep" UX should use THIS field, not `drepId`.
  */
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
-import { getItem, tableNames } from '../../lib/dynamodb';
-import type { UserItem } from '../../lib/types';
+import { getItem, batchGetItems, tableNames } from '../../lib/dynamodb';
+import type { DRepCommitteeItem, UserItem } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { lookupCurrentDrep } from '../../lib/recognition';
+import { listPendingInvitesForWallet } from '../committee/_committee';
 import { ok, unauthorized, notFound, internalError } from '../_response';
 
 export const handler = async (
@@ -47,12 +48,15 @@ export const handler = async (
   try {
     const authCtx = extractAuthContext(event);
 
-    // Fetch the stored user row and resolve the live on-chain delegation
-    // in parallel. The delegation lookup is bounded (Koios 8s + Blockfrost
-    // fallback) and cached for 60s per Lambda container; on the warm path
-    // it adds essentially zero latency. Failures are non-fatal — the
-    // field is just omitted from the response.
-    const [user, delegationResult] = await Promise.all([
+    // Fetch the stored user row, the live on-chain delegation, and any
+    // pending committee invitations in parallel. The delegation lookup is
+    // bounded (Koios 8s + Blockfrost fallback) and cached for 60s per
+    // Lambda container; the GSI Query for pending invites is a single
+    // partition lookup (sparse on the inviteeStake-status-index, scoped to
+    // status='pending'), so it adds essentially zero latency. Failures on
+    // either secondary lookup are non-fatal — the corresponding fields are
+    // just omitted/empty in the response.
+    const [user, delegationResult, pendingInvites] = await Promise.all([
       getItem<UserItem>(tableNames.users, {
         walletAddress: authCtx.walletAddress,
         SK: 'PROFILE',
@@ -63,6 +67,13 @@ export const handler = async (
         // want `/auth/me` to fail the whole request over a soft signal.
         console.warn('me handler: lookupCurrentDrep threw:', err);
         return { drepId: null, source: null } as const;
+      }),
+      listPendingInvitesForWallet(authCtx.walletAddress).catch((err) => {
+        // Same defensive pattern — the bell badge / Accept-Reject card
+        // is a soft surface; if the GSI Query fails for any reason we
+        // serve `pendingInvitations: []` and the user can still browse.
+        console.warn('me handler: listPendingInvitesForWallet threw:', err);
+        return [] as Awaited<ReturnType<typeof listPendingInvitesForWallet>>;
       }),
     ]);
 
@@ -80,6 +91,27 @@ export const handler = async (
     const delegatedToDrepId =
       delegationResult.source !== null ? delegationResult.drepId : undefined;
 
+    // Denormalize committee names onto the pending-invitation view so the
+    // bell badge and Accept-Reject card don't have to round-trip per row.
+    // Batch-read every COMMITTEE row at once; missing committees (an
+    // invite whose committee row vanished — shouldn't happen but defensive)
+    // get an empty name string and the FE renders the drepId fallback.
+    const committeeKeys = pendingInvites.map((i) => ({ drepId: i.drepId, SK: 'COMMITTEE' as const }));
+    const committeeRows =
+      committeeKeys.length > 0
+        ? await batchGetItems<DRepCommitteeItem>(tableNames.drepCommittees, committeeKeys).catch((err) => {
+            console.warn('me handler: committee batchGet for invites threw:', err);
+            return [] as DRepCommitteeItem[];
+          })
+        : [];
+    const nameByDrepId = new Map(committeeRows.map((c) => [c.drepId, c.committeeName] as const));
+    const pendingInvitations = pendingInvites.map((i) => ({
+      drepId: i.drepId,
+      committeeName: nameByDrepId.get(i.drepId) ?? '',
+      role: i.role,
+      invitedAt: i.invitedAt,
+    }));
+
     return ok(
       {
         ...safeUser,
@@ -96,6 +128,7 @@ export const handler = async (
         // file-header comment for why this is a separate field from
         // `drepId` and which one each UX surface should consume.
         ...(delegatedToDrepId !== undefined ? { delegatedToDrepId } : {}),
+        pendingInvitations,
       },
       // Defense in depth: this endpoint is auth-bound and MUST NOT be
       // shared between users. The CloudFront distribution in front of

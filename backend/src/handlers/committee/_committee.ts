@@ -9,6 +9,8 @@ import { resolveCommitteeVote } from '../../lib/committeeVoteResolver';
 import type {
   DRepCommitteeItem,
   CommitteeMemberItem,
+  CommitteeInviteItem,
+  InviteStatus,
   VotingConfigItem,
   CommitteeVoteProposalItem,
   CommitteeVoteCastItem,
@@ -68,8 +70,23 @@ export function defaultApprovalThreshold(memberCount: number): number {
   return Math.floor(memberCount / 2) + 1;
 }
 
-/** The LIVE "X of N" rule for a committee: X = approvalThreshold (or a
- *  simple-majority default), N = current member count. */
+/** The LIVE "X of N" rule for a committee (decision B — "Chair's full X
+ *  stands").
+ *
+ *  X = `approvalThreshold` (or a simple-majority default if the committee
+ *  is a legacy row without one). This is the Chair's authoritative
+ *  intended threshold and is NOT clamped down by acceptance progress.
+ *
+ *  N = the number of ACCEPTED members — `committee.members.length`. This
+ *  is the count the UI displays alongside X so the user sees "X of {{N
+ *  currently accepted}} — needs ≥{{X}} agrees". `members[]` only contains
+ *  members who accepted (formation auto-adds the Chair to `members[]`;
+ *  others are added on accept). Invited-but-pending wallets are NOT in
+ *  this count.
+ *
+ *  Feasibility (X ≤ N) is the OPEN-PROPOSAL guard's job, not this
+ *  function's — see `assertEnoughAcceptedToOpen` in handlers/committee/
+ *  openProposal.ts. */
 export function currentApprovalRule(
   committee: DRepCommitteeItem,
 ): { approvalThreshold: number; memberCount: number } {
@@ -80,13 +97,75 @@ export function currentApprovalRule(
 
 /** The "X of N" rule SNAPSHOTTED on a proposal at open time. New proposals
  *  carry approvalThreshold + memberCount; legacy ones fall back to the old
- *  quorum/threshold fields so they still resolve without crashing. */
+ *  quorum/threshold fields so they still resolve without crashing.
+ *
+ *  Under decision B the snapshotted `memberCount` is the count of ACCEPTED
+ *  members at open time — the frozen eligible-voter set's size — and
+ *  `approvalThreshold` is the Chair's intended X. */
 export function approvalRuleFromProposal(
   p: Pick<CommitteeVoteProposalItem, 'approvalThreshold' | 'memberCount' | 'quorum' | 'thresholdPct'>,
 ): { approvalThreshold: number; memberCount: number } {
   const approvalThreshold = p.approvalThreshold ?? p.quorum ?? 1;
   const memberCount = p.memberCount ?? p.quorum ?? approvalThreshold;
   return { approvalThreshold, memberCount };
+}
+
+// ============================================================
+// Invitation helpers
+// ============================================================
+
+/** Compose the SK used for an INVITE row on `drep_committees`. Exported so
+ *  every read/write site uses the same shape — the format is part of the
+ *  table contract and the deletion paths rely on key construction matching
+ *  the write side exactly. */
+export function inviteSk(inviteeStake: string): string {
+  return `INVITE#${inviteeStake}`;
+}
+
+/** Load a single invite row (by drepId + invitee stake address). */
+export async function loadInvite(
+  drepId: string,
+  inviteeStake: string,
+): Promise<CommitteeInviteItem | undefined> {
+  return getItem<CommitteeInviteItem>(tableNames.drepCommittees, {
+    drepId,
+    SK: inviteSk(inviteeStake),
+  });
+}
+
+/** All invitations under one committee (any status). */
+export async function listCommitteeInvites(
+  drepId: string,
+): Promise<CommitteeInviteItem[]> {
+  const res = await queryItems<CommitteeInviteItem>(tableNames.drepCommittees, {
+    keyConditionExpression: 'drepId = :d AND begins_with(SK, :p)',
+    expressionAttributeValues: { ':d': drepId, ':p': 'INVITE#' },
+  });
+  return res.items;
+}
+
+/** Pending invitations for a given invitee wallet — single Query against
+ *  the sparse `inviteeStake-status-index` GSI. */
+export async function listPendingInvitesForWallet(
+  inviteeStake: string,
+): Promise<CommitteeInviteItem[]> {
+  const res = await queryItems<CommitteeInviteItem>(tableNames.drepCommittees, {
+    indexName: 'inviteeStake-status-index',
+    keyConditionExpression: 'inviteeStake = :w AND #s = :p',
+    expressionAttributeNames: { '#s': 'status' },
+    expressionAttributeValues: { ':w': inviteeStake, ':p': 'pending' satisfies InviteStatus },
+  });
+  return res.items;
+}
+
+/** Slim public projection of an invite — what the user sees on the bell
+ *  badge / Accept-Reject card. The committee name is denormalized in by
+ *  the caller from a `loadCommittee(drepId)` lookup. */
+export interface PendingInvitationView {
+  drepId: string;
+  committeeName: string;
+  role: 'committee_member' | 'trusted_delegator';
+  invitedAt: string;
 }
 
 /** Build a persisted tally snapshot from casts + an "X of N" rule. */

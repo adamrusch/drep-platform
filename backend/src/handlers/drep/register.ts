@@ -4,6 +4,7 @@ import type {
   DRepCommitteeItem,
   CommitteeMemberItem,
   CommitteeMembershipItem,
+  CommitteeInviteItem,
   UserItem,
 } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
@@ -15,7 +16,7 @@ import {
   isNewWallet,
   maybeTripSafetyMode,
 } from '../../lib/safetyMode';
-import { MIN_COMMITTEE_MEMBERS } from '../committee/_committee';
+import { MIN_COMMITTEE_MEMBERS, inviteSk } from '../committee/_committee';
 import { created, badRequest, conflict, forbidden, handleError } from '../_response';
 
 interface RegisterDRepBody {
@@ -106,24 +107,27 @@ export const handler = async (
       );
     }
 
-    const memberCount = 1 + otherStakes.size; // Chair + unique others
-    if (memberCount < MIN_COMMITTEE_MEMBERS) {
+    // The Chair's INTENDED committee size: Chair (1) + every invited address
+    // (regardless of accept/decline). Under decision B this is the bound on X.
+    const intendedN = 1 + otherStakes.size;
+    if (intendedN < MIN_COMMITTEE_MEMBERS) {
       return badRequest(
         `A committee needs at least ${MIN_COMMITTEE_MEMBERS} members. You (the Chair) plus ${
           MIN_COMMITTEE_MEMBERS - 1
-        } more — add ${MIN_COMMITTEE_MEMBERS - memberCount} more address(es).`,
+        } more — add ${MIN_COMMITTEE_MEMBERS - intendedN} more address(es).`,
       );
     }
 
-    // ---- Validate X of N ----
+    // ---- Validate X of intendedN ----
     const X = body.approvalThreshold;
-    if (typeof X !== 'number' || !Number.isInteger(X) || X < 1 || X > memberCount) {
+    if (typeof X !== 'number' || !Number.isInteger(X) || X < 1 || X > intendedN) {
       return badRequest(
-        `approvalThreshold (X) must be a whole number between 1 and ${memberCount} (the committee size).`,
+        `approvalThreshold (X) must be a whole number between 1 and ${intendedN} (the intended committee size).`,
       );
     }
 
-    // ---- Active check: which member stake addresses have logged in ----
+    // ---- Read invitee user rows: needed for both the "active" badge and
+    // the `autoDeclineInvites` honoring path. One batched read covers both. ----
     const others = [...otherStakes];
     const userRows =
       others.length > 0
@@ -133,6 +137,11 @@ export const handler = async (
           )
         : [];
     const activeSet = new Set(userRows.map((r) => r.walletAddress));
+    const autoDeclineSet = new Set(
+      userRows
+        .filter((r) => r.autoDeclineInvites === true)
+        .map((r) => r.walletAddress),
+    );
 
     const nowMs = Date.now();
     const now = new Date(nowMs).toISOString();
@@ -146,15 +155,18 @@ export const handler = async (
       );
     }
 
+    // The Chair is added directly to `members[]` (they form the committee —
+    // they're already a member). Every OTHER address becomes an INVITE row
+    // — pending unless the invitee has `autoDeclineInvites=true`, in which
+    // case the invite is auto-rejected and no membership slot is claimed.
     const members: CommitteeMemberItem[] = [
       { walletAddress: chairStake, joinedAt: now, role: 'lead_drep', active: true },
-      ...others.map<CommitteeMemberItem>((s) => ({
-        walletAddress: s,
-        joinedAt: now,
-        role: 'committee_member',
-        active: activeSet.has(s),
-      })),
     ];
+
+    // `intendedMemberCount` = 1 (Chair) + every invited address (regardless of
+    // autoDecline status). The Chair's intended N is what they typed into the
+    // formation wizard — the validator must enforce X ≤ intendedN.
+    const intendedMemberCount = 1 + others.length;
 
     const committee: DRepCommitteeItem = {
       drepId,
@@ -165,22 +177,65 @@ export const handler = async (
       onChainMetadata: body.onChainMetadata,
       members,
       approvalThreshold: X,
+      intendedMemberCount,
       createdAt: now,
       updatedAt: now,
     };
 
-    const membershipPuts = members.map((m) => ({
-      Put: {
-        TableName: tableNames.committeeMembership,
-        Item: {
-          walletAddress: m.walletAddress,
-          drepId,
-          role: m.role === 'lead_drep' ? 'lead' : 'member',
-          joinedAt: now,
-        } as CommitteeMembershipItem as unknown as Record<string, unknown>,
-        ConditionExpression: 'attribute_not_exists(walletAddress)',
-      },
-    }));
+    // Chair's own membership slot — always claimed.
+    const chairMembership: CommitteeMembershipItem = {
+      walletAddress: chairStake,
+      drepId,
+      role: 'lead',
+      joinedAt: now,
+    };
+
+    // Build the per-invitee TransactItems. Two cases per invitee:
+    //   - autoDecline=true → write an INVITE row with status='rejected'
+    //                        ONLY. Skip the membership slot claim (frees
+    //                        the wallet to participate elsewhere later).
+    //   - autoDecline=false → write a pending INVITE row AND claim the
+    //                        membership slot with role='invited'.
+    const inviteItems: Array<Record<string, unknown>> = [];
+    const slotItems: Array<Record<string, unknown>> = [];
+    let autoDeclinedCount = 0;
+    for (const inviteeStake of others) {
+      const isAutoDecline = autoDeclineSet.has(inviteeStake);
+      const invite: CommitteeInviteItem = {
+        drepId,
+        SK: inviteSk(inviteeStake),
+        inviteeStake,
+        status: isAutoDecline ? 'rejected' : 'pending',
+        role: 'committee_member',
+        invitedBy: chairStake,
+        invitedAt: now,
+        ...(isAutoDecline ? { respondedAt: now } : {}),
+      };
+      inviteItems.push({
+        Put: {
+          TableName: tableNames.drepCommittees,
+          Item: invite as unknown as Record<string, unknown>,
+          ConditionExpression: 'attribute_not_exists(drepId) AND attribute_not_exists(SK)',
+        },
+      });
+      if (isAutoDecline) {
+        autoDeclinedCount++;
+        continue;
+      }
+      const slot: CommitteeMembershipItem = {
+        walletAddress: inviteeStake,
+        drepId,
+        role: 'invited',
+        joinedAt: now,
+      };
+      slotItems.push({
+        Put: {
+          TableName: tableNames.committeeMembership,
+          Item: slot as unknown as Record<string, unknown>,
+          ConditionExpression: 'attribute_not_exists(walletAddress)',
+        },
+      });
+    }
 
     const rolesSet = new Set([...authCtx.roles, 'lead_drep']);
 
@@ -193,7 +248,15 @@ export const handler = async (
             ConditionExpression: 'attribute_not_exists(drepId)',
           },
         },
-        ...membershipPuts,
+        {
+          Put: {
+            TableName: tableNames.committeeMembership,
+            Item: chairMembership as unknown as Record<string, unknown>,
+            ConditionExpression: 'attribute_not_exists(walletAddress)',
+          },
+        },
+        ...inviteItems,
+        ...slotItems,
         {
           Update: {
             TableName: tableNames.users,
@@ -219,15 +282,30 @@ export const handler = async (
       console.error('register: maybeTripSafetyMode failed (non-fatal):', err);
     }
 
+    const invitedCount = others.length - autoDeclinedCount;
     await writeAuditEvent({
       entityType: 'drep_committee',
       entityId: drepId,
       eventType: 'drep.committee.registered',
       actorWallet: chairStake,
-      metadata: { leadWallet: chairStake, drepId, memberCount, approvalThreshold: X },
+      metadata: {
+        leadWallet: chairStake,
+        drepId,
+        intendedMemberCount,
+        invitedCount,
+        autoDeclinedCount,
+        approvalThreshold: X,
+      },
     });
 
-    return created(committee);
+    // Surface invitation counts so the formation UI can confirm
+    // "3 invited, 1 auto-declined" without a follow-up read.
+    return created({
+      ...committee,
+      _activeUserCount: activeSet.size, // diagnostic — informational for the wizard
+      invitedCount,
+      autoDeclinedCount,
+    });
   } catch (err) {
     console.error('drep/register handler error:', err);
     return handleError(err);

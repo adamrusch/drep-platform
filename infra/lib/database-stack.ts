@@ -78,6 +78,37 @@ export class DatabaseStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
+    // Sparse index of committee invitations keyed on the invitee.
+    //
+    // **Why this exists (Feature 1 — committee invitations):** the new
+    // invitation rows live under `drep_committees` with
+    // `SK='INVITE#<inviteeStakeAddress>'` (see backend `CommitteeInviteItem`).
+    // The `/auth/me` and the in-app bell badge surface "every pending
+    // invitation for THIS wallet" — without a wallet-keyed index that would
+    // be a table-wide Scan with a FilterExpression on inviteeStake, paying
+    // for reading every COMMITTEE row + every other committee's INVITEs.
+    //
+    // **Shape:** PK = `inviteeStake` (the canonical stake address of the
+    // invitee, written only on INVITE rows — sparse). SK = `status`
+    // (`'pending' | 'accepted' | 'rejected' | 'revoked'`) so a Query
+    // narrowed by `status='pending'` returns exactly the actionable rows
+    // for one wallet in a single partition Query. COMMITTEE rows have no
+    // `inviteeStake` attribute and are excluded from the index automatically.
+    //
+    // **Heads-up for the deploy:** adding a GSI to a live table is an
+    // async CFN update. The CloudFormation stack will sit on `IN_PROGRESS`
+    // for several minutes while DynamoDB backfills the index across the
+    // existing committee rows (which today have NO invitee-stake attribute,
+    // so the backfill is trivial — but the wait is unavoidable). New write
+    // paths (`/drep` formation, `addMember` invite, `respondInvitation`,
+    // `revokeInvitation`) must be deployed AFTER the GSI reports `ACTIVE`.
+    this.drepCommitteesTable.addGlobalSecondaryIndex({
+      indexName: 'inviteeStake-status-index',
+      partitionKey: { name: 'inviteeStake', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'status', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
     // ---- drep_directory ----
     // Mainnet DRep registry — chain-state directory of every registered
     // DRep, populated by the `drep-directory` sync (every 5 min) from

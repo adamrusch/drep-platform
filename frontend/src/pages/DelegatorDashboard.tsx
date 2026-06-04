@@ -10,6 +10,7 @@ import { useMe } from '@/hooks/useAuth';
 import { GovernanceActionCard } from '@/components/GovernanceActionCard';
 import { GovernanceHistoryWidget } from '@/components/GovernanceHistoryWidget';
 import { HeroBand } from '@/components/HeroBand';
+import { InvitationsCard } from '@/components/InvitationsCard';
 import { StatTile } from '@/components/ui/StatTile';
 import { Button } from '@/components/ui/Button';
 import { DashboardRail } from '@/components/rails/DashboardRail';
@@ -110,6 +111,9 @@ export function DelegatorDashboard(): React.ReactElement {
           </Button>
         }
       />
+
+      {/* Pending committee invitation(s). Self-hides when empty. */}
+      <InvitationsCard />
 
       <div className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(180px,1fr))]">
         <StatTile
