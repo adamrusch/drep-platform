@@ -12,7 +12,9 @@
     "next": "次へ",
     "confirm": "確定",
     "loading": "読み込み中…",
-    "reload": "再読み込み"
+    "reload": "再読み込み",
+    "showMore": "もっと見る",
+    "showLess": "閉じる"
   },
   "language": {
     "label": "言語",
@@ -43,6 +45,52 @@
     "mainnet": "メインネット",
     "epoch": "エポック",
     "syncedKoios": "Koiosから同期"
+  },
+  "time": {
+    "justNow": "たった今",
+    "minutesAgo": "{{count}}分前",
+    "hoursAgo": "{{count}}時間前",
+    "daysAgo": "{{count}}日前"
+  },
+  "status": {
+    "active": "進行中",
+    "enacted": "施行済み",
+    "expired": "期限切れ",
+    "dropped": "却下",
+    "passed": "可決",
+    "failed": "否決",
+    "voting": "投票中",
+    "discussion": "議論中",
+    "review": "レビュー中",
+    "warning": "警告",
+    "neutral": "中立",
+    "trusted": "信頼済み"
+  },
+  "actionType": {
+    "ParameterChange": "パラメータ変更",
+    "HardForkInitiation": "ハードフォーク",
+    "TreasuryWithdrawals": "国庫引き出し",
+    "NoConfidence": "不信任",
+    "UpdateCommittee": "委員会の更新",
+    "NewConstitution": "新憲法",
+    "InfoAction": "情報"
+  },
+  "actionCard": {
+    "discussionForum": "ディスカッションフォーラム",
+    "discussionForumTitle": "タイトルと概要は gov.tools のディスカッションフォーラムから取得されています（オンチェーンアンカーなし）。",
+    "hashMismatch": "ハッシュ不一致",
+    "hashMismatchTitle": "オンチェーンのアンカーハッシュが配信された内容と一致しません。内容は参考として表示されますが、その完全性は暗号的に検証できません。",
+    "metadata": "メタデータ",
+    "discussion": "ディスカッション",
+    "discussionLinkTitle": "gov.tools のディスカッションフォーラムで見る",
+    "metadataUnavailable": "メタデータを取得できません",
+    "metadataUnavailableTitle": "オンチェーンのアンカーは存在しますが、その本文をどの公開 IPFS ゲートウェイからも取得できませんでした。",
+    "noOffChainMetadata": "（オフチェーンメタデータなし）",
+    "submitted": "提出 {{time}}",
+    "epoch": "エポック {{n}}（{{date}}）",
+    "copyHashTitle": "クリックしてコピー: {{id}}",
+    "hashCopied": "ハッシュをコピーしました",
+    "copyFailed": "コピーに失敗しました"
   },
   "guest": {
     "eyebrow": "Cardanoガバナンス",
