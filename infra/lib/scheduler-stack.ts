@@ -21,6 +21,7 @@ export interface SchedulerStackProps extends cdk.StackProps {
 export class SchedulerStack extends cdk.Stack {
   public readonly governanceSyncFn: lambdaNodejs.NodejsFunction;
   public readonly directorySyncFn: lambdaNodejs.NodejsFunction;
+  public readonly voteRationaleSyncFn: lambdaNodejs.NodejsFunction;
   public readonly powerHistorySyncFn: lambdaNodejs.NodejsFunction;
   public readonly poolMetadataSyncFn: lambdaNodejs.NodejsFunction;
   public readonly ccMembersSyncFn: lambdaNodejs.NodejsFunction;
@@ -204,6 +205,72 @@ export class SchedulerStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'DirectorySyncFnArn', {
       value: this.directorySyncFn.functionArn,
       exportName: `${stage}-DirectorySyncFnArn`,
+    });
+
+    // ---- Vote-rationale sync Lambda ----
+    // Downloads + caches each voter's CIP-100 rationale (the off-chain JSON
+    // body referenced by a vote's anchor URL) for the currently ACTIVE
+    // governance actions, so the platform can render rationales inline
+    // instead of linking out to an IPFS gateway. Reads action ids from the
+    // status GSI, reads/writes the `governance_votes` rows. Public IPFS
+    // gateways + https anchors only — no Blockfrost/secret needed. Bounded
+    // to ~200 fetches/run (see backend/src/sync/vote-rationale-sync.ts); a
+    // backlog catches up over consecutive 30-min cycles.
+    const voteRationaleRole = new iam.Role(this, 'VoteRationaleSyncRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+      ],
+    });
+    databaseStack.governanceActionsTable.grantReadData(voteRationaleRole);
+    databaseStack.governanceVotesTable.grantReadWriteData(voteRationaleRole);
+
+    this.voteRationaleSyncFn = new lambdaNodejs.NodejsFunction(this, 'VoteRationaleSyncFn', {
+      functionName: `drep-platform-${stage}-vote-rationale-sync`,
+      entry: path.join(backendDir, 'src/sync/vote-rationale-sync.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      memorySize: 512,
+      // Bounded fetch count, but unreachable anchors walk several gateways —
+      // give the run generous headroom; the per-run cap keeps it well under.
+      timeout: cdk.Duration.minutes(10),
+      role: voteRationaleRole,
+      environment: {
+        DYNAMODB_TABLE_PREFIX: `drep-platform-${stage}-`,
+        CARDANO_NETWORK: stage === 'staging' ? 'preprod' : 'mainnet',
+      },
+      bundling: {
+        minify: true,
+        sourceMap: false,
+        target: 'es2022',
+        externalModules: ['@aws-sdk/*'],
+        // blake2b dynamically require()s blake2b-wasm at runtime — esbuild
+        // can't inline it, so install it into the zip (same as the
+        // governance-intake function).
+        nodeModules: ['blake2b'],
+        forceDockerBundling: false,
+      },
+      depsLockFilePath: path.join(backendDir, 'package-lock.json'),
+    });
+
+    const voteRationaleRule = new events.Rule(this, 'VoteRationaleSyncRule', {
+      ruleName: `drep-platform-${stage}-vote-rationale-sync`,
+      description: 'Caches voter rationale bodies for active governance actions every 30 minutes',
+      schedule: events.Schedule.rate(cdk.Duration.minutes(30)),
+      enabled: true,
+    });
+
+    voteRationaleRule.addTarget(
+      new eventsTargets.LambdaFunction(this.voteRationaleSyncFn, {
+        retryAttempts: 1,
+        maxEventAge: cdk.Duration.minutes(15),
+      }),
+    );
+
+    new cdk.CfnOutput(this, 'VoteRationaleSyncFnArn', {
+      value: this.voteRationaleSyncFn.functionArn,
+      exportName: `${stage}-VoteRationaleSyncFnArn`,
     });
 
     // ---- DRep voting-power history sync Lambda (Phase C) ----
