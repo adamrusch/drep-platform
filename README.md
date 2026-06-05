@@ -236,18 +236,27 @@ exported per-stage with the prefix `<stage>-…` so other stacks can import them
 
 ### Frontend (S3 + CloudFront)
 
+Use `scripts/deploy-frontend.sh` — it builds with the right `VITE_*` for the
+target, sets the correct cache + content-type headers, invalidates CloudFront,
+and **verifies the live headers** (so a stale-cache or `binary/octet-stream`
+content-type regression can't ship a blank page):
+
 ```bash
-cd frontend
-VITE_API_BASE_URL=https://api.drep.tools npm run build
-
-aws s3 sync dist/ s3://drep-platform-prod-frontend-409410541898/ \
-  --profile drep-platform --delete
-
-aws cloudfront create-invalidation \
-  --profile drep-platform \
-  --distribution-id <DistributionId from CFN output> \
-  --paths "/*"
+./scripts/deploy-frontend.sh --target test            # test.drep.tools
+./scripts/deploy-frontend.sh --target prod --confirm-prod   # drep.tools (live)
 ```
+
+The script resolves the bucket, distribution id, and API URL from the
+`DRepPlatform-Frontend-<stage>` / `DRepPlatform-Api-<stage>` CloudFormation
+outputs, so there are no hard-coded ids. Header rules it enforces:
+
+- `assets/*` (content-hashed) → `public, max-age=31536000, immutable`
+- `index.html` → `no-cache, no-store, must-revalidate` (deploys picked up at once)
+- `.wasm` → `application/wasm` (the AWS CLI mimetypes DB misses it otherwise)
+
+> Do NOT hand-run `aws s3 cp --metadata-directive REPLACE` to tweak headers —
+> it silently resets JS/CSS content-types to `binary/octet-stream`, which
+> renders a blank page. Always go through the script.
 
 Invalidations are free up to 1000/month — well above what we need.
 
