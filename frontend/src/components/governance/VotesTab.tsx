@@ -4,6 +4,7 @@ import type { TFunction } from 'i18next';
 import { Link } from 'react-router-dom';
 import { Check, X, Minus, ExternalLink } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
+import { ExpandableText } from '@/components/ExpandableText';
 import { _formatLovelaceAda } from '@/components/SentimentBlock';
 import { useFormatters } from '@/hooks/useFormatters';
 import { cn } from '@/lib/utils';
@@ -222,7 +223,11 @@ function VoteRow({ v }: { v: ActionVoteRecord }): React.ReactElement {
           </span>
         ) : null}
         <span title={absoluteTime}>{formatRelativeTime(v.votedAt)}</span>
-        {v.rationaleUrl && (
+        {/* When we have NO cached rationale text, keep the raw external link
+            (the rationale either hasn't been fetched yet or wasn't reachable).
+            When we DO have cached text, the inline block below renders it with
+            its own "Source" link, so we don't duplicate the link here. */}
+        {v.rationaleUrl && !v.rationaleText && (
           <a
             href={v.rationaleUrl}
             target="_blank"
@@ -235,6 +240,39 @@ function VoteRow({ v }: { v: ActionVoteRecord }): React.ReactElement {
           </a>
         )}
       </div>
+
+      {/* Cached rationale, downloaded from IPFS/https and hash-verified
+          server-side. Rendered inline (expandable) instead of sending the
+          reader to an external gateway. */}
+      {v.rationaleText && (
+        <div className={cn('mt-2 space-y-1 border-t border-[var(--border-subtle)] pt-2', strikethrough)}>
+          {v.rationaleTitle && (
+            <p className="text-[12.5px] font-medium text-[var(--text-primary)]">{v.rationaleTitle}</p>
+          )}
+          <ExpandableText
+            text={v.rationaleText}
+            className="text-[12.5px] leading-relaxed text-[var(--text-secondary)] whitespace-pre-wrap"
+          />
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[var(--text-tertiary)]">
+            {v.rationaleHashMatch === false && (
+              <span className="text-[var(--warning,#a16207)]">{t('votesTab.rationaleUnverified')}</span>
+            )}
+            {v.rationaleTruncated && <span>{t('votesTab.rationaleTruncated')}</span>}
+            {v.rationaleUrl && (
+              <a
+                href={v.rationaleUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 hover:text-[var(--brand-primary)] hover:underline"
+                title={v.rationaleUrl}
+              >
+                {t('votesTab.rationaleSource')}
+                <ExternalLink size={10} strokeWidth={2} aria-hidden="true" />
+              </a>
+            )}
+          </div>
+        </div>
+      )}
     </Card>
   );
 }
