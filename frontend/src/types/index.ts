@@ -160,6 +160,21 @@ export interface ActionVoteRecord {
   /** CIP-100 anchor URL the voter posted with this vote (their rationale).
    *  Open in a new tab with `rel="noopener noreferrer"`. */
   rationaleUrl?: string;
+  /** Cached rationale TEXT, downloaded from the anchor (IPFS/https) and
+   *  hash-verified server-side. When present, render it inline (expandable)
+   *  instead of just linking out to the IPFS gateway. */
+  rationaleText?: string;
+  /** Cached CIP-108 title for the rationale, when the body had one. */
+  rationaleTitle?: string;
+  /** Fetch outcome: `cached` | `hash_mismatch` | `empty` | `unreachable` |
+   *  `unsupported`. Absent until the background sync has fetched it. */
+  rationaleStatus?: string;
+  /** True when `rationaleText` was truncated to the storage cap — show a
+   *  "read full on source" affordance. */
+  rationaleTruncated?: boolean;
+  /** false → the fetched body did NOT match the on-chain hash; render a
+   *  caveat. true / absent → verified or nothing to verify. */
+  rationaleHashMatch?: boolean;
   superseded: boolean;
 }
 
