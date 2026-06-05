@@ -4,7 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { StatusPill } from '@/components/ui/StatusPill';
 import { useAuthStore } from '@/stores/authStore';
-import { useIsCommitteeMember } from '@/stores/authStore';
+import { useIsMemberOfCommittee } from '@/stores/authStore';
 import {
   useCommitteeVote,
   useCloseCommitteeVote,
@@ -24,7 +24,7 @@ export function CommitteeVoteRoom(): React.ReactElement {
   const { t } = useTranslation();
   const { drepId = '', actionId = '' } = useParams<{ drepId: string; actionId: string }>();
   const wallet = useAuthStore((s) => s.walletAddress);
-  const isMember = useIsCommitteeMember();
+  const isMember = useIsMemberOfCommittee(drepId);
   const { data, isLoading, isError } = useCommitteeVote(drepId, actionId);
 
   const close = useCloseCommitteeVote(drepId, actionId);

@@ -832,7 +832,12 @@ export interface CommitteeVoteProposalItem {
   actionId: string;
   proposedPosition: CommitteePosition;
   proposerWallet: string;
-  proposerSignature: CommitteeSignature;
+  /** Present only on proposals opened under the legacy re-sign flow. As of
+   *  2026-06, opening a proposal is a JWT-authenticated, member-gated action
+   *  with NO wallet re-signature (it's a low-stakes "queue this for the group
+   *  to review" step — the binding votes and on-chain submission still
+   *  re-sign). New proposals omit this field. */
+  proposerSignature?: CommitteeSignature;
   status: CommitteeProposalStatus;
   /** Snapshotted at open time — a mid-vote rule/membership change does NOT
    *  retroactively re-threshold an in-flight proposal.

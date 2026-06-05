@@ -36,7 +36,7 @@
  */
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { getItem, batchGetItems, tableNames } from '../../lib/dynamodb';
-import type { DRepCommitteeItem, UserItem } from '../../lib/types';
+import type { CommitteeMembershipItem, DRepCommitteeItem, UserItem } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { lookupCurrentDrep } from '../../lib/recognition';
 import { listPendingInvitesForWallet } from '../committee/_committee';
@@ -56,7 +56,7 @@ export const handler = async (
     // status='pending'), so it adds essentially zero latency. Failures on
     // either secondary lookup are non-fatal — the corresponding fields are
     // just omitted/empty in the response.
-    const [user, delegationResult, pendingInvites] = await Promise.all([
+    const [user, delegationResult, pendingInvites, membership] = await Promise.all([
       getItem<UserItem>(tableNames.users, {
         walletAddress: authCtx.walletAddress,
         SK: 'PROFILE',
@@ -74,6 +74,19 @@ export const handler = async (
         // serve `pendingInvitations: []` and the user can still browse.
         console.warn('me handler: listPendingInvitesForWallet threw:', err);
         return [] as Awaited<ReturnType<typeof listPendingInvitesForWallet>>;
+      }),
+      // The user's CURRENT committee membership (≤1 row per wallet, keyed by
+      // stake address). This is the source of truth for "which committee am
+      // I in, and as what role" — crucially for a non-lead MEMBER, who has
+      // no `drepId` of their own (the committee's drepId is the LEAD's). The
+      // frontend keys committee-space access off THIS, not the member's
+      // nonexistent drepId or a stale JWT role. Soft signal: on failure we
+      // omit it and the user just doesn't see their committee link.
+      getItem<CommitteeMembershipItem>(tableNames.committeeMembership, {
+        walletAddress: authCtx.walletAddress,
+      }).catch((err) => {
+        console.warn('me handler: committee membership lookup threw:', err);
+        return undefined;
       }),
     ]);
 
@@ -112,6 +125,30 @@ export const handler = async (
       invitedAt: i.invitedAt,
     }));
 
+    // Surface the user's JOINED committee (role 'lead' or 'member'). A
+    // role of 'invited' is a not-yet-accepted slot — it belongs in
+    // pendingInvitations, not here, so we exclude it. Resolve the
+    // committee's display name (one getItem, only when joined) so the FE
+    // can label "Your committee: Cardano Puppy Committee" without another
+    // round-trip. A vanished committee row degrades to an empty name.
+    let committeeMembership:
+      | { drepId: string; role: 'lead' | 'member'; committeeName: string }
+      | null = null;
+    if (membership && (membership.role === 'lead' || membership.role === 'member')) {
+      const committeeRow = await getItem<DRepCommitteeItem>(tableNames.drepCommittees, {
+        drepId: membership.drepId,
+        SK: 'COMMITTEE',
+      }).catch((err) => {
+        console.warn('me handler: committee name lookup threw:', err);
+        return undefined;
+      });
+      committeeMembership = {
+        drepId: membership.drepId,
+        role: membership.role,
+        committeeName: committeeRow?.committeeName ?? '',
+      };
+    }
+
     return ok(
       {
         ...safeUser,
@@ -129,6 +166,10 @@ export const handler = async (
         // `drepId` and which one each UX surface should consume.
         ...(delegatedToDrepId !== undefined ? { delegatedToDrepId } : {}),
         pendingInvitations,
+        // The user's joined committee (lead or member), or null. The FE
+        // uses this — NOT `drepId` — to grant a non-lead member access to
+        // their committee space.
+        committeeMembership,
       },
       // Defense in depth: this endpoint is auth-bound and MUST NOT be
       // shared between users. The CloudFront distribution in front of
