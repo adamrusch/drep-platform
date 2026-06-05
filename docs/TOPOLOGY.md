@@ -1,16 +1,24 @@
 # Deployment topology & the prod-migration runbook
 
-_Last updated 2026-05-31._
+_Migration completed 2026-06-05 — see "Migration history" at the bottom. The runbook below is retained for reference._
 
 ## Current reality (read this first)
 
 | Environment | Domain | Served by CloudFormation stage | Notes |
 |---|---|---|---|
-| **Production** | `drep.tools`, `www.drep.tools`, `api.drep.tools` | **`dev`** stacks (`DRepPlatform-*-dev`) | Historical artifact — the old `customDomainFor` handed `drep.tools` to any non-`test` stage, so prod runs as `dev`. Frozen at "Phase 1" pending the migration below. |
-| **Test** | `test.drep.tools`, `api.test.drep.tools` | `test` stacks (`DRepPlatform-*-test`) | Mainnet test env. Tracks `main` (currently includes Phase 2 + all fixes). |
-| **Dev** | _none_ | n/a | There is no separate dev environment right now — `dev` IS production. |
+| **Production** | `drep.tools`, `www.drep.tools`, `api.drep.tools` | **`prod`** stacks (`DRepPlatform-*-prod`) | Real prod stacks — own secrets (`drep-platform/prod/*`), RETAIN tables, prod ACM cert. Cut over from the `dev` stacks on 2026-06-05. |
+| **Test** | `test.drep.tools`, `api.test.drep.tools` | `test` stacks (`DRepPlatform-*-test`) | Mainnet test env. Tracks `main`. |
+| **Dev** | _none_ | `dev` stacks (`DRepPlatform-*-dev`) | Now a true throwaway dev env (no domain). Its EventBridge sync rules are **disabled** (they shared prod's Blockfrost key). Re-enable only if you need dev data. |
 
-**There are no `*-prod` stacks yet.** "Promoting to prod" today means the migration runbook below.
+**The `*-prod` stacks now exist and serve production.** Deploy current code to prod with
+`scripts/deploy.sh --stage prod --touch-production …` (backend) and
+`scripts/deploy-frontend.sh --target prod --confirm-prod` (frontend).
+
+> ⚠️ **Stale guards (follow-up):** `scripts/deploy.sh` and `infra/bin/app.ts` still warn that the
+> **`dev`** stage "serves the live site" — no longer true (`dev` is throwaway; `prod` is live). The
+> guard hard-blocks BOTH `dev` and `prod` without `--touch-production`. Relax it so only `prod` is
+> blocked, and update the banners. Until then a `dev` deploy just needs the (now-harmless)
+> `--touch-production` ack.
 
 ### Why this is guarded
 Because production is the `dev` stage:
@@ -51,3 +59,28 @@ Goal end-state: `drep.tools` served by real `DRepPlatform-*-prod` stacks (RETAIN
 
 ### Zero-downtime alternative
 If downtime is unacceptable, replace steps 6–7 with `aws cloudfront associate-alias` (atomically moves each alias `dev`→`prod` distribution), then repoint Route53, then reconcile CDK ownership. More fiddly; not worth it for the current tiny userbase.
+
+---
+
+## Migration history
+
+**2026-06-05 — Phase 1 → real `*-prod` stacks (completed).**
+Executed the runbook above. Summary:
+- Added `--context noCustomDomain=1` (suppresses the custom domain so prod could
+  stand up + be smoke-tested on `*.cloudfront.net` before the cutover).
+- Created `drep-platform/prod/jwt-secret` (new) + `drep-platform/prod/blockfrost-api-key`
+  (copied from dev).
+- Stood up `Database-prod` + `Scheduler-prod`; warmed syncs (governance + directory).
+- Deployed `Api-prod` + `Frontend-prod` suppressed, smoke-tested on raw URLs.
+- Copied the small irreplaceable data: 3 users + 2 comments (0 committees, 0 human
+  clubhouse posts — everything else regenerates from chain).
+- Cutover: released `drep.tools`/`www`/`api.drep.tools` from the `dev` stacks, then
+  `Api-prod` + `Frontend-prod` claimed them (new prod API CloudFront distribution +
+  Route53). New prod JWT secret → all users re-logged in.
+- Disabled the 6 `dev` EventBridge sync rules (they shared prod's Blockfrost key).
+- Verified `https://drep.tools` (200, correct cache/content-type headers) and
+  `https://api.drep.tools/epoch` (epoch 635) + `/governance` (live actions).
+
+Follow-ups: (a) relax the `dev`-is-prod guards in `scripts/deploy.sh` + `infra/bin/app.ts`;
+(b) optionally backfill historical vote rationales on prod (the scheduled sync already
+covers active actions).
