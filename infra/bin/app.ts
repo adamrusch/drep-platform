@@ -38,7 +38,15 @@ const env: cdk.Environment = {
 // risk; CDK imports them by ID/ARN. The test cert can be supplied via
 // `--context testCertArn=arn:...` until it's the default.
 const testCertArn = app.node.tryGetContext('testCertArn') as string | undefined;
-const customDomain = customDomainFor(stage, { testCertArn });
+// `--context noCustomDomain=1` suppresses the custom-domain config so the
+// stacks deploy on their raw CloudFront / API-Gateway URLs only. Used during
+// the dev→prod migration (docs/TOPOLOGY.md) to stand up + smoke-test the
+// `*-prod` stacks BEFORE the cutover, while the `dev` stacks still hold the
+// `drep.tools` / `api.drep.tools` aliases (a CloudFront alias can live on only
+// one distribution, so claiming it early would fail). Drop the flag for the
+// cutover deploy so prod claims the now-free aliases + recreates Route53.
+const suppressDomain = Boolean(app.node.tryGetContext('noCustomDomain'));
+const customDomain = suppressDomain ? undefined : customDomainFor(stage, { testCertArn });
 
 const databaseStack = new DatabaseStack(app, `DRepPlatform-Database-${stage}`, {
   stage,
