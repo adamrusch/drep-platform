@@ -103,6 +103,17 @@ export interface GovernanceVoteItem {
   metaUrl?: string;
   metaHash?: string;
   ingestedAt?: string;
+  // ---- Cached rationale (written by sync/vote-rationale-sync.ts) ----
+  /** Outcome of the last rationale fetch — see VoteRationaleStatus. */
+  rationaleStatus?: string;
+  /** Extracted rationale text (CIP-100 comment / CIP-108 rationale). */
+  rationaleText?: string;
+  /** Extracted CIP-108 title, when present. */
+  rationaleTitle?: string;
+  /** True when `rationaleText` was truncated to the storage cap. */
+  rationaleTruncated?: boolean;
+  /** true = body matched on-chain hash; false = mismatch; absent = unverified. */
+  rationaleHashMatch?: boolean;
   [key: string]: unknown;
 }
 
@@ -152,6 +163,23 @@ export interface ActionVoteRecord {
   voteTxHash: string;
   /** CIP-100 anchor URL the voter posted with this vote (the rationale). */
   rationaleUrl?: string;
+  /** Cached rationale TEXT, downloaded from the anchor (IPFS/https) and
+   *  verified against the on-chain hash by `vote-rationale-sync`. Present
+   *  when `rationaleStatus` is `cached` or `hash_mismatch`. The frontend
+   *  renders this inline instead of sending the user to an external gateway. */
+  rationaleText?: string;
+  /** Cached CIP-108 title for the rationale, when the body had one. */
+  rationaleTitle?: string;
+  /** Fetch outcome: `cached` | `hash_mismatch` | `empty` | `unreachable` |
+   *  `unsupported`. Absent when the rationale hasn't been fetched yet (the
+   *  sync runs on a cadence). Drives the inline UI (text vs. "couldn't
+   *  load, open source" vs. a hash-mismatch caveat). */
+  rationaleStatus?: string;
+  /** True when `rationaleText` was truncated to the storage cap. */
+  rationaleTruncated?: boolean;
+  /** false → the fetched body did NOT match the on-chain hash (surface a
+   *  caveat). true / absent → verified or no hash to check. */
+  rationaleHashMatch?: boolean;
   /** True when a later vote by the same voter superseded this one. */
   superseded: boolean;
 }
@@ -356,6 +384,13 @@ export async function getVotesForAction(actionId: string): Promise<ActionVoteRec
       superseded: r.superseded === true,
     };
     if (r.metaUrl) record.rationaleUrl = r.metaUrl;
+    // Cached rationale (from sync/vote-rationale-sync). Surfaced so the UI can
+    // render the rationale inline instead of linking out to an IPFS gateway.
+    if (typeof r.rationaleStatus === 'string') record.rationaleStatus = r.rationaleStatus;
+    if (typeof r.rationaleText === 'string') record.rationaleText = r.rationaleText;
+    if (typeof r.rationaleTitle === 'string') record.rationaleTitle = r.rationaleTitle;
+    if (r.rationaleTruncated === true) record.rationaleTruncated = true;
+    if (typeof r.rationaleHashMatch === 'boolean') record.rationaleHashMatch = r.rationaleHashMatch;
 
     if (role === 'DRep') {
       const directory = drepLookup.get(r.voterId);
