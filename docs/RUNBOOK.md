@@ -192,22 +192,18 @@ git push origin main
 cd infra
 AWS_PROFILE=drep-platform npx cdk deploy --all --context stage=prod
 
-# Redeploy frontend
-cd ../frontend
-VITE_API_BASE_URL=https://api.drep.tools npm run build
-aws s3 sync dist/ s3://drep-platform-prod-frontend-REDACTED_ACCOUNT_ID/ \
-  --profile drep-platform --delete
-aws cloudfront create-invalidation \
-  --profile drep-platform \
-  --distribution-id <FrontendDistributionId> \
-  --paths "/*"
+# Redeploy frontend (build + headers + invalidation + verify, all in one)
+./scripts/deploy-frontend.sh --target prod --confirm-prod
 ```
 
-The frontend distribution id is in the `DRepPlatform-Frontend-prod` stack
-outputs (`DistributionId` export).
+`deploy-frontend.sh` resolves the bucket / distribution id / API URL from the
+stack outputs, sets the correct cache + content-type headers, and verifies the
+live headers before exiting. Do NOT hand-run `aws s3 cp --metadata-directive
+REPLACE` to adjust headers — it resets JS/CSS content-types to
+`binary/octet-stream` and ships a blank page.
 
-For a faster rollback that doesn't touch infra, just rebuild the previous
-frontend commit and re-sync.
+For a faster rollback that doesn't touch infra, check out the previous frontend
+commit and re-run the script.
 
 ---
 
