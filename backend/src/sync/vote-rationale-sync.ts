@@ -39,10 +39,21 @@ const RETRY_UNREACHABLE_AFTER_MS = 6 * 60 * 60 * 1000; // 6h
 const MAX_ACTION_PAGES = 20;
 const MAX_VOTE_PAGES_PER_ACTION = 40;
 
+/** Governance-action statuses the action GSI is partitioned by. */
+const DEFAULT_STATUSES = ['active'] as const;
+const ALL_STATUSES = ['active', 'expired', 'enacted', 'dropped'] as const;
+
 export interface VoteRationaleSyncOptions {
   maxFetches?: number;
   concurrency?: number;
   retryAfterMs?: number;
+  /** Which action statuses to cover. Default `['active']` (the scheduled
+   *  cadence). A backfill passes the full set to also cover concluded
+   *  actions. Unknown values are ignored. */
+  statuses?: readonly string[];
+  /** Only cover actions submitted at/after this ISO timestamp. Used by the
+   *  "last N months" backfill; omit to cover the whole status partition. */
+  sinceIso?: string;
   /** Injectable for tests; defaults to `Date.now()`. */
   now?: number;
   /** Injectable for tests; defaults to the real fetcher. */
@@ -50,7 +61,9 @@ export interface VoteRationaleSyncOptions {
 }
 
 export interface VoteRationaleSyncResult {
-  activeActions: number;
+  /** Number of governance actions covered this run (active-only by default;
+   *  the full set during a backfill). */
+  actions: number;
   candidates: number;
   fetched: number;
   cached: number;
@@ -119,23 +132,38 @@ function buildUpdate(
   return { expr, names, values };
 }
 
-async function listActiveActionIds(): Promise<string[]> {
-  const ids: string[] = [];
-  let start: Record<string, unknown> | undefined;
-  for (let page = 0; page < MAX_ACTION_PAGES; page++) {
-    const res = await queryItems<GovernanceActionItem>(tableNames.governanceActions, {
-      indexName: 'status-submittedAt-index',
-      keyConditionExpression: '#status = :status',
-      expressionAttributeNames: { '#status': 'status' },
-      expressionAttributeValues: { ':status': 'active' },
-      projectionExpression: 'actionId',
-      ...(start ? { exclusiveStartKey: start } : {}),
-    });
-    for (const a of res.items) if (a.actionId) ids.push(a.actionId);
-    if (!res.lastEvaluatedKey) break;
-    start = res.lastEvaluatedKey;
+/** Enumerate action ids for the given statuses, optionally limited to actions
+ *  submitted at/after `sinceIso`. De-duplicated across statuses. The GSI is
+ *  PK=status, SK=submittedAt, so a `submittedAt >= :since` range key narrows
+ *  each status partition server-side. */
+async function listActionIds(
+  statuses: readonly string[],
+  sinceIso: string | undefined,
+): Promise<string[]> {
+  const ids = new Set<string>();
+  for (const status of statuses) {
+    if (!ALL_STATUSES.includes(status as (typeof ALL_STATUSES)[number])) continue;
+    let start: Record<string, unknown> | undefined;
+    for (let page = 0; page < MAX_ACTION_PAGES; page++) {
+      const res = await queryItems<GovernanceActionItem>(tableNames.governanceActions, {
+        indexName: 'status-submittedAt-index',
+        keyConditionExpression: sinceIso
+          ? '#status = :status AND submittedAt >= :since'
+          : '#status = :status',
+        expressionAttributeNames: { '#status': 'status' },
+        expressionAttributeValues: {
+          ':status': status,
+          ...(sinceIso ? { ':since': sinceIso } : {}),
+        },
+        projectionExpression: 'actionId',
+        ...(start ? { exclusiveStartKey: start } : {}),
+      });
+      for (const a of res.items) if (a.actionId) ids.add(a.actionId);
+      if (!res.lastEvaluatedKey) break;
+      start = res.lastEvaluatedKey;
+    }
   }
-  return ids;
+  return [...ids];
 }
 
 async function listAnchoredVotes(actionId: string): Promise<GovernanceVoteItem[]> {
@@ -179,9 +207,11 @@ export async function runVoteRationaleSync(
   const now = opts.now ?? Date.now();
   const fetchFn = opts.fetchFn ?? fetchVoteRationale;
   const nowIso = new Date(now).toISOString();
+  const statuses = opts.statuses && opts.statuses.length > 0 ? opts.statuses : DEFAULT_STATUSES;
+  const sinceIso = opts.sinceIso;
 
   const stats: VoteRationaleSyncResult = {
-    activeActions: 0,
+    actions: 0,
     candidates: 0,
     fetched: 0,
     cached: 0,
@@ -192,8 +222,8 @@ export async function runVoteRationaleSync(
     capped: false,
   };
 
-  const actionIds = await listActiveActionIds();
-  stats.activeActions = actionIds.length;
+  const actionIds = await listActionIds(statuses, sinceIso);
+  stats.actions = actionIds.length;
 
   // Collect candidates across all active actions, then process up to the cap.
   const candidates: GovernanceVoteItem[] = [];
@@ -246,9 +276,32 @@ export async function runVoteRationaleSync(
   return stats;
 }
 
+/**
+ * Optional manual-invoke payload for a backfill. The scheduled EventBridge
+ * event carries none of these fields, so a normal run stays active-only.
+ * Example backfill (last 2 months, all statuses):
+ *   { "statuses": ["active","expired","enacted","dropped"], "sinceDays": 62 }
+ */
+interface VoteRationaleSyncEvent {
+  statuses?: string[];
+  sinceDays?: number;
+  sinceIso?: string;
+  maxFetches?: number;
+}
+
 export const handler = async (
-  _event: ScheduledEvent,
+  event: (ScheduledEvent & VoteRationaleSyncEvent) | VoteRationaleSyncEvent | undefined,
   _context: Context,
 ): Promise<VoteRationaleSyncResult> => {
-  return runVoteRationaleSync();
+  const e = (event ?? {}) as VoteRationaleSyncEvent;
+  const sinceIso =
+    e.sinceIso ??
+    (typeof e.sinceDays === 'number' && e.sinceDays > 0
+      ? new Date(Date.now() - e.sinceDays * 24 * 60 * 60 * 1000).toISOString()
+      : undefined);
+  return runVoteRationaleSync({
+    ...(Array.isArray(e.statuses) && e.statuses.length > 0 ? { statuses: e.statuses } : {}),
+    ...(sinceIso ? { sinceIso } : {}),
+    ...(typeof e.maxFetches === 'number' && e.maxFetches > 0 ? { maxFetches: e.maxFetches } : {}),
+  });
 };

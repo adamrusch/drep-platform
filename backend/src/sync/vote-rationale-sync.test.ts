@@ -49,7 +49,7 @@ describe('runVoteRationaleSync', () => {
 
     const stats = await runVoteRationaleSync({ now: NOW, fetchFn });
 
-    expect(stats.activeActions).toBe(1);
+    expect(stats.actions).toBe(1);
     expect(stats.candidates).toBe(1);
     expect(stats.fetched).toBe(1);
     expect(stats.cached).toBe(1);
@@ -111,8 +111,54 @@ describe('runVoteRationaleSync', () => {
     wireQueries([], {});
     const fetchFn = vi.fn();
     const stats = await runVoteRationaleSync({ now: NOW, fetchFn });
-    expect(stats.activeActions).toBe(0);
+    expect(stats.actions).toBe(0);
     expect(stats.fetched).toBe(0);
     expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('backfill: queries every requested status with a submittedAt window and de-dupes actions', async () => {
+    const statusQueries: Array<{ status: string; since?: string }> = [];
+    // Each status partition returns the SAME action id (an action that is in
+    // one status, but the mock echoes it for all) — the Set must de-dup it to 1.
+    mockQuery.mockImplementation(async (_t: string, opts: { indexName?: string; keyConditionExpression?: string; expressionAttributeValues: Record<string, unknown> }) => {
+      if (opts.indexName === 'status-submittedAt-index') {
+        statusQueries.push({
+          status: opts.expressionAttributeValues[':status'] as string,
+          since: opts.expressionAttributeValues[':since'] as string | undefined,
+        });
+        return { items: [{ actionId: 'shared#0' }], count: 1 } as never;
+      }
+      return { items: [{ actionId: 'shared#0', voteKey: 'v1', metaUrl: 'ipfs://Qm', metaHash: 'h' }], count: 1 } as never;
+    });
+    const fetchFn = vi.fn(async (): Promise<VoteRationaleResult> => ({ status: 'cached', text: 'x' }));
+
+    const stats = await runVoteRationaleSync({
+      now: NOW,
+      fetchFn,
+      statuses: ['active', 'expired', 'enacted', 'dropped'],
+      sinceIso: '2026-04-05T00:00:00.000Z',
+    });
+
+    // One query per status, each with the submittedAt range key…
+    expect(statusQueries.map((q) => q.status)).toEqual(['active', 'expired', 'enacted', 'dropped']);
+    expect(statusQueries.every((q) => q.since === '2026-04-05T00:00:00.000Z')).toBe(true);
+    // …but the duplicated action id collapses to a single covered action +
+    // a single vote fetched (no double processing).
+    expect(stats.actions).toBe(1);
+    expect(stats.fetched).toBe(1);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores unknown statuses', async () => {
+    const seen: string[] = [];
+    mockQuery.mockImplementation(async (_t: string, opts: { indexName?: string; expressionAttributeValues: Record<string, unknown> }) => {
+      if (opts.indexName === 'status-submittedAt-index') {
+        seen.push(opts.expressionAttributeValues[':status'] as string);
+        return { items: [], count: 0 } as never;
+      }
+      return { items: [], count: 0 } as never;
+    });
+    await runVoteRationaleSync({ now: NOW, fetchFn: vi.fn(), statuses: ['active', 'bogus'] });
+    expect(seen).toEqual(['active']); // 'bogus' skipped
   });
 });
