@@ -6,10 +6,14 @@
  * count — the eligible-voter set is frozen at open, so reaching X agrees
  * must be feasible against members.length alone.
  *
- * This test exercises ONLY the new guard. The full open-proposal flow
- * (signature verify, action lookup, snapshot freeze) is covered by the
- * existing committeeVoteResolver / proposal-lifecycle tests in this tree
- * — we don't re-test those here.
+ * This test exercises ONLY the new guard. The rest of the open-proposal flow
+ * (action lookup, snapshot freeze) is covered by the existing
+ * committeeVoteResolver / proposal-lifecycle tests in this tree — we don't
+ * re-test those here.
+ *
+ * As of 2026-06 opening a proposal takes NO wallet signature (JWT +
+ * membership only), so this test sends a bare {actionId, proposedPosition}
+ * body.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type {
@@ -59,9 +63,6 @@ function buildEvent(walletAddress: string): APIGatewayProxyEventV2WithJWTAuthori
     body: JSON.stringify({
       actionId: ACTION,
       proposedPosition: 'Yes',
-      mutationNonce: 'n',
-      mutationSignature: 's',
-      mutationKey: 'k',
     }),
     requestContext: {
       authorizer: {

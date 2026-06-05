@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import {
   useAuthStore,
-  useIsCommitteeMember,
+  useMyCommittee,
   useIsAuthenticated,
 } from '@/stores/authStore';
 import { useCheckMembers, useRegisterCommittee } from '@/hooks/useCommitteeMembership';
@@ -21,8 +21,10 @@ const ADDRESS_CHECK_DEBOUNCE_MS = 400;
 
 export function CommitteeLanding(): React.ReactElement {
   const isAuthed = useIsAuthenticated();
-  const isMember = useIsCommitteeMember();
-  const drepId = useAuthStore((s) => s.drepId);
+  // The joined committee (lead OR member). For a non-lead member this is the
+  // ONLY signal that grants them their committee space — they have no drepId
+  // of their own (it belongs to the lead).
+  const membership = useMyCommittee();
   const { t } = useTranslation();
 
   return (
@@ -34,14 +36,19 @@ export function CommitteeLanding(): React.ReactElement {
         <Trans i18nKey="committee.pageIntro" components={{ strong: <strong /> }} />
       </p>
 
-      {isMember && drepId ? (
+      {membership ? (
         <Card>
           <CardHeader>
             <CardTitle>{t('committee.yourCommitteeTitle')}</CardTitle>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-1">
+            {membership.committeeName && (
+              <p className="text-[13.5px] font-medium text-[var(--text-primary)]">
+                {membership.committeeName}
+              </p>
+            )}
             <Link
-              to={`/committee/${encodeURIComponent(drepId)}`}
+              to={`/committee/${encodeURIComponent(membership.drepId)}`}
               className="text-[var(--brand-primary)] hover:underline"
             >
               {t('committee.yourCommitteeLink')}

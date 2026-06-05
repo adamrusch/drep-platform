@@ -45,18 +45,18 @@ function useInvalidateVote(drepId: string, actionId: string) {
   };
 }
 
+/**
+ * Open (propose) a committee vote. As of 2026-06 this is a plain
+ * JWT-authenticated POST — NO wallet re-signature. Opening a proposal just
+ * queues a governance action for the group to review and vote on; the binding
+ * actions (cast / close / on-chain submit) still re-sign. The backend gates
+ * this on committee membership.
+ */
 export function useOpenProposal(drepId: string) {
-  const sign = useMutationSign();
-  const wallet = useAuthStore((s) => s.walletAddress);
   const qc = useQueryClient();
-  const stage = getStage();
   return useMutation({
-    mutationFn: async (vars: { actionId: string; proposedPosition: CommitteePosition }) => {
-      const signed = await sign((nonce) =>
-        committeeMessages.proposal(stage, drepId, vars.actionId, vars.proposedPosition, nonce, wallet ?? ''),
-      );
-      return post(`/committee/${enc(drepId)}/votes`, { ...vars, ...signed });
-    },
+    mutationFn: (vars: { actionId: string; proposedPosition: CommitteePosition }) =>
+      post(`/committee/${enc(drepId)}/votes`, vars),
     onSuccess: (_d, vars) => {
       void qc.invalidateQueries({ queryKey: KEYS.list(drepId) });
       void qc.invalidateQueries({ queryKey: KEYS.vote(drepId, vars.actionId) });

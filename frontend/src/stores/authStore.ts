@@ -23,6 +23,13 @@ interface AuthStore {
   walletName: string | null;
   roles: UserRole[];
   drepId: string | null;
+  /**
+   * The user's joined committee (lead or member), or null. Mirrors
+   * `UserProfile.committeeMembership` and is the source of truth for
+   * granting committee-space access to a non-lead MEMBER (who has no
+   * `drepId`). Synced from `/auth/me` in `setProfile`.
+   */
+  committeeMembership: { drepId: string; role: 'lead' | 'member'; committeeName: string } | null;
   sessionType: SessionType | null;
   expiresAt: string | null;
   profile: UserProfile | null;
@@ -47,6 +54,7 @@ export const useAuthStore = create<AuthStore>()(
       walletName: null,
       roles: [],
       drepId: null,
+      committeeMembership: null,
       sessionType: null,
       expiresAt: null,
       profile: null,
@@ -65,7 +73,24 @@ export const useAuthStore = create<AuthStore>()(
       },
 
       setProfile: (profile: UserProfile) => {
-        set({ profile });
+        // `/auth/me` is the source of truth for DRep linkage and roles — it
+        // reads the LIVE user row (and on-chain directory), whereas `setAuth`
+        // only has the login/verify response (which carries no drepId and
+        // whose JWT roles can be stale). Sync those live fields into the
+        // top-level store slots that selectors read, otherwise `s.drepId`
+        // stays null forever and the DRep dashboard + committee landing treat
+        // a real DRep as "not registered". (This sync used to be done by the
+        // now-removed useAutoLinkDrep hook.)
+        set((state) => ({
+          profile,
+          drepId: profile.drepId ?? state.drepId ?? null,
+          roles: profile.roles ?? state.roles,
+          // `committeeMembership` is explicitly authoritative from /auth/me:
+          // when the user belongs to no committee the field is null, and we
+          // MUST clear any stale value (e.g. after leaving a committee), so
+          // this does NOT fall back to the previous value the way drepId does.
+          committeeMembership: profile.committeeMembership ?? null,
+        }));
       },
 
       clearAuth: () => {
@@ -74,6 +99,7 @@ export const useAuthStore = create<AuthStore>()(
           walletName: null,
           roles: [],
           drepId: null,
+          committeeMembership: null,
           sessionType: null,
           expiresAt: null,
           profile: null,
@@ -92,6 +118,7 @@ export const useAuthStore = create<AuthStore>()(
         walletName: state.walletName,
         roles: state.roles,
         drepId: state.drepId,
+        committeeMembership: state.committeeMembership,
         sessionType: state.sessionType,
         expiresAt: state.expiresAt,
       }),
@@ -120,7 +147,37 @@ export function useIsLeadDRep(): boolean {
 
 export function useIsCommitteeMember(): boolean {
   return useAuthStore((s) =>
-    s.roles.includes('committee_member') || s.roles.includes('lead_drep'),
+    s.roles.includes('committee_member') ||
+    s.roles.includes('lead_drep') ||
+    // A member who accepted an invite has live membership but (until their
+    // next login) no committee role in the JWT — trust the membership row.
+    s.committeeMembership != null,
+  );
+}
+
+/**
+ * The committee the user has joined (lead or member), or null. Source of
+ * truth for committee-space access — especially for a non-lead member, who
+ * has no `drepId` of their own.
+ */
+export function useMyCommittee():
+  | { drepId: string; role: 'lead' | 'member'; committeeName: string }
+  | null {
+  return useAuthStore((s) => s.committeeMembership);
+}
+
+/**
+ * True when the user is an accepted member/lead of the committee identified
+ * by `drepId`. Drives per-committee UI gates (cast/resolve panels). The
+ * backend independently enforces real membership on every mutation; this is
+ * the client-side render gate that no longer depends on a stale JWT role.
+ */
+export function useIsMemberOfCommittee(drepId: string): boolean {
+  return useAuthStore(
+    (s) =>
+      (s.committeeMembership?.drepId === drepId && drepId.length > 0) ||
+      // The lead of THIS committee (their own drepId) always counts.
+      (s.drepId === drepId && drepId.length > 0),
   );
 }
 
