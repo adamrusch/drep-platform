@@ -41,7 +41,8 @@
  */
 
 import { createHash } from 'node:crypto';
-import { putItem, getItem, deleteItem, tableNames } from './dynamodb';
+import { putItem, getItem, deleteItem, scanItems, tableNames } from './dynamodb';
+import type { OnChainRole } from './types';
 
 interface SessionTombstoneItem extends Record<string, unknown> {
   /** PK on `authNonces`. For a tombstone, `nonce = SHA-256(jti)` in hex —
@@ -70,6 +71,13 @@ interface UserSessionIndexItem extends Record<string, unknown> {
    *  side — entries naturally expire alongside their tombstones. */
   jtiHashes: string[];
   expiresAt: number;
+  /** Sprint 3 — the on-chain role this identity's sessions were granted
+   *  under. Optional for backward compatibility with pre-Sprint-3 records
+   *  (those naturally fall out as their `expiresAt` passes; cron skips
+   *  them with a warning). Present on every record written from Sprint 3
+   *  onward; consumed by the daily role-revalidation cron to pick the
+   *  right `resolveRole` to re-run. */
+  onChainRole?: OnChainRole;
 }
 
 /** Default tombstone TTL — 30 days, matches the maximum JWT lifetime
@@ -98,10 +106,18 @@ function userIndexKey(walletAddress: string): string {
  *
  * `ttlSec` defaults to the 30-day JWT max — entries don't outlive the
  * token they're tracking by more than a day or two of TTL-deletion lag.
+ *
+ * Sprint 3 addition — `onChainRole` is the on-chain role this session
+ * was granted under (drep / proposer / spo / cc). Stored on the index
+ * row so the daily role-revalidation cron knows which `resolveRole`
+ * variant to re-run for this identity. Optional for backward compat —
+ * a pre-Sprint-3 record (no role on it) is skipped with a warning by
+ * the cron rather than acted on with the wrong role check.
  */
 export async function recordSessionForUser(
   walletAddress: string,
   jti: string,
+  onChainRole?: OnChainRole,
   ttlSec: number = DEFAULT_TOMBSTONE_TTL_SEC,
 ): Promise<void> {
   const indexNonce = userIndexKey(walletAddress);
@@ -119,12 +135,21 @@ export async function recordSessionForUser(
     // dozen sessions but should not accumulate thousands. 1024 is a
     // generous cap; oldest entries fall off if the list grows past it.
     const merged = Array.from(new Set([...prior, newHash])).slice(-1024);
+    // Prefer the freshly-supplied `onChainRole` on every write so a
+    // mid-life code rollout reaches steady state quickly. If the caller
+    // didn't pass one (legacy call site), preserve whatever role was on
+    // the prior record — never silently downgrade an indexed identity
+    // to "unknown role".
+    const resolvedRole: OnChainRole | undefined =
+      onChainRole ??
+      (existing?.kind === 'session_index' ? existing.onChainRole : undefined);
     const item: UserSessionIndexItem = {
       nonce: indexNonce,
       kind: 'session_index',
       walletAddress,
       jtiHashes: merged,
       expiresAt,
+      ...(resolvedRole !== undefined ? { onChainRole: resolvedRole } : {}),
     };
     // `putItem` overwrites unconditionally — the per-user index has no
     // append-only invariant; concurrent logins racing here may lose a hash
@@ -259,4 +284,96 @@ export async function revokeAllSessionsForUser(walletAddress: string): Promise<n
     // Ignore.
   }
   return written;
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 3 — enumeration for the daily role-revalidation cron
+// ---------------------------------------------------------------------------
+
+/** One active on-chain identity surfaced by `listActiveSessionIndices`. */
+export interface ActiveSessionIndex {
+  /** The on-chain credential identifier — drep1... / stake1... /
+   *  pool1... / cc_cold1... depending on the role. Same string the
+   *  identity's JWT `sub` carries. */
+  walletAddress: string;
+  /** The role this identity's sessions were granted under. `undefined`
+   *  on pre-Sprint-3 records (those got recorded before the field was
+   *  added); the cron skips those with a warning rather than guess. */
+  onChainRole: OnChainRole | undefined;
+  /** Hashed jti list — used by the cron to call `isSessionRevoked` on
+   *  each session individually if needed, though the cron's normal path
+   *  is `revokeAllSessionsForUser(walletAddress)` which re-reads this
+   *  record. */
+  jtiHashes: string[];
+  /** Epoch-seconds DDB TTL. Already-expired rows are filtered out by
+   *  the enumerator before they reach the caller — DDB's TTL deletion
+   *  lags by minutes, so the explicit check is required for
+   *  correctness (mirrors the pattern used elsewhere in this file). */
+  expiresAt: number;
+}
+
+/**
+ * Enumerate every active per-identity session index. Used by the daily
+ * role-revalidation cron (`sync/revalidate-onchain-roles.ts`) to fan out
+ * one role re-check per identity.
+ *
+ * # Why a Scan
+ *
+ * The session-index rows are scattered across the `authNonces` table
+ * (which is shared with the legacy `challenge` / `mutation` / `circuit`
+ * / `drep_link` / `identity` / `session` rows). A `kind='session_index'`
+ * filter narrows the response server-side. At today's scale the
+ * authNonces table is tiny (thousands of in-flight nonces + a handful
+ * of revoked-session tombstones + a small number of session indices —
+ * one per active on-chain identity). Per-Lambda-invocation cost is on
+ * the order of cents at most. Documented in `revalidate-onchain-roles.ts`
+ * as a scale-watch.
+ *
+ * # Defensive
+ *
+ *   - Filters expired rows (DDB TTL lags by minutes).
+ *   - Filters rows whose `walletAddress` isn't a string (defensive
+ *     against schema drift).
+ *   - Caller pages with `lastEvaluatedKey` until DDB reports none.
+ *
+ * Read errors propagate — the cron decides whether to fail-safe (skip
+ * the whole pass) or treat the partial enumeration as authoritative.
+ * Today's cron treats a thrown Scan as a hard fail (it logs and exits
+ * the run without revoking anything) so a transient DDB blip never
+ * locks every on-chain identity out.
+ */
+export async function listActiveSessionIndices(): Promise<ActiveSessionIndex[]> {
+  const out: ActiveSessionIndex[] = [];
+  let cursor: Record<string, unknown> | undefined;
+  const nowSec = Math.floor(Date.now() / 1000);
+  do {
+    const page = await scanItems<UserSessionIndexItem>(tableNames.authNonces, {
+      filterExpression: '#kind = :sessionIndex',
+      expressionAttributeNames: { '#kind': 'kind' },
+      expressionAttributeValues: { ':sessionIndex': 'session_index' },
+      ...(cursor ? { exclusiveStartKey: cursor } : {}),
+    });
+    for (const row of page.items) {
+      if (row.kind !== 'session_index') continue;
+      if (typeof row.walletAddress !== 'string' || row.walletAddress.length === 0) {
+        continue;
+      }
+      if (typeof row.expiresAt !== 'number' || row.expiresAt < nowSec) {
+        // DDB TTL lag — filter expired rows so the cron doesn't waste a
+        // Koios call on a stale identity. The cron's `revokeAll` step
+        // would no-op for these anyway (the per-jti tombstones are
+        // either already TTL'd or sweeping them is harmless), but
+        // skipping them upstream keeps the metrics meaningful.
+        continue;
+      }
+      out.push({
+        walletAddress: row.walletAddress,
+        onChainRole: row.onChainRole,
+        jtiHashes: Array.isArray(row.jtiHashes) ? row.jtiHashes : [],
+        expiresAt: row.expiresAt,
+      });
+    }
+    cursor = page.lastEvaluatedKey;
+  } while (cursor);
+  return out;
 }
