@@ -340,6 +340,10 @@ Background briefs (kept as historical context, not maintained):
 
 ## License
 
-This repository does not currently include a LICENSE file. All rights
-reserved by the repository owner until a license is selected. Contact the
-maintainer before redistributing or building derivative works.
+Licensed under the Apache License, Version 2.0 (the "License"); you may not
+use this repository except in compliance with the License. A copy of the
+License is in [LICENSE](LICENSE), and attribution notices are in
+[NOTICE](NOTICE). You may obtain a copy of the License at
+http://www.apache.org/licenses/LICENSE-2.0.
+
+Copyright 2026 Adam P. Rusch.
