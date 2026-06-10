@@ -27,6 +27,7 @@ export class SchedulerStack extends cdk.Stack {
   public readonly ccMembersSyncFn: lambdaNodejs.NodejsFunction;
   public readonly revalidateCommentStakeFn: lambdaNodejs.NodejsFunction;
   public readonly committeeEpochSweepFn: lambdaNodejs.NodejsFunction;
+  public readonly revalidateOnChainRolesFn: lambdaNodejs.NodejsFunction;
 
   constructor(scope: Construct, id: string, props: SchedulerStackProps) {
     super(scope, id, props);
@@ -630,6 +631,114 @@ export class SchedulerStack extends cdk.Stack {
       exportName: `${stage}-CommitteeEpochSweepFnArn`,
     });
 
+    // ---- On-chain role revalidation Lambda (Sprint 3, 2026-06-10) ----
+    //
+    // Daily, re-resolve each active on-chain identity's role via Koios
+    // and revoke any whose role no longer holds. Closes the gap where
+    // a deregistered DRep / retired SPO / revoked CC keeps an unexpired
+    // JWT for up to 30 days post-event. See the long header in
+    // `backend/src/sync/revalidate-onchain-roles.ts` for the full design
+    // + the critical "fail-safe on Koios error" correctness invariant.
+    //
+    // # Role + grants
+    //
+    // The Lambda only needs the `authNonces` table (for enumerating
+    // `kind='session_index'` rows + writing `kind='session'` tombstones).
+    // No Koios secret needed — the adapter uses the public anonymous
+    // tier. Mirrors the IAM posture of the on-chain verify Lambda for
+    // consistency (which the API stack already grants for handler-side
+    // calls into `recordSessionForUser`).
+    //
+    // # Memory + timeout
+    //
+    // 512MB / 5 min. At today's scale (handful of on-chain identities)
+    // the run is sub-second. At steady state — assume the platform
+    // attracts thousands of role-holders — the wall clock is dominated
+    // by per-identity Koios calls. Each `resolveDRep` is one Koios
+    // `/drep_info` call (~50ms); the CC role check uses a single
+    // adapter-cached `/committee_info` for the whole pass. 5 minutes
+    // absorbs ample retry headroom; the cron's correctness does not
+    // depend on completing the pass in one Lambda invocation (an
+    // unfinished pass simply picks up next day).
+    const revalidateOnChainRolesRole = new iam.Role(
+      this,
+      'RevalidateOnChainRolesRole',
+      {
+        assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+        managedPolicies: [
+          iam.ManagedPolicy.fromAwsManagedPolicyName(
+            'service-role/AWSLambdaBasicExecutionRole',
+          ),
+        ],
+      },
+    );
+    // The Lambda reads `kind='session_index'` rows + writes
+    // `kind='session'` tombstones + deletes per-user index rows after
+    // a revoke-all. All three operations target the existing
+    // `authNonces` table.
+    databaseStack.authNoncesTable.grantReadWriteData(revalidateOnChainRolesRole);
+
+    this.revalidateOnChainRolesFn = new lambdaNodejs.NodejsFunction(
+      this,
+      'RevalidateOnChainRolesFn',
+      {
+        functionName: `drep-platform-${stage}-revalidate-onchain-roles-sync`,
+        entry: path.join(backendDir, 'src/sync/revalidate-onchain-roles.ts'),
+        handler: 'handler',
+        runtime: lambda.Runtime.NODEJS_20_X,
+        architecture: lambda.Architecture.ARM_64,
+        memorySize: 512,
+        timeout: cdk.Duration.minutes(5),
+        role: revalidateOnChainRolesRole,
+        environment: {
+          DYNAMODB_TABLE_PREFIX: `drep-platform-${stage}-`,
+          CARDANO_NETWORK: stage === 'staging' ? 'preprod' : 'mainnet',
+        },
+        bundling: {
+          minify: true,
+          sourceMap: false,
+          target: 'es2022',
+          externalModules: ['@aws-sdk/*'],
+          // The role re-validation uses `blake2b` indirectly via the
+          // ported identity module's `crypto/blake.ts` (the resolvers
+          // themselves don't hash, but the imported helpers do — keep
+          // the install consistent with the other identity-consuming
+          // Lambdas so the cold-start hot path doesn't surprise an
+          // operator).
+          nodeModules: ['blake2b'],
+          forceDockerBundling: false,
+        },
+        depsLockFilePath: path.join(backendDir, 'package-lock.json'),
+      },
+    );
+
+    const revalidateOnChainRolesRule = new events.Rule(
+      this,
+      'RevalidateOnChainRolesRule',
+      {
+        ruleName: `drep-platform-${stage}-revalidate-onchain-roles-sync`,
+        description:
+          'Triggers daily on-chain role re-validation (DRep / SPO / CC / proposer deregistration sweep)',
+        // 02:30 UTC daily — slotted between the existing power-history
+        // sync (02:00) and pool-metadata sync (03:00) so the three
+        // anonymous-tier Koios consumers don't share an RPS budget.
+        schedule: events.Schedule.cron({ minute: '30', hour: '2' }),
+        enabled: true,
+      },
+    );
+
+    revalidateOnChainRolesRule.addTarget(
+      new eventsTargets.LambdaFunction(this.revalidateOnChainRolesFn, {
+        retryAttempts: 1,
+        maxEventAge: cdk.Duration.hours(2),
+      }),
+    );
+
+    new cdk.CfnOutput(this, 'RevalidateOnChainRolesFnArn', {
+      value: this.revalidateOnChainRolesFn.functionArn,
+      exportName: `${stage}-RevalidateOnChainRolesFnArn`,
+    });
+
     // ---- CloudWatch alarms on sync Lambda errors (Batch F #20, 2026-05-27) ----
     //
     // One alarm per sync Lambda. Today if `governance-intake` or
@@ -722,5 +831,10 @@ export class SchedulerStack extends cdk.Stack {
       'revalidate-comment-stake',
     );
     buildErrorsAlarm('CommitteeEpochSweepErrorsAlarm', this.committeeEpochSweepFn, 'committee-epoch-sweep');
+    buildErrorsAlarm(
+      'RevalidateOnChainRolesErrorsAlarm',
+      this.revalidateOnChainRolesFn,
+      'revalidate-onchain-roles',
+    );
   }
 }

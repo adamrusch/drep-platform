@@ -107,6 +107,10 @@ import { verifyJWT, extractOnChainTokenFromCookie } from '../../lib/auth';
 import { isSessionRevoked, revokeSessionByJti } from '../../lib/sessionRevocation';
 import { ccHotKeyHashHex } from '../../lib/identity/cardano/identity';
 import { bytesToHex } from '../../lib/identity/crypto/hex';
+import { makeCoseSignature, type6Address } from '../../lib/identity/__fixtures__/makeCose';
+import { Encoder } from 'cbor-x';
+import { createPrivateKey, createPublicKey } from 'node:crypto';
+import { blake2b224 } from '../../lib/identity/crypto/blake';
 
 import type { APIGatewayProxyEventV2 } from 'aws-lambda';
 
@@ -463,5 +467,219 @@ describe('on-chain verify — per-session revocation surface', () => {
     // Defining check: A revoked, B still alive.
     expect(await isSessionRevoked(jtiA)).toBe(true);
     expect(await isSessionRevoked(jtiB)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sprint 3 — strict address-header rejection telemetry
+// ---------------------------------------------------------------------------
+//
+// `lib/identity/auth/cose.ts` rejects (returns `{ok:false, reason:"protected
+// header missing or invalid \"address\" field"}`) when a wallet's CIP-8
+// COSE_Sign1 protected header lacks an `address` field. Oracle flagged that
+// some older wallets omit it. We stay strict (reject) but emit a CloudWatch
+// EMF metric on every rejection so Adam can quantify the affected wallet
+// population BEFORE any future decision to relax. The wire response stays
+// generic — internal reasons MUST NOT leak.
+
+/**
+ * Test-internal CIP-8 builder that DELIBERATELY omits the `address` field
+ * from the protected header. Mirrors `makeCoseSignature` from the fixtures
+ * but produces a malformed-by-our-rules signature whose ONLY difference
+ * is the missing protected-header field — every other byte (alg, payload,
+ * sig structure, COSE_Key) follows the same CIP-8 layout a valid wallet
+ * signature does. This isolates the metric path under test.
+ */
+function makeCoseSignatureNoAddress(opts: { seed: Uint8Array; payload: string }): {
+  signatureHex: string;
+  keyHex: string;
+  pubKey: Uint8Array;
+} {
+  const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
+  const ED25519_SPKI_HEADER = Buffer.from('302a300506032b6570032100', 'hex');
+  const coseEncoder = new Encoder({
+    mapsAsObjects: false,
+    useRecords: false,
+    tagUint8Array: false,
+  });
+  const privKey = createPrivateKey({
+    key: Buffer.concat([ED25519_PKCS8_PREFIX, Buffer.from(opts.seed)]),
+    format: 'der',
+    type: 'pkcs8',
+  });
+  const pubKeyBuf = createPublicKey(privKey).export({
+    format: 'der',
+    type: 'spki',
+  }) as Buffer;
+  const pubKey = new Uint8Array(pubKeyBuf.subarray(ED25519_SPKI_HEADER.length));
+  // Touch blake2b224 so the helper exists in scope and unused-import lint
+  // doesn't trip if the file is later refactored — and to mirror the fixture's
+  // shape for any maintainer who diffs the two.
+  void blake2b224(pubKey);
+  // Protected header: alg only, NO 'address' field. This is the exact
+  // condition `verifyCip8` rejects with the missing-address-header reason
+  // string we want to count.
+  const protectedMap = new Map<number | string, unknown>([[1, -8]]);
+  const protectedBstr = coseEncoder.encode(protectedMap);
+  const payloadBytes = new TextEncoder().encode(opts.payload);
+  const toBeSigned = coseEncoder.encode([
+    'Signature1',
+    protectedBstr,
+    new Uint8Array(0),
+    payloadBytes,
+  ]);
+  const sig = new Uint8Array(nodeSign(null, Buffer.from(toBeSigned), privKey));
+  const unprotected = new Map<string, unknown>([['hashed', false]]);
+  const coseSign1 = [protectedBstr, unprotected, payloadBytes, sig];
+  const coseKey = new Map<number, unknown>([
+    [1, 1],
+    [3, -8],
+    [-1, 6],
+    [-2, pubKey],
+  ]);
+  return {
+    signatureHex: Buffer.from(coseEncoder.encode(coseSign1)).toString('hex'),
+    keyHex: Buffer.from(coseEncoder.encode(coseKey)).toString('hex'),
+    pubKey,
+  };
+}
+
+describe('on-chain verify — strict address-header metric (Sprint 3)', () => {
+  it('emits IdentityCoseMissingAddressHeader on a CIP-8 verify with no protected-header address', async () => {
+    const { payload } = makeNoncePayload();
+    const seed = new Uint8Array(randomBytes(32));
+    const { signatureHex, keyHex } = makeCoseSignatureNoAddress({ seed, payload });
+
+    // Capture stdout to inspect the EMF envelope. The metric path
+    // writes a single-line JSON object via `console.log`.
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    try {
+      const result = (await onChainVerify(
+        buildEvent({ payload, signatureHex, keyHex, role: 'drep' }),
+      )) as { statusCode: number; body: string };
+      // The wire response is generic — internal reason MUST NOT leak.
+      expect(result.statusCode).toBe(401);
+      const json = JSON.parse(result.body) as { error?: string };
+      expect(json.error ?? '').not.toContain('address');
+      // Look for the EMF envelope among the captured log calls.
+      const emitted = logSpy.mock.calls
+        .map((args) => (typeof args[0] === 'string' ? args[0] : ''))
+        .filter((s) => s.includes('IdentityCoseMissingAddressHeader'));
+      expect(emitted.length).toBeGreaterThan(0);
+      // The envelope must look like EMF — `_aws.CloudWatchMetrics` present,
+      // metric name and value set on the top level. Parse the first hit.
+      const envelope = JSON.parse(emitted[0]!) as {
+        _aws: { CloudWatchMetrics: Array<{ Namespace: string; Metrics: Array<{ Name: string }> }> };
+        IdentityCoseMissingAddressHeader: number;
+        Stage: string;
+        Role?: string;
+      };
+      expect(envelope._aws.CloudWatchMetrics[0]?.Namespace).toBe('DrepPlatform/Identity');
+      expect(envelope._aws.CloudWatchMetrics[0]?.Metrics[0]?.Name).toBe(
+        'IdentityCoseMissingAddressHeader',
+      );
+      expect(envelope.IdentityCoseMissingAddressHeader).toBe(1);
+      expect(envelope.Stage).toBe(STAGE);
+      // The handler attaches the role dimension so a future split shows
+      // which role's wallets are affected.
+      expect(envelope.Role).toBe('drep');
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('does NOT emit the metric for a valid signature (clean DRep login)', async () => {
+    const { payload } = makeNoncePayload();
+    const seed = new Uint8Array(randomBytes(32));
+    // First derive the key hash (we need it to bind the address bytes).
+    const probe = makeCoseSignature({
+      seed,
+      payload,
+      addressBytes: new Uint8Array(28),
+    });
+    const cose = makeCoseSignature({
+      seed,
+      payload,
+      addressBytes: type6Address(probe.keyHash, 'mainnet'),
+    });
+    // Koios confirms the derived DRep id is registered.
+    fakeKoios.drepInfo.mockResolvedValueOnce({
+      drep_id: 'drep1positive_test',
+      hex: null,
+      has_script: false,
+      drep_status: 'registered',
+      deposit: null,
+      active: true,
+      expires_epoch_no: null,
+    });
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    try {
+      const result = (await onChainVerify(
+        buildEvent({
+          payload,
+          signatureHex: cose.signatureHex,
+          keyHex: cose.keyHex,
+          role: 'drep',
+        }),
+      )) as { statusCode: number };
+      // We expect the verify to succeed cryptographically. The Koios mock
+      // returns a registered DRep, so the handler should return 200.
+      expect(result.statusCode).toBe(200);
+      // No EMF envelope for the missing-address-header metric should have
+      // been emitted on the happy path.
+      const emitted = logSpy.mock.calls
+        .map((args) => (typeof args[0] === 'string' ? args[0] : ''))
+        .filter((s) => s.includes('IdentityCoseMissingAddressHeader'));
+      expect(emitted).toHaveLength(0);
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('does NOT emit the metric for a non-address-header verify failure (e.g. bad signature math)', async () => {
+    // Build a structurally-valid CIP-8 sig but tamper the signature bytes
+    // so the Ed25519 check fails. The rejection reason should differ from
+    // the missing-address-header reason; the metric MUST NOT fire.
+    const { payload } = makeNoncePayload();
+    const seed = new Uint8Array(randomBytes(32));
+    const probe = makeCoseSignature({
+      seed,
+      payload,
+      addressBytes: new Uint8Array(28),
+    });
+    const cose = makeCoseSignature({
+      seed,
+      payload,
+      addressBytes: type6Address(probe.keyHash, 'mainnet'),
+    });
+    // Corrupt the COSE bytes — flip the last byte. This still decodes as a
+    // 4-element CBOR array (signature bstr keeps its length) but the
+    // Ed25519 verify will fail.
+    const corruptedSigHex =
+      cose.signatureHex.slice(0, -2) +
+      ((parseInt(cose.signatureHex.slice(-2), 16) ^ 0xff) & 0xff).toString(16).padStart(2, '0');
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    try {
+      const result = (await onChainVerify(
+        buildEvent({
+          payload,
+          signatureHex: corruptedSigHex,
+          keyHex: cose.keyHex,
+          role: 'drep',
+        }),
+      )) as { statusCode: number };
+      expect(result.statusCode).toBe(401);
+      const emitted = logSpy.mock.calls
+        .map((args) => (typeof args[0] === 'string' ? args[0] : ''))
+        .filter((s) => s.includes('IdentityCoseMissingAddressHeader'));
+      expect(emitted).toHaveLength(0);
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 });
