@@ -9,6 +9,19 @@ export type UserRole =
   | 'trusted_delegator'
   | 'platform_admin';
 
+/**
+ * On-chain proven roles (Sprint 1 — mirror of the backend `OnChainRole`).
+ *
+ * Travel as a parallel `onChainRoles[]` JWT claim alongside `UserRole`-
+ * shaped `roles`. The two surfaces are intentionally distinct: `UserRole`
+ * is the platform-internal role assignment (delegator / lead_drep / etc.);
+ * `OnChainRole` is a credential that was just proven on-chain via a
+ * fresh signature. A user might hold both (e.g. a `delegator` who is also
+ * a `drep` on-chain), or only one (a wallet-less SPO that proved its
+ * pool's Calidus key but has no `lead_drep` row).
+ */
+export type OnChainRole = 'drep' | 'spo' | 'cc' | 'proposer';
+
 export type GovernanceActionType =
   | 'ParameterChange'
   | 'HardForkInitiation'
