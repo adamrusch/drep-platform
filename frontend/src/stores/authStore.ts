@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import type { UserRole, SessionType, UserProfile } from '@/types';
+import type { UserRole, OnChainRole, SessionType, UserProfile } from '@/types';
 
 /**
  * Plain-data auth store. Computed values (isAuthenticated, isLeadDRep, etc.)
@@ -22,6 +22,14 @@ interface AuthStore {
    */
   walletName: string | null;
   roles: UserRole[];
+  /**
+   * Roles the user proved on-chain via the Sprint 1 `/auth/onchain/*`
+   * flow. Independent of `roles` — a wallet may hold both, or only
+   * one (a wallet-less SPO that signed in via the paste flow has
+   * `onChainRoles: ['spo']` and `roles: ['guest']`). Defaults to `[]`
+   * for the legacy CIP-30 login path, preserving existing behaviour.
+   */
+  onChainRoles: OnChainRole[];
   drepId: string | null;
   /**
    * The user's joined committee (lead or member), or null. Mirrors
@@ -41,6 +49,9 @@ interface AuthStore {
     sessionType: SessionType;
     expiresAt: string;
     drepId?: string;
+    /** Set when the login flow used `/auth/onchain/verify`. Optional so the
+     *  legacy CIP-30 callers don't have to pass anything. */
+    onChainRoles?: OnChainRole[];
   }) => void;
   setProfile: (profile: UserProfile) => void;
   clearAuth: () => void;
@@ -53,19 +64,34 @@ export const useAuthStore = create<AuthStore>()(
       walletAddress: null,
       walletName: null,
       roles: [],
+      onChainRoles: [],
       drepId: null,
       committeeMembership: null,
       sessionType: null,
       expiresAt: null,
       profile: null,
 
-      setAuth: ({ walletAddress, walletName, roles, sessionType, expiresAt, drepId }) => {
+      setAuth: ({
+        walletAddress,
+        walletName,
+        roles,
+        sessionType,
+        expiresAt,
+        drepId,
+        onChainRoles,
+      }) => {
         set((state) => ({
           walletAddress,
           // Preserve walletName if a fresh setAuth doesn't pass one (e.g. session
           // refresh that doesn't re-prompt the wallet). Otherwise update.
           walletName: walletName ?? state.walletName,
           roles,
+          // setAuth without an explicit `onChainRoles` argument preserves the
+          // existing value (so a legacy CIP-30 re-login of a wallet that ALSO
+          // holds an on-chain session doesn't reset onChainRoles to []). An
+          // empty-array argument is honoured: that's how the on-chain logout
+          // path clears them.
+          onChainRoles: onChainRoles ?? state.onChainRoles,
           sessionType,
           expiresAt,
           drepId: drepId ?? null,
@@ -98,6 +124,7 @@ export const useAuthStore = create<AuthStore>()(
           walletAddress: null,
           walletName: null,
           roles: [],
+          onChainRoles: [],
           drepId: null,
           committeeMembership: null,
           sessionType: null,
@@ -117,6 +144,7 @@ export const useAuthStore = create<AuthStore>()(
         walletAddress: state.walletAddress,
         walletName: state.walletName,
         roles: state.roles,
+        onChainRoles: state.onChainRoles,
         drepId: state.drepId,
         committeeMembership: state.committeeMembership,
         sessionType: state.sessionType,
@@ -139,6 +167,18 @@ export function useIsAuthenticated(): boolean {
 
 export function useHasRole(role: UserRole): boolean {
   return useAuthStore((s) => s.roles.includes(role));
+}
+
+/** Selector — the user's set of on-chain proven roles (Sprint 1). Empty
+ *  for legacy CIP-30 sessions. */
+export function useOnChainRoles(): OnChainRole[] {
+  return useAuthStore((s) => s.onChainRoles);
+}
+
+/** Selector — true when the user proved the supplied on-chain role
+ *  via `/auth/onchain/verify`. */
+export function useHasOnChainRole(role: OnChainRole): boolean {
+  return useAuthStore((s) => s.onChainRoles.includes(role));
 }
 
 export function useIsLeadDRep(): boolean {

@@ -45,8 +45,13 @@ import type {
   APIGatewayRequestAuthorizerEventV2,
   APIGatewaySimpleAuthorizerResult,
 } from 'aws-lambda';
-import { verifyJWT, extractTokenFromCookie } from '../lib/auth';
+import {
+  verifyJWT,
+  extractTokenFromCookie,
+  extractOnChainTokenFromCookie,
+} from '../lib/auth';
 import { getItem, tableNames } from '../lib/dynamodb';
+import { isSessionRevoked } from '../lib/sessionRevocation';
 import type { JWTPayload, UserItem } from '../lib/types';
 
 
@@ -60,6 +65,25 @@ export const handler = async (
     }
 
     const payload = await verifyJWT(token);
+
+    // Per-session revocation (Sprint 1): if the JWT carries a `jti`, check
+    // for a tombstone in the revocation store. Tombstones are written by
+    // logout / "log out everywhere" — they fail-CLOSE the revoked token
+    // while leaving every other token (different `jti`) untouched. The
+    // store's `isSessionRevoked` already fails OPEN on read errors so a
+    // DynamoDB blip doesn't lock everyone out (matching the legacy
+    // tokenVersion path below).
+    //
+    // Legacy tokens with no `jti` skip this check. They're still subject
+    // to the row-counter check below.
+    if (typeof payload.jti === 'string' && payload.jti.length > 0) {
+      if (await isSessionRevoked(payload.jti)) {
+        console.warn(
+          `JWT authorizer rejected revoked-session token for ${payload.sub} (jti=${payload.jti})`,
+        );
+        return { isAuthorized: false };
+      }
+    }
 
     // Session revocation: reject a token whose version is below the user
     // row's current `tokenVersion` (bumped on logout). Fail OPEN on a read
@@ -101,11 +125,19 @@ function extractToken(event: APIGatewayRequestAuthorizerEventV2): string | null 
     return authHeader.slice(7);
   }
 
-  // 2. Try httpOnly cookie
+  // 2. Try httpOnly cookies — legacy CIP-30 session first, then the new
+  //    on-chain session. A wallet may hold both cookies at once: prefer the
+  //    legacy one because it carries the canonical `roles` claim every
+  //    existing role-gated handler expects. On-chain-only sessions (no
+  //    legacy login this device) fall through to the second branch.
   const cookieHeader = event.cookies?.join('; ');
-  const fromCookie = extractTokenFromCookie(cookieHeader);
-  if (fromCookie) {
-    return fromCookie;
+  const fromLegacy = extractTokenFromCookie(cookieHeader);
+  if (fromLegacy) {
+    return fromLegacy;
+  }
+  const fromOnChain = extractOnChainTokenFromCookie(cookieHeader);
+  if (fromOnChain) {
+    return fromOnChain;
   }
 
   return null;
@@ -127,6 +159,11 @@ function buildAuthorizedResponse(
       // current version without a second DynamoDB read.
       tokenVersion: String(tokenVersion),
       ...(payload.registeredDrepId ? { registeredDrepId: payload.registeredDrepId } : {}),
+      // Sprint 1: forward the on-chain roles claim (always-defined post-
+      // verify, possibly empty) and the `jti` when present. Both ride as
+      // strings — API Gateway v2 only carries string context values.
+      onChainRoles: JSON.stringify(payload.onChainRoles ?? []),
+      ...(payload.jti ? { jti: payload.jti } : {}),
     },
   };
 }

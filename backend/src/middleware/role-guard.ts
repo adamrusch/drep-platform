@@ -1,5 +1,5 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer } from 'aws-lambda';
-import type { CommitteeMemberItem, UserRole } from '../lib/types';
+import type { CommitteeMemberItem, OnChainRole, UserRole } from '../lib/types';
 
 export interface AuthContext {
   walletAddress: string;
@@ -13,6 +13,18 @@ export interface AuthContext {
   /** The session-revocation counter validated by the authorizer. Carried so
    *  `/auth/refresh` can re-mint at the current version without re-reading. */
   tokenVersion?: number;
+  /** Roles the caller proved on-chain via the Sprint 1 `/auth/onchain/*`
+   *  flow. Optional on the type so existing test stubs (and any pre-
+   *  Sprint-1 caller that still constructs a context by hand) stay
+   *  compatible without churn. Handlers that consult on-chain identity
+   *  should read `authCtx.onChainRoles ?? []`; `requireOnChainRole` does
+   *  this defensively. Parallel to `roles` — existing role-gated handlers
+   *  continue to read `roles` and are completely unaffected. */
+  onChainRoles?: OnChainRole[];
+  /** The session id (ULID) of the caller's JWT. Present only on tokens
+   *  issued after the per-session revocation path landed. Used by the
+   *  logout handler to revoke just the current session. */
+  jti?: string;
 }
 
 /**
@@ -32,6 +44,13 @@ interface LambdaAuthorizerContext {
   registeredDrepId?: string;
   tokenVersion?: string;
   drepId?: string; // legacy — remove after 2026-06-03
+  /** JSON-serialized `OnChainRole[]` — always emitted by the Sprint 1
+   *  authorizer (possibly `'[]'`). Older authorizer Lambdas may omit it
+   *  during rollout — treat absence as `[]`. */
+  onChainRoles?: string;
+  /** ULID session id forwarded from the authorizer for tokens issued
+   *  after the per-session revocation path landed. */
+  jti?: string;
 }
 
 /**
@@ -78,12 +97,33 @@ export function extractAuthContext(
 
   const tokenVersion = ctx.tokenVersion !== undefined ? Number(ctx.tokenVersion) : undefined;
 
+  // Parse the optional `onChainRoles` claim. Defensive: an authorizer that
+  // pre-dates Sprint 1 doesn't emit the field; treat absence as `[]`. A
+  // malformed value also degrades to `[]` rather than 401 — the field is
+  // additive and never load-bearing for legacy auth.
+  let onChainRoles: OnChainRole[] = [];
+  if (ctx.onChainRoles) {
+    try {
+      const parsed = JSON.parse(ctx.onChainRoles) as unknown;
+      if (Array.isArray(parsed)) {
+        onChainRoles = parsed.filter(
+          (r): r is OnChainRole =>
+            r === 'drep' || r === 'spo' || r === 'cc' || r === 'proposer',
+        );
+      }
+    } catch {
+      onChainRoles = [];
+    }
+  }
+
   return {
     walletAddress,
     roles,
     registeredDrepId,
     sessionType: ctx.sessionType,
     ...(Number.isFinite(tokenVersion) ? { tokenVersion } : {}),
+    onChainRoles,
+    ...(ctx.jti ? { jti: ctx.jti } : {}),
   };
 }
 
@@ -99,6 +139,28 @@ export function requireRole(
   if (!hasRole) {
     throw new AuthorizationError(
       `Insufficient permissions. Required one of: ${requiredRoles.join(', ')}`,
+      403,
+    );
+  }
+}
+
+/**
+ * Checks that the caller proved at least one of the required on-chain
+ * roles via the Sprint 1 `/auth/onchain/*` flow. Throws AuthorizationError
+ * if not. NOTE: this is intentionally separate from `requireRole` because
+ * `OnChainRole` and `UserRole` are parallel concepts — a `lead_drep`
+ * (platform role) is distinct from a wallet that just proved DRep
+ * registration on-chain (`drep` on-chain role).
+ */
+export function requireOnChainRole(
+  authCtx: AuthContext,
+  ...requiredRoles: OnChainRole[]
+): void {
+  const carried = authCtx.onChainRoles ?? [];
+  const has = requiredRoles.some((r) => carried.includes(r));
+  if (!has) {
+    throw new AuthorizationError(
+      `Insufficient on-chain proof. Required one of: ${requiredRoles.join(', ')}`,
       403,
     );
   }
