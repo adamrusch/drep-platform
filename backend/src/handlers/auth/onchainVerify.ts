@@ -73,8 +73,28 @@ import {
 } from '../../lib/identity/validation/input';
 import { buildKoiosAdapter } from '../../lib/identity/auth/koiosAdapter';
 import { recordSessionForUser } from '../../lib/sessionRevocation';
+import {
+  emitIdentityMetric,
+  METRIC_IDENTITY_COSE_MISSING_ADDRESS_HEADER,
+} from '../../lib/metrics';
 import type { OnChainRole, SessionType, UserRole } from '../../lib/types';
 import { ok, badRequest, unauthorized, internalError } from '../_response';
+
+/**
+ * Sentinel substring from `lib/identity/auth/cose.ts` line ~214 — the
+ * exact reason text returned when a wallet's CIP-8 protected header
+ * lacks the `address` field. Some older wallets omit it. We keep
+ * rejecting (strict) but emit a CloudWatch metric on each rejection so
+ * Adam can quantify the affected population BEFORE any future decision
+ * to relax. The metric DOES NOT change the wire response (still a
+ * generic 'Signature verification failed' — we never leak the internal
+ * reason to a caller). If `cose.ts` ever changes that string, this
+ * detector silently stops counting — the test
+ * `metric fires on missing-address-header rejection` in
+ * `onchainVerify.test.ts` is the canary.
+ */
+const COSE_MISSING_ADDRESS_HEADER_REASON_FRAGMENT =
+  'protected header missing or invalid "address" field';
 
 interface VerifyRequestBody {
   payload: string;
@@ -159,6 +179,18 @@ export const handler = async (
         expectedPayload: body.payload,
       });
       if (!verifyResult.ok || !verifyResult.pubKey || !verifyResult.addressBytes) {
+        // Sprint 3 — emit a CloudWatch metric (via EMF) when the
+        // rejection root cause is specifically the missing/invalid
+        // `address` field on the COSE protected header. Quantifies the
+        // affected-wallet population so Adam can later decide whether
+        // to relax the strict requirement. The wire response stays
+        // generic — we never leak the internal reason to clients.
+        if (
+          typeof verifyResult.reason === 'string' &&
+          verifyResult.reason.includes(COSE_MISSING_ADDRESS_HEADER_REASON_FRAGMENT)
+        ) {
+          emitIdentityMetric(METRIC_IDENTITY_COSE_MISSING_ADDRESS_HEADER, 1, { Role: role });
+        }
         return unauthorized('Signature verification failed');
       }
       const { pubKey, addressBytes } = verifyResult;
@@ -265,9 +297,11 @@ export const handler = async (
     );
 
     // Index the session for revoke-all-for-user. Best-effort — never
-    // blocks the response.
+    // blocks the response. Sprint 3 — pass the on-chain role through so
+    // the daily role-revalidation cron knows which `resolveRole` variant
+    // to re-run for this identity on its 24h cadence.
     try {
-      await recordSessionForUser(credentialId, jti);
+      await recordSessionForUser(credentialId, jti, onChainRole);
     } catch (err) {
       console.warn('onchainVerify: recordSessionForUser failed (non-fatal):', err);
     }
