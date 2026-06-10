@@ -6,6 +6,8 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "lint": "biome lint --no-errors-on-unmatched src/lib/identity",
+    "audit:prod": "npm audit --omit=dev --audit-level=high",
     "test": "vitest run",
     "test:watch": "vitest",
     "clean": "rm -rf dist"
@@ -23,6 +25,7 @@
     "ulid": "^2.3.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.4.16",
     "@types/aws-lambda": "^8.10.140",
     "@types/node": "^20.14.0",
     "esbuild": "^0.28.0",
