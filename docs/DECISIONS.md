@@ -244,3 +244,92 @@ the governance sync's 1-min cadence anyway.
 
 See: `backend/src/sync/drep-directory.ts:455-545`,
 `backend/src/sync/governance-intake.ts:170-200, 472-480`.
+
+---
+
+## ADR-008: Opening a committee proposal takes no wallet signature
+
+**Status**: Accepted (2026-06-05, PR #64)
+
+**Context**: Every committee mutation re-signed a stage-bound CIP-30 message
+(leaked-cookie protection). For *opening* a proposal — queuing a governance
+action for the group to deliberate — the extra wallet popup was friction the
+product owner explicitly didn't want, and the action is low-stakes: the group
+still has to actually vote it through.
+
+**Decision**: Opening a proposal is now JWT-auth + committee-membership only,
+no re-sign. `proposerSignature` became optional on the proposal row. The
+binding actions downstream — cast, close/pass, finalize rationale, and the
+on-chain submission receipt — still require a fresh signature.
+
+**Consequences**:
+- One fewer wallet prompt on the most common committee action.
+- A leaked session cookie can, at worst, queue a proposal the group then has
+  to vote through — it can't cast or submit anything.
+- `proposerSignature` is now nullable; old signed proposals still carry it.
+
+See: `backend/src/handlers/committee/openProposal.ts`,
+`frontend/src/hooks/useCommitteeVotes.ts` (`useOpenProposal`).
+
+## ADR-009: Cache voter rationales from IPFS (active actions, on-row, manual backfill)
+
+**Status**: Accepted (2026-06-05, PR #66)
+
+**Context**: A DRep/SPO/CC vote can attach a CIP-100 rationale anchor
+(`ipfs://`/`https://` URL + blake2b hash). We stored the URL + hash on the
+`governance_votes` row but never downloaded the body, so the UI could only
+render a raw external IPFS link. We wanted rationales shown inline.
+
+**Decision**: A scheduled Lambda (`sync/vote-rationale-sync`) downloads each
+vote's rationale via the existing multi-gateway, hash-verifying IPFS fetcher
+(or direct https + blake2b), parses CIP-100 `body.comment` / CIP-108
+`rationale`/`abstract`, and writes a compact `{rationaleText, title, status,
+hashMatch}` **onto the vote row** (no new table — reuses the
+`status-submittedAt-index` GSI). Scope: **active actions only** on the 30-min
+schedule, bounded ~200 fetches/run, idempotent (terminal statuses skipped,
+only `unreachable` retried). A manual invoke payload `{statuses, sinceDays}`
+runs a **backfill** over concluded actions + a time window. `GET
+/governance/{actionId}` returns the cached fields; the Votes tab renders them
+inline (expandable, hash-mismatch caveat, "Source" link).
+
+**Consequences**:
+- Rationales display inline, hash-verified, with no per-render gateway hit.
+- On-row storage keeps the hot `getVotesForAction` path read-free (capped to
+  ~12 KB/field to stay under the 400 KB item limit).
+- Active-only steady state keeps the working set + Blockfrost-independent
+  gateway load small; history is an explicit, bounded backfill.
+- The parser had to be split into a CSL-free `lib/cip108.ts` so the lean sync
+  Lambda doesn't bundle the serialization-lib WASM (see LESSONS_LEARNED 06-05).
+
+See: `backend/src/lib/voteRationale.ts`, `backend/src/lib/cip108.ts`,
+`backend/src/sync/vote-rationale-sync.ts`,
+`frontend/src/components/governance/VotesTab.tsx`.
+
+## ADR-010: Migrate prod to dedicated `*-prod` stacks (full migration, not in-place)
+
+**Status**: Accepted (2026-06-05). Supersedes the "Phase 1: dev IS prod" topology.
+
+**Context**: `drep.tools` was served by the `dev`-stage stacks, and
+`customDomainFor('dev')` had been set to return no domain (prepping a
+migration). A naive `dev` deploy would therefore **detach the live domain**.
+Shipping current code to prod required either an in-place hotfix (keep
+`drep.tools` on the `dev` stacks, re-entangling the wart) or the documented
+full migration to real `*-prod` stacks.
+
+**Decision**: Full migration. Stand up `DRepPlatform-*-prod` (own prod
+secrets, RETAIN tables, prod ACM cert) behind a new `--context noCustomDomain`
+flag, smoke-test on raw URLs, copy the tiny irreplaceable data (3 users + 2
+comments — everything else regenerates from chain), then a one-window cutover
+that releases the aliases from `dev` and claims them on `prod`. New prod JWT
+secret → all users re-log in. `dev` becomes a throwaway env with its syncs
+disabled.
+
+**Consequences**:
+- `drep.tools` now on clean, isolated prod stacks; `dev` is a real dev env.
+- ~15-25 min cutover downtime + a forced re-login (acceptable for the current
+  tiny userbase; the data is regenerable).
+- The `dev`-is-prod guards in `scripts/deploy.sh` / `infra/bin/app.ts` are now
+  inverted and stale — follow-up to relax them (block only `prod`).
+
+See: `docs/TOPOLOGY.md` (runbook + "Migration history"), `infra/bin/app.ts`
+(`noCustomDomain`), `infra/lib/stage.ts` (`customDomainFor`).
