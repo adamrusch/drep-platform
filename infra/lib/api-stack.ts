@@ -203,6 +203,13 @@ export class ApiStack extends cdk.Stack {
     const logoutFn = fn('AuthLogoutFn', 'handlers/auth/logout.ts');
     const meFn = fn('AuthMeFn', 'handlers/auth/me.ts');
     const mutationNonceFn = fn('AuthMutationNonceFn', 'handlers/auth/mutationNonce.ts');
+    // ---- On-chain auth handlers (Sprint 1) ----
+    // Parallel to /auth/challenge + /auth/verify above — these own the new
+    // four-role login flow (DRep / SPO / CC / Proposer) using the ported
+    // `lib/identity/*` module. The legacy CIP-30 flow is UNTOUCHED; a wallet
+    // may hold both cookies simultaneously.
+    const onchainChallengeFn = fn('AuthOnchainChallengeFn', 'handlers/auth/onchainChallenge.ts');
+    const onchainVerifyFn = fn('AuthOnchainVerifyFn', 'handlers/auth/onchainVerify.ts');
 
     // ---- Governance handlers ----
     const govListFn = fn('GovListFn', 'handlers/governance/list.ts');
@@ -432,6 +439,22 @@ export class ApiStack extends cdk.Stack {
       mutationNonceFn,
       'AuthMutationNonce',
       true,
+    );
+    // On-chain login routes (Sprint 1) — additive, do NOT replace the legacy
+    // `/auth/challenge` and `/auth/verify` above. Public reads (the nonce is
+    // harmless without a signature; verification gates access via a real
+    // signature + Koios role resolution).
+    addRoute(
+      apigwv2.HttpMethod.POST,
+      '/auth/onchain/challenge',
+      onchainChallengeFn,
+      'AuthOnchainChallenge',
+    );
+    addRoute(
+      apigwv2.HttpMethod.POST,
+      '/auth/onchain/verify',
+      onchainVerifyFn,
+      'AuthOnchainVerify',
     );
 
     // ---- Governance routes ----

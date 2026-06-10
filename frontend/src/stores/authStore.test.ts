@@ -38,4 +38,69 @@ describe('authStore', () => {
     useAuthStore.getState().setProfile(baseProfile({ drepId: undefined }));
     expect(useAuthStore.getState().drepId).toBe('drep1yg3eeezga');
   });
+
+  // ---- Sprint 1: onChainRoles plumbing ----
+
+  it('starts with an empty onChainRoles array', () => {
+    expect(useAuthStore.getState().onChainRoles).toEqual([]);
+  });
+
+  it('setAuth with an onChainRoles arg updates the top-level slot', () => {
+    useAuthStore.getState().setAuth({
+      walletAddress: 'drep1onchain',
+      roles: ['guest'],
+      sessionType: 'normal',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      onChainRoles: ['drep'],
+    });
+    expect(useAuthStore.getState().onChainRoles).toEqual(['drep']);
+  });
+
+  it('setAuth without an onChainRoles arg preserves the existing value (legacy CIP-30 re-login)', () => {
+    useAuthStore.getState().setAuth({
+      walletAddress: 'pool1abc',
+      roles: ['guest'],
+      sessionType: 'normal',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      onChainRoles: ['spo'],
+    });
+    useAuthStore.getState().setAuth({
+      walletAddress: 'stake1xyz',
+      roles: ['delegator'],
+      sessionType: 'normal',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      // onChainRoles intentionally omitted — legacy verify response shape.
+    });
+    expect(useAuthStore.getState().onChainRoles).toEqual(['spo']);
+  });
+
+  it('setAuth with an explicit empty array CLEARS onChainRoles (on-chain logout path)', () => {
+    useAuthStore.getState().setAuth({
+      walletAddress: 'cc_cold1abc',
+      roles: ['guest'],
+      sessionType: 'normal',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      onChainRoles: ['cc'],
+    });
+    useAuthStore.getState().setAuth({
+      walletAddress: 'cc_cold1abc',
+      roles: ['guest'],
+      sessionType: 'normal',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      onChainRoles: [],
+    });
+    expect(useAuthStore.getState().onChainRoles).toEqual([]);
+  });
+
+  it('clearAuth resets onChainRoles to []', () => {
+    useAuthStore.getState().setAuth({
+      walletAddress: 'drep1abc',
+      roles: ['guest'],
+      sessionType: 'normal',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      onChainRoles: ['drep', 'proposer'],
+    });
+    useAuthStore.getState().clearAuth();
+    expect(useAuthStore.getState().onChainRoles).toEqual([]);
+  });
 });

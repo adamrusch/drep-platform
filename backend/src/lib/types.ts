@@ -16,6 +16,28 @@ export type UserRole =
   // safety-mode clears and future moderation. See handlers/admin/.
   | 'platform_admin';
 
+/**
+ * On-chain proven roles, carried as a SEPARATE JWT claim from `roles`.
+ *
+ * The four roles map 1:1 to the `AuthRole` union used by the ported
+ * `identity/auth/users.ts`. They are proven at login via a fresh signature
+ * over a stage-bound nonce (`drep` and `proposer` via CIP-8 COSE; `spo` and
+ * `cc` via a raw Ed25519 paste flow). The on-chain identity is then
+ * resolved against Koios — see `identity/auth/resolveRole.ts`.
+ *
+ * Why this is NOT folded into `UserRole`:
+ *   - `UserRole` is used as a discriminated union across the codebase for
+ *     exhaustiveness checks; adding values would force churn through every
+ *     `switch` / role-gate handler and risk silently breaking checks that
+ *     iterate over the full set.
+ *   - The legacy CIP-30 wallet login (the live `roles` claim) is untouched
+ *     by Sprint 1 — it stays authoritative for existing users.
+ *   - On-chain roles travel as a parallel `onChainRoles[]` JWT claim so a
+ *     handler can opt in (e.g. "is this user an active SPO?") without
+ *     entangling with platform roles like `lead_drep` / `platform_admin`.
+ */
+export type OnChainRole = 'drep' | 'spo' | 'cc' | 'proposer';
+
 export type GovernanceActionType =
   | 'ParameterChange'
   | 'HardForkInitiation'
@@ -426,6 +448,20 @@ export interface JWTPayload {
    *  increments the row, invalidating every outstanding token at once.
    *  Absent on legacy tokens → treated as 0. */
   tokenVersion?: number;
+  /** On-chain proven roles for the new identity subsystem (Sprint 1).
+   *
+   *  Carries the roles a wallet proved via the on-chain login flows
+   *  (`/auth/onchain/verify`). Always optional and defaults to `[]` on
+   *  read so every legacy CIP-30 token continues to verify unchanged.
+   *  This claim NEVER reflects the legacy `roles` set — they're two
+   *  parallel surfaces sharing the same JWT envelope. */
+  onChainRoles?: OnChainRole[];
+  /** Unique session id (ULID), present on every token issued after the
+   *  per-session revocation path landed. Hashed via SHA-256 to derive the
+   *  revocation-store key. Absent on tokens issued before the change —
+   *  the authorizer treats absence as "not granularly revocable" and
+   *  falls back to the coarse `tokenVersion` check. */
+  jti?: string;
   iat: number;
   exp: number;
 }
