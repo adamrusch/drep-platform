@@ -2,3 +2,15 @@ drep.tools (drep-platform)
 Copyright 2026 Adam P. Rusch
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+------------------------------------------------------------------------
+DRep Talk (backend/src/lib/identity/*)
+------------------------------------------------------------------------
+This product includes code adapted from DRep Talk
+(https://github.com/katomm/dreptalk.com), Copyright 2026 DRep Talk
+contributors, licensed under the Apache License, Version 2.0.
+
+The authentication and identity subsystem under
+backend/src/lib/identity/ is derived from DRep Talk's src/lib/auth/*,
+src/lib/crypto/*, and src/lib/cardano/identity.ts, modified to target
+the drep-platform (AWS Lambda) stack.
