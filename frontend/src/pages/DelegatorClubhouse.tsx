@@ -18,6 +18,7 @@ import {
   useClubhousePosts,
   useCreateClubhouseComment,
   useDeleteClubhousePost,
+  useFlagClubhouseComment,
   useFlagClubhousePost,
   useVotePoll,
 } from '@/hooks/useClubhouse';
@@ -671,12 +672,28 @@ export function ClubhouseCommentRow({
   const [repliesOpen, setRepliesOpen] = useState(false);
   const [replyFormOpen, setReplyFormOpen] = useState(false);
   const [replyBody, setReplyBody] = useState('');
+  // Sprint 4 follow-up — local "I just flagged this" state for the flag
+  // button, persisted only for the lifetime of the row's mount. A
+  // reload re-derives from the row's server-side `flagCount` / `hidden`
+  // values.
+  const [hasFlaggedLocally, setHasFlaggedLocally] = useState(false);
   const createComment = useCreateClubhouseComment();
+  // Sprint 4 follow-up — community flag a clubhouse comment. Same
+  // identity contract as the post / governance comment flag hooks: the
+  // FE gates the affordance on `onChainRoles.length > 0` AND
+  // `!isOwnComment`, the backend enforces both independently.
+  const flagComment = useFlagClubhouseComment();
+  const onChainRoles = useOnChainRoles();
+  const { addToast } = useUiStore();
 
   const childReplies = repliesByParent.get(comment.commentId) ?? [];
   const childCount = childReplies.length;
   // Depth 2 is the cap — no Reply affordance at that level.
   const canReply = depth < 2 && currentWallet !== null;
+  // Sprint 4 follow-up flagging gates.
+  const isOwnComment = comment.authorWallet === currentWallet;
+  const canFlag =
+    currentWallet !== null && onChainRoles.length > 0 && !isOwnComment;
 
   const handleSubmitReply = async (): Promise<void> => {
     if (!replyBody.trim()) return;
@@ -692,6 +709,26 @@ export function ClubhouseCommentRow({
     // a second click. The query invalidation re-fetches the post in
     // the background.
     setRepliesOpen(true);
+  };
+
+  const handleFlag = async (): Promise<void> => {
+    if (!canFlag) return;
+    try {
+      await flagComment.mutateAsync({
+        drepId,
+        postId,
+        commentId: comment.commentId,
+      });
+      setHasFlaggedLocally(true);
+      addToast({ title: t('clubhouse.flagSubmitted'), variant: 'default' });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : t('clubhouse.flagFailed');
+      addToast({
+        title: t('clubhouse.flagFailed'),
+        description: msg,
+        variant: 'error',
+      });
+    }
   };
 
   return (
@@ -725,7 +762,53 @@ export function ClubhouseCommentRow({
                 {t('clubhouse.noLongerDelegated')}
               </span>
             )}
+            {/* Sprint 4 follow-up — community flag affordance for
+                clubhouse comments. Mirrors `CommentList.tsx`'s pattern:
+                visible only when the caller is on-chain-verified AND
+                NOT the comment author. Flagged state is persisted
+                client-side until the next refetch so the UI gives
+                immediate feedback. */}
+            {canFlag && (
+              <button
+                type="button"
+                onClick={() => void handleFlag()}
+                disabled={flagComment.isPending || hasFlaggedLocally}
+                data-testid="clubhouse-comment-flag-button"
+                title={
+                  hasFlaggedLocally
+                    ? t('clubhouse.alreadyFlaggedTooltip')
+                    : t('clubhouse.flagTooltip')
+                }
+                className={cn(
+                  'inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider',
+                  'text-[var(--text-tertiary)] hover:text-[var(--warning)]',
+                  'transition-colors disabled:opacity-50 disabled:cursor-not-allowed',
+                  hasFlaggedLocally && 'text-[var(--warning)]',
+                )}
+              >
+                <Flag size={10} strokeWidth={2.2} />
+                {hasFlaggedLocally
+                  ? t('clubhouse.flagged')
+                  : t('clubhouse.flag')}
+              </button>
+            )}
           </div>
+          {/* Sprint 4 follow-up — moderation treatment for clubhouse
+              comments. Normal users never see `hidden === true` rows
+              (the backend filters them); this banner surfaces ONLY for
+              `platform_admin` so they have a moderation queue. Renders
+              before the body so the moderator can't miss the state. */}
+          {comment.hidden === true && (
+            <div
+              className="mt-1 mb-1 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-token-sm bg-[var(--warning-soft)] text-[var(--warning)] text-[10px] font-semibold uppercase tracking-wider"
+              data-testid="clubhouse-comment-hidden-banner"
+            >
+              <Flag size={10} strokeWidth={2.4} />
+              {t('clubhouse.hiddenByCommunity', {
+                count: comment.flagCount ?? 0,
+              })}
+            </div>
+          )}
           <p className="text-[13px] text-[var(--text-secondary)] whitespace-pre-wrap leading-relaxed mt-0.5">
             {comment.body}
           </p>

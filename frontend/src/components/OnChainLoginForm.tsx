@@ -6,13 +6,14 @@
  * note). Supports all four flows declared by the backend
  * `/auth/onchain/verify` handler:
  *
- *   - `drep` / `proposer` — CIP-30 wallet signature, gated on a wallet
- *     being available via `window.cardano[walletName]`. The component
- *     accepts an `onWalletSign` callback so the page can wire it to its
- *     existing wallet adapter (the same one `useWalletAuth.ts` uses for
- *     the legacy CIP-30 login). When no callback is provided, the
- *     wallet-roles tab shows a disabled hint instead of misleading the
- *     user — the form for SPO/CC still works fully.
+ *   - `drep` / `proposer` — CIP-30 wallet signature. The component
+ *     auto-derives a `WalletSignFn` from the legacy wallet store
+ *     (the same `walletName` slot `useMutationSign` consumes) via the
+ *     internal `useDefaultWalletSign()` hook below — so as long as the
+ *     user has connected a CIP-30 wallet through the standard
+ *     WalletButton flow, the DRep/Proposer tabs work end-to-end with
+ *     no extra wiring from the host page. Callers may still pass an
+ *     explicit `onWalletSign` prop to override (used by tests).
  *   - `spo` — Calidus pub key + Ed25519 signature pasted from
  *     `cardano-signer` output. Wallet-less.
  *   - `cc` — Ed25519 pub key (hot key) + signature pasted from a CC
@@ -51,12 +52,125 @@ interface VerifyResponse {
 
 /** Wallet-callback signature — matches what CIP-30 `signData` returns.
  *  The caller's wallet adapter wraps the underlying CIP-8 COSE_Sign1 and
- *  COSE_Key into the supplied `{signatureHex, keyHex}`. We do not invoke
- *  the wallet ourselves — the page owns wallet selection state. */
+ *  COSE_Key into the supplied `{signatureHex, keyHex}`. The default
+ *  callback derived by `useDefaultWalletSign()` does the wrapping inline;
+ *  hosts may still pass an explicit override (e.g. tests). */
 export type WalletSignFn = (payload: string) => Promise<{
   signatureHex: string;
   keyHex: string;
 }>;
+
+/** Minimal CIP-30 wallet API surface used by the DRep / Proposer login.
+ *  Mirrors `useMutationSign`'s `Cip30Api` shape — kept local rather than
+ *  imported to keep `OnChainLoginForm.tsx` independent of the mutation-
+ *  signing hook (the import direction is leaf-only). */
+interface OnChainCip30Api {
+  signData: (
+    addressHex: string,
+    payloadHex: string,
+  ) => Promise<{ signature: string; key: string }>;
+  getRewardAddresses: () => Promise<string[]>;
+  getUsedAddresses: () => Promise<string[]>;
+}
+
+/** UTF-8 → hex encoder. CIP-30 `signData` expects the payload as hex. */
+function toHex(text: string): string {
+  const enc = new TextEncoder().encode(text);
+  let out = '';
+  for (const b of enc) out += b.toString(16).padStart(2, '0');
+  return out;
+}
+
+/** Re-enable a CIP-30 connector by name to obtain a fresh API instance.
+ *  Same pattern as `useMutationSign.ts::reEnableWallet` — the original
+ *  instance returned during auth is not retained across page loads. */
+async function reEnableWallet(walletName: string): Promise<OnChainCip30Api> {
+  const cardano = (window as unknown as {
+    cardano?: Record<string, { enable: () => Promise<OnChainCip30Api> }>;
+  }).cardano;
+  if (!cardano) throw new Error('No Cardano wallet found in this browser');
+  const connector = cardano[walletName];
+  if (!connector) {
+    throw new Error(
+      `Wallet "${walletName}" is not available — reconnect from the wallet menu and try again.`,
+    );
+  }
+  const api = await connector.enable();
+  if (!api) {
+    throw new Error('Wallet did not return an API. Was the connection denied?');
+  }
+  return api;
+}
+
+/**
+ * Default `WalletSignFn` for the DRep / Proposer on-chain login flow.
+ *
+ * Mirrors `useWalletAuth.authenticate` for the legacy login path:
+ *   1. Read `walletName` from the auth store (set during the legacy
+ *      CIP-30 connect through `WalletButton`).
+ *   2. Re-enable the wallet to obtain a fresh CIP-30 API.
+ *   3. Pull the raw (hex) reward address — CIP-30 `signData` expects
+ *      the same hex `addr` shape `getRewardAddresses` returns; passing
+ *      bech32 confuses some wallets (Eternl, Lace). The on-chain
+ *      verifier extracts the recipient address from the COSE signature
+ *      directly, so the addr argument's role is purely "tell the
+ *      wallet WHICH key to sign with."
+ *   4. `signData(rawAddress, payloadHex)` — the wallet returns the
+ *      hex-encoded COSE_Sign1 + COSE_Key.
+ *
+ * Returns `null` when the auth store has no `walletName` slot — i.e.
+ * the user hasn't yet connected a CIP-30 wallet through the legacy
+ * flow. The form then shows the "no wallet adapter wired" hint
+ * instead of misleading the user.
+ *
+ * Exported as `WalletSignFn | null` so the consumer reads the same
+ * "no wallet" branch whether the legacy flow is offline OR the host
+ * page explicitly opted out by passing `onWalletSign={null}`.
+ */
+export function useDefaultWalletSign(): WalletSignFn | null {
+  const walletName = useAuthStore((s) => s.walletName);
+
+  // Build the callback only when we have a `walletName` slot to attach
+  // to — returning `null` lets the form's `walletDisabled` gate render
+  // the "no wallet adapter wired" hint without an extra runtime check.
+  const callback = useCallback<WalletSignFn>(
+    async (payload: string) => {
+      if (!walletName) {
+        // Defence in depth — we should never reach here because the
+        // form does not call this when `useDefaultWalletSign()` returns
+        // null, but keep the message actionable in case a host passes
+        // the result through anyway.
+        throw new Error(
+          'No CIP-30 wallet connected. Connect a wallet first via the top-right wallet button.',
+        );
+      }
+      const api = await reEnableWallet(walletName);
+      // Reward address first (the DRep credential lives under the
+      // stake key on most wallets); fall back to the first used
+      // address for wallets that don't expose a reward address.
+      const reward = await api.getRewardAddresses();
+      const used = await api.getUsedAddresses();
+      const rawAddress = reward[0] ?? used[0];
+      if (!rawAddress) {
+        throw new Error(
+          'Wallet did not return an address. Ensure your wallet is unlocked.',
+        );
+      }
+      const payloadHex = toHex(payload);
+      const sig = await api.signData(rawAddress, payloadHex);
+      if (!sig?.signature || !sig?.key) {
+        throw new Error('Wallet returned an invalid signature.');
+      }
+      return {
+        signatureHex: sig.signature,
+        keyHex: sig.key,
+      };
+    },
+    [walletName],
+  );
+
+  return walletName ? callback : null;
+}
 
 export interface OnChainLoginFormProps {
   /** Optional wallet-sign callback for the DRep / Proposer flows. When
@@ -93,8 +207,19 @@ export function OnChainLoginForm({
 
   const setAuth = useAuthStore((s) => s.setAuth);
 
+  // Derive a wallet sign callback from the legacy wallet store when the
+  // host doesn't supply one explicitly. This closes the gap where the
+  // host page used to be required to wire `onWalletSign` itself — the
+  // DRep / Proposer flows now work end-to-end as long as the user has
+  // a connected CIP-30 wallet (via the standard WalletButton flow).
+  //
+  // The host-supplied prop still wins — tests and any future host that
+  // wants a custom wallet adapter can override.
+  const defaultWalletSign = useDefaultWalletSign();
+  const effectiveWalletSign = onWalletSign ?? defaultWalletSign;
+
   const isWalletRole = role === 'drep' || role === 'proposer';
-  const walletDisabled = isWalletRole && !onWalletSign;
+  const walletDisabled = isWalletRole && !effectiveWalletSign;
 
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
@@ -102,7 +227,7 @@ export function OnChainLoginForm({
       setError(null);
       setSuccess(null);
 
-      if (isWalletRole && !onWalletSign) {
+      if (isWalletRole && !effectiveWalletSign) {
         setError(
           'No wallet adapter wired. Connect your wallet first, or sign in as SPO / CC.',
         );
@@ -123,7 +248,7 @@ export function OnChainLoginForm({
         // 2. Produce the signature.
         let body: Record<string, unknown>;
         if (isWalletRole) {
-          const signed = await onWalletSign!(challenge.payload);
+          const signed = await effectiveWalletSign!(challenge.payload);
           body = {
             payload: challenge.payload,
             signatureHex: signed.signatureHex,
@@ -176,7 +301,7 @@ export function OnChainLoginForm({
     },
     [
       isWalletRole,
-      onWalletSign,
+      effectiveWalletSign,
       publicKeyHex,
       signatureHex,
       role,

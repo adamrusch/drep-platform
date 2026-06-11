@@ -29,6 +29,8 @@ export class DatabaseStack extends cdk.Stack {
   // ---- Sprint 4: community flagging primitive ----
   public readonly commentFlagsTable: dynamodb.Table;
   public readonly clubhousePostFlagsTable: dynamodb.Table;
+  // ---- Sprint 4 follow-up: clubhouse-comment flagging (closes Sprint 4 gap) ----
+  public readonly clubhouseCommentFlagsTable: dynamodb.Table;
 
   private readonly tablePrefix: string;
 
@@ -731,6 +733,48 @@ export class DatabaseStack extends cdk.Stack {
       removalPolicy: isPersistent(props.stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
+    // ---- clubhouse_comment_flags (Sprint 4 follow-up) ----
+    // Same primitive as `comment_flags` / `clubhouse_post_flags`, but
+    // scoped to clubhouse COMMENTS. Sprint 4 added flagging for
+    // governance-action comments + clubhouse posts; clubhouse-comments
+    // were the missing leg of the trio. This table closes that gap.
+    //
+    // **PK shape (`postKey`):** intentionally MATCHES the partition-key
+    // format already used by both the `clubhouse_comments` table AND
+    // the `clubhouse_post_flags` table — `${drepId}#${postId}`. A
+    // single comment is then keyed within that partition by `commentId`
+    // composed into the SK. We reuse the helper
+    // `clubhouseCommentPostKey(drepId, postId)` in `lib/types.ts`.
+    //
+    // **SK shape (`commentFlagKey`):** `${commentId}#${flaggerId}` —
+    // the smallest tuple that keeps the (comment, flagger) tuple
+    // unique while still letting a single `Query(postKey)` enumerate
+    // every flag for every comment under one post (useful for a
+    // future moderation surface). Doing PK=commentId would also be
+    // valid but would scatter flags across as many partitions as the
+    // post has flagged comments, fragmenting the access pattern
+    // future moderation UIs are likely to want.
+    //
+    // **Counter integrity:** the matching `flagCount` counter on the
+    // parent `clubhouse_comments` row is mutated via a denormalised
+    // atomic ADD gated by `putItemIfAbsent` on this table — see
+    // `handlers/clubhouse/flagComment.ts`. Only a FRESH insert
+    // (outcome `'written'`) bumps the counter. A duplicate flag
+    // (outcome `'skipped'`) leaves the counter alone, so the count
+    // tracks distinct-flagger headcount even under retries.
+    //
+    // **Capacity / PITR:** same rationale as the two sibling flag
+    // tables above. Modest volume; PITR ON because flag rows are
+    // evidence — accidental table truncation should be recoverable.
+    this.clubhouseCommentFlagsTable = new dynamodb.Table(this, 'ClubhouseCommentFlagsTable', {
+      tableName: `${this.tablePrefix}clubhouse_comment_flags`,
+      partitionKey: { name: 'postKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'commentFlagKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: isPersistent(props.stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
     // ---- Outputs ----
     new cdk.CfnOutput(this, 'UsersTableName', { value: this.usersTable.tableName, exportName: `${props.stage}-UsersTableName` });
     new cdk.CfnOutput(this, 'DRepCommitteesTableName', { value: this.drepCommitteesTable.tableName, exportName: `${props.stage}-DRepCommitteesTableName` });
@@ -751,5 +795,6 @@ export class DatabaseStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'PlatformStateTableName', { value: this.platformStateTable.tableName, exportName: `${props.stage}-PlatformStateTableName` });
     new cdk.CfnOutput(this, 'CommentFlagsTableName', { value: this.commentFlagsTable.tableName, exportName: `${props.stage}-CommentFlagsTableName` });
     new cdk.CfnOutput(this, 'ClubhousePostFlagsTableName', { value: this.clubhousePostFlagsTable.tableName, exportName: `${props.stage}-ClubhousePostFlagsTableName` });
+    new cdk.CfnOutput(this, 'ClubhouseCommentFlagsTableName', { value: this.clubhouseCommentFlagsTable.tableName, exportName: `${props.stage}-ClubhouseCommentFlagsTableName` });
   }
 }

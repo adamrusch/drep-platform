@@ -118,6 +118,14 @@ export const FRESHNESS: readonly FreshnessRow[] = [
       'Re-resolves each active on-chain identity’s role via Koios and revokes any whose role no longer holds. Closes the gap where a deregistered role-holder keeps an unexpired JWT.',
     schedule: { kind: 'cron', minute: '30', hour: '2' },
   },
+  {
+    id: 'gc-avatars',
+    label: 'DRep avatar garbage collection',
+    cadence: 'Daily at 04:00 UTC',
+    description:
+      'Walks the content-addressed avatar bucket and removes objects no PROFILE row references anymore (past the 24h grace window). Slotted after the daily Koios passes so it does not share their RPS budget.',
+    schedule: { kind: 'cron', minute: '0', hour: '4' },
+  },
 ] as const;
 
 /** Look up a freshness row by id. Throws if the id is unknown — the caller

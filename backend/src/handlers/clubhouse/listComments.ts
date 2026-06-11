@@ -36,8 +36,35 @@ import { queryItems, tableNames } from '../../lib/dynamodb';
 import {
   clubhouseCommentPostKey,
   type ClubhouseCommentRowItem,
+  type UserRole,
 } from '../../lib/types';
 import { ok, badRequest, internalError } from '../_response';
+
+/**
+ * Did the caller present a JWT proving `platform_admin`?
+ *
+ * Mirrors `handlers/comments/list.ts::isPlatformAdmin`. This endpoint is
+ * registered as a PUBLIC route (no `authenticated: true` in
+ * `api-stack.ts`), so the authorizer-context shape is typically absent.
+ * When a `platform_admin` hits the endpoint with their JWT cookie in
+ * the browser, API Gateway will still pass through the `Cookie` header,
+ * and the optional `authorizer.lambda.roles` claim is populated if the
+ * lambda authorizer is wired on the route. We read it defensively —
+ * absent context means "anonymous read, hide flagged rows."
+ */
+function isPlatformAdmin(event: APIGatewayProxyEventV2): boolean {
+  const rc = event.requestContext as unknown as {
+    authorizer?: { lambda?: { roles?: string } };
+  };
+  const rawRoles = rc.authorizer?.lambda?.roles;
+  if (!rawRoles) return false;
+  try {
+    const parsed = JSON.parse(rawRoles) as UserRole[];
+    return Array.isArray(parsed) && parsed.includes('platform_admin');
+  } catch {
+    return false;
+  }
+}
 
 export const handler = async (
   event: APIGatewayProxyEventV2,
@@ -79,6 +106,20 @@ export const handler = async (
       lastKey = result.lastEvaluatedKey;
     }
 
+    // Sprint 4 follow-up — community-flag hide filter for clubhouse
+    // comments. Mirrors `handlers/comments/list.ts`:
+    //   - `hidden === true` rows are EXCLUDED for normal users.
+    //   - For `platform_admin`s the row is INCLUDED with the
+    //     `hidden: true` marker intact so the moderation UI can decide
+    //     whether to reverse the community decision.
+    // The filter runs post-Query (rather than as a FilterExpression)
+    // so the simple page cursor semantics inherited from the rotation
+    // tests stay intact.
+    const isAdmin = isPlatformAdmin(event);
+    const visibleItems = isAdmin
+      ? items
+      : items.filter((c) => c.hidden !== true);
+
     // Strip the partition-key bookkeeping (`postKey`, `drepId`,
     // `postId`, `depth`) before returning. The FE's `ClubhouseComment`
     // type is the legacy inline shape; preserving it keeps the
@@ -91,7 +132,12 @@ export const handler = async (
     // omitting the field saves wire bytes for the vast majority of
     // rows. The frontend renders the "no longer delegated" badge
     // strictly on `authorDelegationActive === false`.
-    const responseItems = items.map((row) => ({
+    //
+    // Sprint 4 follow-up: `flagCount` and `hidden` are surfaced so the
+    // FE can render a "Flagged" affordance state and (for admins) a
+    // "HIDDEN BY COMMUNITY" banner. Both default to absent when zero
+    // / not hidden to save wire bytes on the common case.
+    const responseItems = visibleItems.map((row) => ({
       commentId: row.commentId,
       authorWallet: row.authorWallet,
       body: row.body,
@@ -101,6 +147,10 @@ export const handler = async (
       ...(row.authorDelegationActive === false
         ? { authorDelegationActive: false as const }
         : {}),
+      ...(typeof row.flagCount === 'number' && row.flagCount > 0
+        ? { flagCount: row.flagCount }
+        : {}),
+      ...(row.hidden === true ? { hidden: true as const } : {}),
     }));
 
     return ok({ items: responseItems });

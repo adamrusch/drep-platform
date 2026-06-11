@@ -167,6 +167,14 @@ export const tableNames = {
    *  parent post row only fires on a fresh insert. See
    *  `handlers/clubhouse/flagPost.ts`. */
   clubhousePostFlags: `${TABLE_PREFIX}clubhouse_post_flags`,
+  /** Sprint 4 follow-up — community flagging primitive for clubhouse
+   *  COMMENTS. PK=`postKey` (= `${drepId}#${postId}`, same shape as
+   *  the parent `clubhouse_comments` table), SK=`commentFlagKey`
+   *  (= `${commentId}#${flaggerId}`). One row per (comment, flagger);
+   *  the schema-level uniqueness comes from the SK tuple. Atomic
+   *  `ADD flagCount :one` on the parent `clubhouse_comments` row only
+   *  fires on a fresh insert. See `handlers/clubhouse/flagComment.ts`. */
+  clubhouseCommentFlags: `${TABLE_PREFIX}clubhouse_comment_flags`,
 } as const;
 
 export type TableName = keyof typeof tableNames;

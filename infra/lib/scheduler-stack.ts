@@ -6,6 +6,7 @@ import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
@@ -48,6 +49,7 @@ export class SchedulerStack extends cdk.Stack {
   public readonly revalidateCommentStakeFn: lambdaNodejs.NodejsFunction;
   public readonly committeeEpochSweepFn: lambdaNodejs.NodejsFunction;
   public readonly revalidateOnChainRolesFn: lambdaNodejs.NodejsFunction;
+  public readonly gcAvatarsFn: lambdaNodejs.NodejsFunction;
 
   constructor(scope: Construct, id: string, props: SchedulerStackProps) {
     super(scope, id, props);
@@ -765,6 +767,111 @@ export class SchedulerStack extends cdk.Stack {
       exportName: `${stage}-RevalidateOnChainRolesFnArn`,
     });
 
+    // ---- Avatar GC sweep Lambda (Sprint 5 follow-up, 2026-06-10) ----
+    //
+    // Daily sweep of the content-addressed DRep avatar S3 bucket. Walks
+    // the inventory, intersects with the referenced-hash set from the
+    // DDB PROFILE rows, and deletes objects older than the 24h grace
+    // window. See `backend/src/sync/gc-avatars.ts` for the full design
+    // and `lib/dreps/avatarStore.ts::gcDrepAvatars` for the unit-tested
+    // delete logic.
+    //
+    // # Why the bucket is referenced by NAME, not by ARN export
+    //
+    // The avatar bucket is created in `api-stack.ts` (shared with the
+    // serve handler + the directory-sync avatar-store pass). The
+    // scheduler stack does NOT depend on the api stack — adding a
+    // cross-stack ARN export would force an api-then-scheduler deploy
+    // ordering with no compensating benefit. The bucket name follows a
+    // deterministic convention (`drep-platform-${stage}-avatars`), so
+    // we look it up by name here and grant RW to the GC role
+    // explicitly. The runtime contract is the same `AVATAR_S3_BUCKET`
+    // env var the directory-sync Lambda already consumes — keeps the
+    // code path symmetric.
+    //
+    // # IAM
+    //
+    // S3 RW on the avatar bucket (List + Delete + Get + Head) + DDB
+    // read on the drep_directory table (for the referenced-set Query
+    // through `listReferencedImageHashes`). DDB read-only here is
+    // tighter than the directory-sync's RW grant — the GC Lambda
+    // never writes the directory.
+    //
+    // # Cadence
+    //
+    // Daily at 04:00 UTC — sourced from `shared/freshness.ts` via the
+    // infra mirror (id `gc-avatars`). Slotted AFTER the 02:00 / 02:30 /
+    // 03:00 Koios passes so the daily Lambdas don't pile up in one
+    // window for the CloudWatch alarm view.
+    //
+    // # Memory + timeout
+    //
+    // 256MB / 2 min — the sweep is a small S3 ListObjects + one DDB
+    // Query (paginated, but ~1600 rows fits in one page) + at most one
+    // DeleteObjects batch. At today's scale the run is sub-second.
+    const gcAvatarsRole = new iam.Role(this, 'GcAvatarsRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+      ],
+    });
+    // DDB read-only on the directory table — the GC Lambda only reads
+    // PROFILE rows to assemble the referenced-hash set; it never
+    // touches `imageContentHash` / `imageStoredUrl`.
+    databaseStack.drepDirectoryTable.grantReadData(gcAvatarsRole);
+    // Look up the avatar bucket by its deterministic name and grant
+    // RW (List + Delete need List + DeleteObject; Get needed by the
+    // adapter's `get` fallback path even though the GC sweep only
+    // calls list/delete).
+    const avatarBucket = s3.Bucket.fromBucketName(
+      this,
+      'GcAvatarBucketRef',
+      `drep-platform-${stage}-avatars`,
+    );
+    avatarBucket.grantReadWrite(gcAvatarsRole);
+
+    this.gcAvatarsFn = new lambdaNodejs.NodejsFunction(this, 'GcAvatarsFn', {
+      functionName: `drep-platform-${stage}-gc-avatars-sync`,
+      entry: path.join(backendDir, 'src/sync/gc-avatars.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      memorySize: 256,
+      timeout: cdk.Duration.minutes(2),
+      role: gcAvatarsRole,
+      environment: {
+        DYNAMODB_TABLE_PREFIX: `drep-platform-${stage}-`,
+        AVATAR_S3_BUCKET: `drep-platform-${stage}-avatars`,
+      },
+      bundling: {
+        minify: true,
+        sourceMap: false,
+        target: 'es2022',
+        externalModules: ['@aws-sdk/*'],
+        forceDockerBundling: false,
+      },
+      depsLockFilePath: path.join(backendDir, 'package-lock.json'),
+    });
+
+    const gcAvatarsRule = new events.Rule(this, 'GcAvatarsRule', {
+      ruleName: `drep-platform-${stage}-gc-avatars-sync`,
+      description:
+        'Triggers daily avatar GC sweep — deletes unreferenced S3 objects past the 24h grace window',
+      schedule: scheduleFromFreshness(getFreshnessRow('gc-avatars').schedule),
+      enabled: true,
+    });
+    gcAvatarsRule.addTarget(
+      new eventsTargets.LambdaFunction(this.gcAvatarsFn, {
+        retryAttempts: 1,
+        maxEventAge: cdk.Duration.hours(2),
+      }),
+    );
+
+    new cdk.CfnOutput(this, 'GcAvatarsFnArn', {
+      value: this.gcAvatarsFn.functionArn,
+      exportName: `${stage}-GcAvatarsFnArn`,
+    });
+
     // ---- CloudWatch alarms on sync Lambda errors (Batch F #20, 2026-05-27) ----
     //
     // One alarm per sync Lambda. Today if `governance-intake` or
@@ -862,5 +969,6 @@ export class SchedulerStack extends cdk.Stack {
       this.revalidateOnChainRolesFn,
       'revalidate-onchain-roles',
     );
+    buildErrorsAlarm('GcAvatarsErrorsAlarm', this.gcAvatarsFn, 'gc-avatars');
   }
 }
