@@ -273,7 +273,15 @@
       "notDelegated": "You aren't delegated to a DRep yet. Browse the directory to find one and join their clubhouse.",
       "guest": "Connect a wallet that delegates to a DRep to enter their private clubhouse.",
       "browseDReps": "Browse DReps"
-    }
+    },
+    "flag": "Flag",
+    "flagged": "Flagged",
+    "flagTooltip": "Flag this post for community review",
+    "alreadyFlaggedTooltip": "You have already flagged this post",
+    "flagSubmitted": "Flag submitted",
+    "flagFailed": "Flag failed",
+    "hiddenByCommunity_one": "Hidden by community — {{count}} flag",
+    "hiddenByCommunity_other": "Hidden by community — {{count}} flags"
   },
   "composer": {
     "kind": {
@@ -1026,7 +1034,15 @@
     "error": "Error",
     "replyPosted": "Reply posted",
     "commentPosted": "Comment posted",
-    "signatureNote": "Posting requires a fresh wallet signature. Your wallet will prompt you to sign a one-time message — this does not cost any fees and does not broadcast a transaction."
+    "signatureNote": "Posting requires a fresh wallet signature. Your wallet will prompt you to sign a one-time message — this does not cost any fees and does not broadcast a transaction.",
+    "flag": "Flag",
+    "flagged": "Flagged",
+    "flagTooltip": "Flag this comment for community review",
+    "alreadyFlaggedTooltip": "You have already flagged this comment",
+    "flagSubmitted": "Flag submitted",
+    "flagFailed": "Flag failed",
+    "hiddenByCommunity_one": "Hidden by community — {{count}} flag",
+    "hiddenByCommunity_other": "Hidden by community — {{count}} flags"
   },
   "castVote": {
     "optionSupportLabel": "Support",

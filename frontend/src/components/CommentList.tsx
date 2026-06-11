@@ -1,12 +1,13 @@
 import React, { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Star, User, ChevronDown, ChevronRight, ArrowBigUp, ArrowBigDown, MessageSquare } from 'lucide-react';
+import { Star, User, ChevronDown, ChevronRight, ArrowBigUp, ArrowBigDown, MessageSquare, Flag } from 'lucide-react';
 import type { Comment, MyCommentVotes } from '@/types';
 import { formatWalletAddress, cn } from '@/lib/utils';
 import { useFormatters } from '@/hooks/useFormatters';
-import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
+import { useAuthStore, useIsAuthenticated, useOnChainRoles } from '@/stores/authStore';
 import {
   useDeleteComment,
+  useFlagComment,
   useMyCommentVotes,
   useVoteComment,
 } from '@/hooks/useComments';
@@ -134,9 +135,20 @@ function CommentRow({
   const { formatRelativeTime } = useFormatters();
   const [repliesOpen, setRepliesOpen] = useState(false);
   const [replyFormOpen, setReplyFormOpen] = useState(false);
+  // Sprint 4 — local "I just flagged this" state so the affordance
+  // gives immediate feedback before the cache invalidation roundtrip
+  // completes. Persisted only for the lifetime of the row's mount —
+  // a reload re-derives from the row's `flagCount`/`hidden`.
+  const [hasFlaggedLocally, setHasFlaggedLocally] = useState(false);
   const isAuthenticated = useIsAuthenticated();
   const deleteComment = useDeleteComment();
   const voteComment = useVoteComment();
+  const flagComment = useFlagComment();
+  // Sprint 4 — only callers who proved an on-chain role (drep / spo /
+  // cc / proposer) may flag. The hook returns the array; an empty
+  // array is the legacy CIP-30-only session (no flag affordance).
+  const onChainRoles = useOnChainRoles();
+  const canFlag = isAuthenticated && onChainRoles.length > 0;
   const { addToast } = useUiStore();
   const isOwnComment = walletAddress === comment.walletAddress;
   const myVote = myVotes[comment.commentId];
@@ -157,6 +169,21 @@ function CommentRow({
     } catch (err) {
       const msg = err instanceof Error ? err.message : t('comments.voteFailed');
       addToast({ title: t('comments.voteFailed'), description: msg, variant: 'error' });
+    }
+  };
+
+  const handleFlag = async (): Promise<void> => {
+    if (!canFlag) return;
+    try {
+      await flagComment.mutateAsync({
+        actionId,
+        commentId: comment.commentId,
+      });
+      setHasFlaggedLocally(true);
+      addToast({ title: t('comments.flagSubmitted'), variant: 'default' });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : t('comments.flagFailed');
+      addToast({ title: t('comments.flagFailed'), description: msg, variant: 'error' });
     }
   };
 
@@ -202,6 +229,39 @@ function CommentRow({
           <span className="text-xs text-[var(--text-tertiary)]">
             {formatRelativeTime(comment.createdAt)}
           </span>
+          {/* Sprint 4 — community flag affordance. Visible ONLY when:
+              the caller is authenticated AND holds at least one on-chain
+              role AND is NOT the comment author. The backend enforces
+              all three independently (`requireOnChainRole`, self-flag
+              gate); this gate is just to avoid surfacing a button that
+              would always 403/400. The "Flagged" state survives a
+              re-render via the local `hasFlaggedLocally` flag — the
+              cache-invalidation roundtrip restores it from
+              `flagCount` on next load. */}
+          {canFlag && !isOwnComment && (
+            <button
+              type="button"
+              onClick={() => void handleFlag()}
+              disabled={flagComment.isPending || hasFlaggedLocally}
+              data-testid="comment-flag-button"
+              title={
+                hasFlaggedLocally
+                  ? t('comments.alreadyFlaggedTooltip')
+                  : t('comments.flagTooltip')
+              }
+              className={cn(
+                'inline-flex items-center gap-1 text-xs',
+                'text-[var(--text-tertiary)] hover:text-[var(--warning)]',
+                'transition-colors disabled:opacity-50 disabled:cursor-not-allowed',
+                hasFlaggedLocally && 'text-[var(--warning)]',
+              )}
+            >
+              <Flag size={11} strokeWidth={2} />
+              {hasFlaggedLocally
+                ? t('comments.flagged')
+                : t('comments.flag')}
+            </button>
+          )}
           {canDelete(comment) && (
             <button
               onClick={() =>
@@ -218,6 +278,23 @@ function CommentRow({
           )}
         </div>
       </div>
+      {/* Sprint 4 — moderation treatment. Normal users never see
+          `hidden === true` rows (the backend filters them); the marker
+          surfaces ONLY for `platform_admin` so they can see what the
+          community-shield has hidden and decide whether to reverse it.
+          Render as a banner BEFORE the body so the moderator can't
+          miss the state. */}
+      {comment.hidden === true && (
+        <div
+          className="mt-2 mb-2 inline-flex items-center gap-1.5 px-2 py-1 rounded-token-sm bg-[var(--warning-soft)] text-[var(--warning)] text-[11px] font-semibold uppercase tracking-wider"
+          data-testid="comment-hidden-banner"
+        >
+          <Flag size={11} strokeWidth={2.4} />
+          {t('comments.hiddenByCommunity', {
+            count: comment.flagCount ?? 0,
+          })}
+        </div>
+      )}
       <p className="text-sm mt-2 text-[var(--text-secondary)] whitespace-pre-wrap leading-relaxed">
         {comment.body}
       </p>

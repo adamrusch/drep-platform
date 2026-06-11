@@ -10,6 +10,11 @@ import type {
 import { extractAuthContext } from '../../middleware/role-guard';
 import { lookupRecognition } from '../../lib/recognition';
 import { writeAuditEvent } from '../../lib/audit';
+import {
+  sanitizeOptionalUserText,
+  sanitizeUserText,
+  SanitizationError,
+} from '../../lib/sanitizeContent';
 import { resolveClubhouseMembership } from './_membership';
 import { created, badRequest, forbidden, serviceUnavailable, handleError } from '../_response';
 
@@ -62,6 +67,33 @@ export const handler = async (
       return badRequest('body exceeds maximum length of 50,000 characters');
     }
 
+    // Sprint 4 — server-side content sanitization (defense in depth).
+    // See `lib/sanitizeContent.ts` for the threat model. Both the body
+    // and the optional title flow through the same XSS-corpus-tested
+    // filter before being persisted; poll-option labels go through it
+    // too further down so an `<img onerror=…>` in an option label
+    // can't bypass the body filter.
+    let sanitizedBody: string;
+    try {
+      sanitizedBody = sanitizeUserText(reqBody.body, {
+        maxLength: 50_000,
+        fieldLabel: 'body',
+      });
+    } catch (err) {
+      if (err instanceof SanitizationError) return badRequest(err.message);
+      throw err;
+    }
+    let sanitizedTitle: string | undefined;
+    try {
+      sanitizedTitle = sanitizeOptionalUserText(reqBody.title, {
+        maxLength: 300,
+        fieldLabel: 'title',
+      });
+    } catch (err) {
+      if (err instanceof SanitizationError) return badRequest(err.message);
+      throw err;
+    }
+
     const postType: ClubhousePostType = reqBody.type ?? 'discussion';
     if (!['discussion', 'question', 'poll'].includes(postType)) {
       return badRequest('type must be one of discussion, question, poll');
@@ -80,9 +112,17 @@ export const handler = async (
       }
       const seenIds = new Set<string>();
       pollOptions = reqBody.pollOptions.map((opt, i) => {
-        const label = (opt.label ?? '').trim();
-        if (!label) throw new Error('Poll option label is required');
-        if (label.length > 200) throw new Error('Poll option labels max 200 characters');
+        const rawLabel = (opt.label ?? '').trim();
+        if (!rawLabel) throw new Error('Poll option label is required');
+        if (rawLabel.length > 200) throw new Error('Poll option labels max 200 characters');
+        // Sprint 4 — sanitise each label. An attacker who can sneak an
+        // `<img onerror=…>` into a poll-option label would otherwise
+        // bypass the body-level filter when the label renders on the
+        // post card. Same XSS corpus applies.
+        const label = sanitizeUserText(rawLabel, {
+          maxLength: 200,
+          fieldLabel: 'poll option label',
+        });
         const id = opt.id?.trim() || String.fromCharCode(97 + i); // a, b, c…
         if (seenIds.has(id)) throw new Error('Duplicate poll option id');
         seenIds.add(id);
@@ -200,7 +240,7 @@ export const handler = async (
       authorWallet: authCtx.walletAddress,
       isDRepPost,
       ...(authorDisplayName ? { authorDisplayName } : {}),
-      body: reqBody.body.trim(),
+      body: sanitizedBody.trim(),
       createdAt: now,
       updatedAt: now,
       type: postType,
@@ -212,7 +252,7 @@ export const handler = async (
       // Initialize the counter so the `ADD :one` in `createComment.ts`
       // starts from a known-good zero.
       commentCount: 0,
-      ...(reqBody.title?.trim() ? { title: reqBody.title.trim() } : {}),
+      ...(sanitizedTitle ? { title: sanitizedTitle } : {}),
       ...(pollOptions ? { pollOptions, pollMultiple: pollMultiple ?? false } : {}),
       ...(pollClosesAt ? { pollClosesAt } : {}),
       ...(pollOptions ? { pollVotes: {} } : {}),
@@ -237,6 +277,11 @@ export const handler = async (
 
     return created(post);
   } catch (err) {
+    if (err instanceof SanitizationError) {
+      // Poll-option label cap / type error from the sanitizer. Same
+      // 400 surface as the other validation branches.
+      return badRequest(err.message);
+    }
     if (err instanceof Error && err.message.startsWith('Poll option')) {
       return badRequest(err.message);
     }
