@@ -53,8 +53,8 @@ const ENTITY_TYPE_PROFILE = 'DREP_PROFILE';
 const MAX_QUERY_ROUNDS = 10;
 
 /** Module-level response cache. Same shape as the list handler — the
- *  donut data shifts only on the sync cycle (every 30 min), so 30s is a
- *  comfortable TTL and matches the Cache-Control we emit. */
+ *  donut data shifts only on the sync cycle (every 30 min), so a 5-min
+ *  TTL is comfortable and matches the Cache-Control we emit. */
 interface CachedConcentrationEntry {
   body: ConcentrationResponseBody;
   expiresAt: number;
@@ -72,7 +72,7 @@ interface ConcentrationResponseBody {
   thresholdsAsOf: string | null;
 }
 const _concentrationCache = new Map<string, CachedConcentrationEntry>();
-const CACHE_TTL_MS = 30_000;
+const CACHE_TTL_MS = 300_000;
 const CACHE_KEY = 'singleton';
 
 /** Test-only escape hatch matching the list handler's
@@ -170,7 +170,7 @@ export const handler = async (
   _event: APIGatewayProxyEventV2,
 ): Promise<APIGatewayProxyResultV2> => {
   // Same Cache-Control as the list handler so CloudFront can cache.
-  const cacheHeaders = { 'Cache-Control': 'public, max-age=30, s-maxage=30' };
+  const cacheHeaders = { 'Cache-Control': 'public, max-age=300, s-maxage=300' };
   try {
     const now = Date.now();
     const cached = _concentrationCache.get(CACHE_KEY);
