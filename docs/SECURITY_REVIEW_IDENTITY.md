@@ -19,6 +19,19 @@ Talk Apache-2.0 code, structurally re-verified in `parity.test.ts`); the
 legacy CIP-30 wallet login path (untouched by this work); the broader
 governance / clubhouse / committee surfaces.
 
+**Cross-references:** the design decisions behind this subsystem live
+in [`docs/DECISIONS.md`](DECISIONS.md) — ADR-011 (adopting the
+subsystem whole), ADR-012 (four-role login as an additive parallel
+surface), ADR-013 (dedicated `identity_sessions` table), ADR-014
+(canonical person model + verified linking, no silent merge), ADR-015
+(relaxed COSE address-header — supersedes the strict-reject in this
+document's `§ Strict address-header decision`), and ADR-016 (cutting
+the legacy CIP-30 login over to the ported verifier, parity-gated).
+The subsystem's high-level shape (handlers, tables, cron, person
+reconciliation, the moderation primitive, the Sprint 5 surfaces) is
+mapped in
+[`docs/ARCHITECTURE.md` § "Identity subsystem"](ARCHITECTURE.md#identity-subsystem-four-role-login-sessions-reconciliation).
+
 ---
 
 ## Seam (a) — KV → DDB nonce adapter
