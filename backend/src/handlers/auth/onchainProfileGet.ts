@@ -30,6 +30,16 @@ export const handler = async (
   try {
     const authCtx = extractAuthContext(event);
 
+    // S1 fix (2026-06-10 security review) — reject legacy-cookie
+    // sessions explicitly. Same two-pronged check as the other
+    // on-chain endpoints (tokenSource primary, empty-onChainRoles
+    // backstop a few lines below).
+    if (authCtx.tokenSource === 'legacy') {
+      return unauthorized(
+        'This endpoint requires an on-chain session. Use /profile for legacy wallet sessions.',
+      );
+    }
+
     let personId = authCtx.personId;
     if (!personId) {
       const carriedRoles = authCtx.onChainRoles ?? [];

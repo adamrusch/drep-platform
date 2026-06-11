@@ -109,3 +109,15 @@ export function emitIdentityMetric(
  *  affected population before any future decision to relax. */
 export const METRIC_IDENTITY_COSE_MISSING_ADDRESS_HEADER =
   'IdentityCoseMissingAddressHeader';
+
+/** S4 hardening (2026-06-10 security review) — counts proposer logins
+ *  that succeeded under the relaxed COSE-address path
+ *  (`addressBound === false`). The Koios resolution downstream is the
+ *  authoritative role check, but proposer is a privileged surface
+ *  (governance writes); tracking the unbound-address rate per Stage so
+ *  operations can monitor for anomalies (a sudden spike could indicate
+ *  a wallet pushing payloads without the address header to bypass the
+ *  reward-address pre-filter). The metric is informational only — the
+ *  login proceeds normally. */
+export const METRIC_IDENTITY_PROPOSER_ADDRESS_UNBOUND =
+  'IdentityProposerAddressUnbound';

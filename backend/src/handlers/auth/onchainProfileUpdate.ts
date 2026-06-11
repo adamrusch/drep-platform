@@ -36,12 +36,28 @@ interface ProfileUpdateBody {
 
 const MAX_DISPLAY_NAME = 100;
 const MAX_BIO = 2_000;
+/** S4 (2026-06-10 security review) — known social-link keys + per-value
+ *  cap. Anything outside this allowlist or longer than the cap is
+ *  rejected with a 400 so a caller can't stuff arbitrary keys onto the
+ *  profile or pad an enormous value past the row-size budget. Matches
+ *  the shape of the legacy `SocialLinks` type in `lib/types.ts`. */
+const KNOWN_SOCIAL_LINK_KEYS = ['twitter', 'github', 'website', 'discord'] as const;
+const MAX_SOCIAL_LINK_VALUE = 200;
 
 export const handler = async (
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
 ): Promise<APIGatewayProxyResultV2> => {
   try {
     const authCtx = extractAuthContext(event);
+
+    // S1 fix (2026-06-10 security review) — reject legacy-cookie
+    // sessions explicitly. The empty-onChainRoles backstop below
+    // also fires for in-flight authorizers that pre-date S1.
+    if (authCtx.tokenSource === 'legacy') {
+      return unauthorized(
+        'This endpoint requires an on-chain session. Use /profile for legacy wallet sessions.',
+      );
+    }
 
     if (!event.body) {
       return badRequest('Request body is required');
@@ -70,12 +86,35 @@ export const handler = async (
         return badRequest(`bio exceeds maximum length of ${MAX_BIO}`);
       }
     }
-    if (
-      body.socialLinks !== undefined &&
-      body.socialLinks !== null &&
-      typeof body.socialLinks !== 'object'
-    ) {
-      return badRequest('socialLinks must be an object or null');
+    if (body.socialLinks !== undefined && body.socialLinks !== null) {
+      if (typeof body.socialLinks !== 'object' || Array.isArray(body.socialLinks)) {
+        return badRequest('socialLinks must be an object or null');
+      }
+      // S4 (2026-06-10 security review) — restrict to known keys + cap
+      // each value at 200 chars so a caller can't stuff arbitrary keys
+      // onto the profile or pad an enormous value past the row-size
+      // budget. Use Object.prototype.hasOwnProperty to skip inherited
+      // prototype-pollution noise.
+      const entries = Object.entries(body.socialLinks as Record<string, unknown>);
+      for (const [key, value] of entries) {
+        if (!Object.prototype.hasOwnProperty.call(body.socialLinks, key)) continue;
+        if (!(KNOWN_SOCIAL_LINK_KEYS as readonly string[]).includes(key)) {
+          return badRequest(
+            `socialLinks contains unknown key '${key}' (allowed: ${KNOWN_SOCIAL_LINK_KEYS.join(', ')})`,
+          );
+        }
+        if (value === undefined || value === null) {
+          continue; // null/undefined clears that key — handled downstream.
+        }
+        if (typeof value !== 'string') {
+          return badRequest(`socialLinks.${key} must be a string`);
+        }
+        if (value.length > MAX_SOCIAL_LINK_VALUE) {
+          return badRequest(
+            `socialLinks.${key} exceeds maximum length of ${MAX_SOCIAL_LINK_VALUE}`,
+          );
+        }
+      }
     }
 
     let personId = authCtx.personId;

@@ -320,6 +320,23 @@ export function _resetCache(): void {
   _epochInfoCache = null;
 }
 
+/**
+ * S4 hardening (2026-06-10 security review) — invalidate ONLY the
+ * Constitutional Committee cache. Used by the daily role-revalidation
+ * cron's strict adapter so a CC member who resigned mid-day is caught
+ * on the next pass even if the lambda runtime kept a warm
+ * `_committeeCache` from an earlier per-request call within the same
+ * container.
+ *
+ * The cache TTL is 1h (`COMMITTEE_CACHE_TTL_MS`); for daily-cadence
+ * cron use that's effectively serving stale data for almost the
+ * entire pass. Invalidating just the committee slot is the surgical
+ * fix — proposal / pool / drep caches still serve.
+ */
+export function invalidateCommitteeCache(): void {
+  _committeeCache = null;
+}
+
 // ---- Internal helpers ----
 
 /**

@@ -244,5 +244,86 @@ export function buildKoiosAdapter(): KoiosClient {
         return null;
       }
     },
+
+    async poolCalidusKeyByPool(poolIdBech32: string): Promise<PoolCalidusKeyRow | null> {
+      // M5 fix (2026-06-10 security review) — look up the CURRENT
+      // Calidus key for a pool by pool id. Same `/pool_calidus_keys`
+      // endpoint as `poolCalidusKey` above but with the inverse filter
+      // (`_pool_id_bech32` instead of `_calidus_pub_keys`). Returns the
+      // registered row when present, null when there's no current
+      // registered Calidus key.
+      //
+      // The verify-path adapter fails CLOSED on errors (returns null);
+      // the strict adapter used by `revalidate-onchain-roles.ts`
+      // overrides this method to propagate so the cron can
+      // fail-SAFE — never revoke an SPO on a Koios brownout.
+      try {
+        const url = `${KOIOS_BASE}/pool_calidus_keys`;
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), CALIDUS_TIMEOUT_MS);
+        let res: Response;
+        try {
+          res = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+            },
+            body: JSON.stringify({ _pool_id_bech32: [poolIdBech32] }),
+            signal: ac.signal,
+          });
+        } finally {
+          clearTimeout(timer);
+        }
+        if (!res.ok) {
+          console.warn(
+            `koiosAdapter.poolCalidusKeyByPool: HTTP ${res.status} ${res.statusText}`,
+          );
+          return null;
+        }
+        const parsed = (await res.json()) as unknown;
+        if (!Array.isArray(parsed)) return null;
+        const rows = parsed as Array<{
+          pool_id_bech32?: string;
+          calidus_pub_key?: string;
+          calidus_id_bech32?: string;
+          registered?: boolean;
+          pool_status?: string;
+        }>;
+        // Find the registered Calidus key row for the requested pool.
+        // If Koios returns multiple rows for the pool (history), we
+        // want the registered one — CIP-151 says only one Calidus key
+        // is registered at a time.
+        const match = rows.find(
+          (r) =>
+            typeof r.pool_id_bech32 === 'string' &&
+            r.pool_id_bech32 === poolIdBech32 &&
+            r.registered === true,
+        );
+        if (!match) return null;
+        if (
+          typeof match.pool_id_bech32 !== 'string' ||
+          typeof match.calidus_pub_key !== 'string' ||
+          typeof match.calidus_id_bech32 !== 'string' ||
+          typeof match.registered !== 'boolean' ||
+          typeof match.pool_status !== 'string'
+        ) {
+          return null;
+        }
+        return {
+          pool_id_bech32: match.pool_id_bech32,
+          calidus_pub_key: match.calidus_pub_key,
+          calidus_id_bech32: match.calidus_id_bech32,
+          registered: match.registered,
+          pool_status: match.pool_status,
+        };
+      } catch (err) {
+        console.warn(
+          'koiosAdapter.poolCalidusKeyByPool: lookup failed:',
+          err instanceof Error ? err.message : err,
+        );
+        return null;
+      }
+    },
   };
 }

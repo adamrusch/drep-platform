@@ -92,6 +92,7 @@ function buildEvent(authCtx: {
   walletAddress: string;
   personId?: string;
   onChainRoles?: string[];
+  tokenSource?: 'legacy' | 'onchain';
 }): APIGatewayProxyEventV2WithJWTAuthorizer {
   return {
     body: undefined,
@@ -104,6 +105,7 @@ function buildEvent(authCtx: {
           roles: JSON.stringify(['guest']),
           onChainRoles: JSON.stringify(authCtx.onChainRoles ?? []),
           ...(authCtx.personId ? { personId: authCtx.personId } : {}),
+          ...(authCtx.tokenSource ? { tokenSource: authCtx.tokenSource } : {}),
         },
       },
     },
@@ -230,5 +232,22 @@ describe('onchainMe — rejects legacy sessions', () => {
     expect(result.statusCode).toBe(401);
     const json = JSON.parse(result.body) as { message?: string };
     expect(json.message).toMatch(/on-chain session/i);
+  });
+
+  it('S1: returns 401 when tokenSource is legacy (post-S1 authorizer)', async () => {
+    // Even if the legacy cookie's JWT happens to carry an on-chain
+    // role claim (e.g. a downgraded token replayed against this
+    // endpoint), the tokenSource signal blocks it before any binding
+    // work proceeds.
+    const result = (await onchainMe(
+      buildEvent({
+        walletAddress: 'stake1legacy_token_source',
+        tokenSource: 'legacy',
+        // Even with a (fake) on-chain role claim, the legacy source
+        // must override and 401.
+        onChainRoles: ['drep'],
+      }),
+    )) as { statusCode: number; body: string };
+    expect(result.statusCode).toBe(401);
   });
 });

@@ -2,7 +2,13 @@
 // Converted from `nonce.workers.test.ts` to run on vitest's Node pool using
 // the in-memory NonceStore fake instead of a Cloudflare KVNamespace.
 import { describe, it, expect, beforeEach } from 'vitest';
-import { issueNonce, consumeNonce, peekNonce, consumeNonceWithCheck } from './nonce';
+import {
+  issueNonce,
+  consumeNonce,
+  peekNonce,
+  consumeNonceWithCheck,
+  LINK_PAYLOAD_PREFIX,
+} from './nonce';
 import { InMemoryNonceStore } from '../stores/nonceStore';
 
 let store: InMemoryNonceStore;
@@ -178,6 +184,119 @@ describe('consumeNonce', () => {
     expect(result).toBe(false);
     const stored = await store.get(nonce);
     expect(stored).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M1 (2026-06-10 security review) — link-flow boundContext binding
+// ---------------------------------------------------------------------------
+
+describe('issueNonce + parsePayload — link-flow boundContext (M1)', () => {
+  it('emits a `dreptalk-link:<personId>:<stage>:<domain>:<nonce>:<ts>` payload', async () => {
+    const { payload } = await issueNonce(store, {
+      domain: 'drep.tools',
+      stage: 'test',
+      prefix: LINK_PAYLOAD_PREFIX,
+      boundContext: '01HSOMEPERSONULID',
+    });
+    expect(payload).toMatch(
+      /^dreptalk-link:01HSOMEPERSONULID:test:drep\.tools:[^:]+:\d+$/,
+    );
+  });
+
+  it('peekNonce parses the bound personId out of a link payload', async () => {
+    const { payload } = await issueNonce(store, {
+      domain: 'drep.tools',
+      stage: 'test',
+      prefix: LINK_PAYLOAD_PREFIX,
+      boundContext: '01HBOUNDPERSON',
+    });
+    const peek = await peekNonce(store, payload, {
+      prefix: LINK_PAYLOAD_PREFIX,
+    });
+    expect(peek.ok).toBe(true);
+    if (peek.ok) {
+      expect(peek.parsed.boundContext).toBe('01HBOUNDPERSON');
+    }
+  });
+
+  it('rejects a link payload when the prefix is wrong (standard vs link)', async () => {
+    // A standard `dreptalk:...` payload must NOT validate under the
+    // LINK prefix and vice-versa.
+    const { payload: standard } = await issueNonce(store, {
+      domain: 'drep.tools',
+      stage: 'test',
+    });
+    const standardUnderLink = await peekNonce(store, standard, {
+      prefix: LINK_PAYLOAD_PREFIX,
+    });
+    expect(standardUnderLink.ok).toBe(false);
+  });
+
+  it('rejects a boundContext containing a colon (shape invariant)', async () => {
+    await expect(
+      issueNonce(store, {
+        domain: 'drep.tools',
+        stage: 'test',
+        prefix: LINK_PAYLOAD_PREFIX,
+        boundContext: 'has:colon',
+      }),
+    ).rejects.toThrow(/boundContext must not contain a colon/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M2 (2026-06-10 security review) — atomic single-use under concurrency
+// ---------------------------------------------------------------------------
+
+describe('consumeNonce — atomic single-use (M2)', () => {
+  it('two concurrent consumers of the same nonce: exactly one true', async () => {
+    const { payload } = await issueNonce(store, {
+      domain: 'example.com',
+      stage: 'test',
+    });
+    // Fire both consumers at the same tick. The atomic-delete contract
+    // says exactly one wins — the other sees `false` from `delete` and
+    // returns `false`. Pre-fix (DDB adapter swallowed CCFE as void) both
+    // would return `true` and the caller could mint two sessions from
+    // one signature.
+    const [a, b] = await Promise.all([
+      consumeNonce(store, payload),
+      consumeNonce(store, payload),
+    ]);
+    const wins = [a, b].filter(Boolean).length;
+    expect(wins).toBe(1);
+  });
+
+  it('store.delete returns true the first time, false on second call', async () => {
+    // Directly exercise the boolean contract on `NonceStore.delete`.
+    const { nonce } = await issueNonce(store, {
+      domain: 'example.com',
+      stage: 'test',
+    });
+    expect(await store.delete(nonce)).toBe(true);
+    expect(await store.delete(nonce)).toBe(false);
+  });
+
+  it('consumeNonceWithCheck: racer that lost the delete gets ok:false', async () => {
+    const { payload } = await issueNonce(store, {
+      domain: 'example.com',
+      stage: 'test',
+    });
+    // Run two consumeNonceWithCheck calls in parallel, each passing
+    // the `ok:true` arm. Exactly one wins.
+    const [a, b] = await Promise.all([
+      consumeNonceWithCheck(store, payload, async () => ({ ok: true, value: 'A' })),
+      consumeNonceWithCheck(store, payload, async () => ({ ok: true, value: 'B' })),
+    ]);
+    const wins = [a, b].filter((r) => r.ok).length;
+    expect(wins).toBe(1);
+    // The loser carries the documented reason.
+    const loser = [a, b].find((r) => !r.ok);
+    expect(loser?.ok).toBe(false);
+    if (loser && !loser.ok) {
+      expect(loser.reason).toBe('nonce already consumed');
+    }
   });
 });
 

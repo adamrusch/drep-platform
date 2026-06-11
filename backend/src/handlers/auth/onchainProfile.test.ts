@@ -72,6 +72,7 @@ function buildEvent(
     walletAddress: string;
     personId?: string;
     onChainRoles?: string[];
+    tokenSource?: 'legacy' | 'onchain';
   },
 ): APIGatewayProxyEventV2WithJWTAuthorizer {
   return {
@@ -86,6 +87,7 @@ function buildEvent(
               roles: JSON.stringify(['guest']),
               onChainRoles: JSON.stringify(authCtx.onChainRoles ?? []),
               ...(authCtx.personId ? { personId: authCtx.personId } : {}),
+              ...(authCtx.tokenSource ? { tokenSource: authCtx.tokenSource } : {}),
             },
           }
         : {},
@@ -122,6 +124,19 @@ describe('onchainProfileGet', () => {
     const result = (await onchainProfileGet(
       buildEvent('GET', undefined, {
         walletAddress: 'stake1legacy',
+      }),
+    )) as { statusCode: number };
+    expect(result.statusCode).toBe(401);
+  });
+
+  it('S1: rejects when tokenSource is legacy (post-S1 authorizer)', async () => {
+    // Even if a legacy cookie somehow carried an on-chain role,
+    // tokenSource='legacy' blocks it before reading the personId.
+    const result = (await onchainProfileGet(
+      buildEvent('GET', undefined, {
+        walletAddress: 'stake1legacy_explicit',
+        tokenSource: 'legacy',
+        onChainRoles: ['drep'],
       }),
     )) as { statusCode: number };
     expect(result.statusCode).toBe(401);
@@ -179,6 +194,128 @@ describe('onchainProfileUpdate', () => {
         },
       },
     } as unknown as APIGatewayProxyEventV2WithJWTAuthorizer)) as { statusCode: number };
+    expect(result.statusCode).toBe(400);
+  });
+
+  // ---- S1 (2026-06-10 security review) — reject legacy tokens ----
+
+  it('S1: rejects when tokenSource is legacy', async () => {
+    const result = (await onchainProfileUpdate(
+      buildEvent(
+        'PUT',
+        { displayName: 'Whoever' },
+        {
+          walletAddress: 'stake1legacy_update',
+          tokenSource: 'legacy',
+          onChainRoles: ['drep'],
+        },
+      ),
+    )) as { statusCode: number };
+    expect(result.statusCode).toBe(401);
+  });
+
+  // ---- S4 (2026-06-10 security review) — socialLinks validation ----
+
+  it('S4: accepts known social-link keys with short values', async () => {
+    const { personId } = await resolveOrProvisionPerson('drep', 'drep1social_ok', 'login');
+    const result = (await onchainProfileUpdate(
+      buildEvent(
+        'PUT',
+        {
+          socialLinks: {
+            twitter: 'https://x.com/alice',
+            github: 'alice',
+            website: 'https://alice.example',
+            discord: 'alice#1234',
+          },
+        },
+        { walletAddress: 'drep1social_ok', personId, onChainRoles: ['drep'] },
+      ),
+    )) as { statusCode: number; body: string };
+    expect(result.statusCode).toBe(200);
+    const json = JSON.parse(result.body) as {
+      data: { socialLinks?: Record<string, string> };
+    };
+    expect(json.data.socialLinks?.twitter).toBe('https://x.com/alice');
+  });
+
+  it('S4: rejects an unknown social-link key', async () => {
+    const { personId } = await resolveOrProvisionPerson(
+      'drep',
+      'drep1social_unknown',
+      'login',
+    );
+    const result = (await onchainProfileUpdate(
+      buildEvent(
+        'PUT',
+        {
+          socialLinks: {
+            twitter: 'https://x.com/alice',
+            mastodon: 'https://mastodon.social/@alice', // not in the allowlist
+          },
+        },
+        { walletAddress: 'drep1social_unknown', personId, onChainRoles: ['drep'] },
+      ),
+    )) as { statusCode: number; body: string };
+    expect(result.statusCode).toBe(400);
+    const json = JSON.parse(result.body) as { message?: string };
+    expect(json.message).toMatch(/unknown key|allowed/i);
+  });
+
+  it('S4: rejects an over-long social-link value (>200 chars)', async () => {
+    const { personId } = await resolveOrProvisionPerson(
+      'drep',
+      'drep1social_long',
+      'login',
+    );
+    const result = (await onchainProfileUpdate(
+      buildEvent(
+        'PUT',
+        {
+          socialLinks: {
+            twitter: 'a'.repeat(201),
+          },
+        },
+        { walletAddress: 'drep1social_long', personId, onChainRoles: ['drep'] },
+      ),
+    )) as { statusCode: number; body: string };
+    expect(result.statusCode).toBe(400);
+    const json = JSON.parse(result.body) as { message?: string };
+    expect(json.message).toMatch(/maximum length/i);
+  });
+
+  it('S4: rejects a non-string social-link value', async () => {
+    const { personId } = await resolveOrProvisionPerson(
+      'drep',
+      'drep1social_nonstring',
+      'login',
+    );
+    const result = (await onchainProfileUpdate(
+      buildEvent(
+        'PUT',
+        {
+          // 42 is not a string — must reject.
+          socialLinks: { twitter: 42 },
+        },
+        { walletAddress: 'drep1social_nonstring', personId, onChainRoles: ['drep'] },
+      ),
+    )) as { statusCode: number };
+    expect(result.statusCode).toBe(400);
+  });
+
+  it('S4: rejects an array (defensive — socialLinks must be an object)', async () => {
+    const { personId } = await resolveOrProvisionPerson(
+      'drep',
+      'drep1social_array',
+      'login',
+    );
+    const result = (await onchainProfileUpdate(
+      buildEvent(
+        'PUT',
+        { socialLinks: ['not-an-object'] },
+        { walletAddress: 'drep1social_array', personId, onChainRoles: ['drep'] },
+      ),
+    )) as { statusCode: number };
     expect(result.statusCode).toBe(400);
   });
 });

@@ -261,14 +261,27 @@ export async function listPersonCredentials(personId: string): Promise<IdentityL
  * credential, return the canonical `personId`. Auto-provisions a new
  * person + link on the first login for an unmapped credential.
  *
- * Race-safety: between the GetItem and the PutItem(person) +
- * PutItemIfAbsent(link), a concurrent login on the SAME credential
- * could mint a second person. The conditional Put on the link row
- * detects that race; on conflict we re-read the existing link and use
- * its `personId` (the loser leaves an orphan person row, which is
- * harmless — those are scrubbed by a future GC and the link is the
- * source of truth). The narrow window means the orphan rate is
- * vanishingly small in practice.
+ * # S3 fix (2026-06-10 security review) — orphan-free race-safe order
+ *
+ * The credential-claim ordering is REVERSED from the prior implementation:
+ *
+ *   1. Generate a fresh `personId` (ULID — collision-impossible).
+ *   2. Conditionally PUT the `identity_links` row at PK=`identityKey`
+ *      pointing at the freshly-minted personId (atomic claim via
+ *      `putItemIfAbsent`).
+ *   3. ONLY on a successful claim, write the matching `onchain_users`
+ *      row for that personId.
+ *
+ * Pre-fix the order was reversed (mint person first, then try to claim
+ * link). A losing racer in step 3 was stuck with an orphan
+ * `onchain_users` row that no link ever referenced — visible to a
+ * future audit and bloated the row count. Post-fix the loser does NOT
+ * create a person row, so no orphan is possible.
+ *
+ * The winning racer also re-reads the link on contention (in case the
+ * concurrent writer minted under a different namespace shape, though
+ * `identityKeyFor` is the only writer so that branch is purely
+ * defensive).
  */
 export async function resolveOrProvisionPerson(
   credentialType: IdentityCredentialType,
@@ -281,11 +294,12 @@ export async function resolveOrProvisionPerson(
     return { personId: existing.personId, created: false };
   }
 
-  const person = await createPerson();
+  // S3 — mint the personId locally, claim the link FIRST.
+  const personId = ulid();
   const now = new Date().toISOString();
   const link: IdentityLinkItem = {
     identityKey,
-    personId: person.personId,
+    personId,
     credentialType,
     verifiedAt: now,
     verifiedVia: origin,
@@ -300,8 +314,9 @@ export async function resolveOrProvisionPerson(
   }
   if (outcome.outcome === 'skipped') {
     // Concurrent provision raced us — the link row is now present.
-    // Re-read to pick up the winner's personId. The person row we
-    // just minted is an orphan; harmless and removable by GC later.
+    // We did NOT create a person row for our minted personId, so
+    // there's no orphan to clean up. Re-read the winning link and
+    // return its personId.
     const winner = await getIdentityLink(identityKey);
     if (!winner) {
       throw new Error(
@@ -310,7 +325,14 @@ export async function resolveOrProvisionPerson(
     }
     return { personId: winner.personId, created: false };
   }
-  return { personId: person.personId, created: true };
+  // We won the claim — now write the person row. If THIS write fails
+  // (transient DDB error), the link row still points at the personId
+  // we minted; the next read via `getIdentityLink` will find it, and
+  // the caller's downstream `getPerson(personId)` will either find or
+  // re-create the row on a subsequent /me request. The link is the
+  // source of truth.
+  await createPerson({ personId });
+  return { personId, created: true };
 }
 
 /**

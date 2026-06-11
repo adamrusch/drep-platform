@@ -194,6 +194,113 @@ describe('resolveOrProvisionPerson — login reconciliation', () => {
     const link = await getIdentityLink(identityKeyFor('pool', 'pool1abc'));
     expect(link?.personId).toBe(first.personId);
   });
+
+  // -------------------------------------------------------------------------
+  // S3 (2026-06-10 security review) — orphan-free race
+  // -------------------------------------------------------------------------
+
+  it('S3: concurrent first logins for one credential yield ONE person, no orphan', async () => {
+    // Two parallel calls hit `resolveOrProvisionPerson` for the same
+    // credential at the same tick. The mock store's putItemIfAbsent
+    // returns `skipped` for the loser — pre-fix the loser would have
+    // already written an orphan `onchain_users` row before the
+    // putItemIfAbsent attempt. Post-fix the loser only writes the
+    // person row IF it won the link claim, so no orphan exists.
+    const [a, b] = await Promise.all([
+      resolveOrProvisionPerson('drep', 'drep1race', 'login'),
+      resolveOrProvisionPerson('drep', 'drep1race', 'login'),
+    ]);
+    // Both callers see the same personId (one winner, one
+    // re-reader). The race outcome may be either order; the
+    // canonical truth is `getIdentityLink`.
+    const link = await getIdentityLink(identityKeyFor('drep', 'drep1race'));
+    expect(link?.personId).toBeDefined();
+    expect(a.personId).toBe(link!.personId);
+    expect(b.personId).toBe(link!.personId);
+    // Exactly ONE person row was written — the winning personId. The
+    // store's `onchain_users` partition (composite-keyed) must contain
+    // only that one row.
+    const onchainUsersRows = Array.from(store.entries()).filter(([k]) =>
+      k.startsWith('test-onchain_users::'),
+    );
+    expect(onchainUsersRows).toHaveLength(1);
+    const [, personRow] = onchainUsersRows[0]!;
+    expect(personRow['personId']).toBe(link!.personId);
+  });
+
+  it('S3: simulated race where the initial GetItem misses but the putIfAbsent races a concurrent claim', async () => {
+    // Direct exercise of the conditional-put-loser path. We
+    // simulate the race window: the initial getIdentityLink misses,
+    // a CONCURRENT writer claims the link, our putItemIfAbsent
+    // returns `skipped`. Pre-fix the resolver had ALREADY written
+    // an `onchain_users` row by then — orphan. Post-fix it had not,
+    // so no orphan exists.
+    //
+    // To simulate: we override the mock's `putItemIfAbsent` to
+    // detect the link write and pretend the row was just-claimed
+    // by another writer (returning `skipped`). Before the override
+    // kicks in we pre-seed a winning link row pointing at a
+    // different personId so the re-read path resolves to a stable
+    // value.
+    const winningPersonId = '01HSWINNERPERSONID';
+    const targetKey = identityKeyFor('stake', 'stake1race_loser');
+    // Pre-seed the eventual winning link row (this is what the
+    // hypothetical concurrent racer would have written between our
+    // initial GetItem and our putItemIfAbsent).
+    const dynamoMod = (await import('./dynamodb')) as unknown as {
+      putItemIfAbsent: { mockImplementationOnce(fn: unknown): unknown };
+    };
+    const originalImpl = (
+      await import('./dynamodb')
+    ).putItemIfAbsent as unknown as (
+      ...args: unknown[]
+    ) => Promise<{ outcome: 'written' | 'skipped' }>;
+    // First call to `putItemIfAbsent` on `identity_links` is our
+    // attempt; intercept it to simulate the race-loss while
+    // simultaneously seeding the winning row at the same key.
+    let intercepted = false;
+    dynamoMod.putItemIfAbsent.mockImplementationOnce(
+      async (
+        table: string,
+        item: Record<string, unknown>,
+        keyAttrs: { partitionKey: string; sortKey?: string },
+      ) => {
+        if (
+          table === 'test-identity_links' &&
+          (item['identityKey'] as string) === targetKey &&
+          !intercepted
+        ) {
+          intercepted = true;
+          // Simulate the concurrent racer's winning write landing
+          // in the store just before our conditional check.
+          store.set(makeKey('test-identity_links', targetKey), {
+            identityKey: targetKey,
+            personId: winningPersonId,
+            credentialType: 'stake',
+            verifiedAt: new Date().toISOString(),
+            verifiedVia: 'login',
+          });
+          return { outcome: 'skipped' as const };
+        }
+        return originalImpl(table, item, keyAttrs);
+      },
+    );
+
+    const onchainUsersBefore = Array.from(store.entries()).filter(([k]) =>
+      k.startsWith('test-onchain_users::'),
+    ).length;
+
+    const result = await resolveOrProvisionPerson('stake', 'stake1race_loser', 'login');
+    expect(result.personId).toBe(winningPersonId);
+
+    const onchainUsersAfter = Array.from(store.entries()).filter(([k]) =>
+      k.startsWith('test-onchain_users::'),
+    ).length;
+    // No new onchain_users row by the LOSER — orphan-free. Pre-fix
+    // this resolver would have minted a person row before its
+    // putItemIfAbsent attempt, leaving a row no link points at.
+    expect(onchainUsersAfter).toBe(onchainUsersBefore);
+  });
 });
 
 describe('linkCredentialToPerson — explicit link flow', () => {

@@ -131,9 +131,17 @@ export function keyHashMatchesAddress(pubKey: Uint8Array, addressBytes: Uint8Arr
  * CIP-8 / COSE protected-header "address" field for a CIP-95 DRep signature.
  *
  * Per CIP-95, signing with the DRep key uses a CIP-19 type-6 (enterprise)
- * address: header byte high nibble 0b0110 (0x60 testnet, 0x61 mainnet) followed
- * by the 28-byte DRep key hash. Some wallets emit the bare 28-byte key hash with
+ * address: header byte exactly 0x60 (testnet) or 0x61 (mainnet) followed by
+ * the 28-byte DRep key hash. Some wallets emit the bare 28-byte key hash with
  * no header byte (CIP PR #897, cardano-signer). Both forms are accepted.
+ *
+ * S4 hardening (2026-06-10 security review) — the prior shape check
+ * accepted ANY byte with high nibble `0b0110` (i.e. `0x60..0x6F`). The low
+ * nibble carries the network tag (0 testnet / 1 mainnet) AND the remaining
+ * codepoints are unallocated in CIP-19. Accepting the wider range left a
+ * future-CIP collision risk where a different credential subtype with the
+ * same high nibble could satisfy this check. Tightening to exactly `0x60`
+ * or `0x61` makes the contract match the spec verbatim.
  *
  * This is NOT the CIP-129 governance id (header 0x22), which is a bech32
  * identifier encoding and never appears in a COSE address field. A reward
@@ -145,7 +153,7 @@ export function isDrepCredentialAddress(addressBytes: Uint8Array): boolean {
   if (addressBytes.length === 29) {
     const header = addressBytes[0];
     if (header === undefined) return false;
-    return header >> 4 === 0b0110;
+    return header === ENTERPRISE_TESTNET_HEADER || header === ENTERPRISE_MAINNET_HEADER;
   }
   return false;
 }

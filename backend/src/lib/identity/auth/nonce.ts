@@ -27,6 +27,13 @@ const NONCE_TTL_SEC = 300;
  *  to preserve byte-compat with already-issued challenges from the source
  *  fixtures and any in-flight clients. */
 export const DEFAULT_PAYLOAD_PREFIX = 'dreptalk';
+/** Link-flow payload prefix (Decision M1 fix, 2026-06-10 security review).
+ *  A link payload binds the CALLER'S personId into the signed bytes so an
+ *  attacker (person P_A) cannot get a victim to sign an opaque P_A-issued
+ *  challenge that then gets verified against the victim's session as P_A.
+ *  The link verify path parses the personId out of the signed payload and
+ *  rejects when it differs from `authCtx.personId`. */
+export const LINK_PAYLOAD_PREFIX = 'dreptalk-link';
 
 export interface NonceOpts {
   domain: string;
@@ -35,6 +42,12 @@ export interface NonceOpts {
   now?: number;
   /** Override for the payload prefix. Defaults to `dreptalk`. */
   prefix?: string;
+  /** Optional context segment embedded between the prefix and the stage —
+   *  used by the link flow to bind the caller's `personId` into the
+   *  signed bytes (M1 fix, 2026-06-10 security review). MUST NOT contain
+   *  a colon (`:`); only ULIDs / `[A-Za-z0-9_-]+` are accepted by
+   *  `parsePayload`. */
+  boundContext?: string;
 }
 
 export interface NoncePayload {
@@ -47,13 +60,28 @@ export interface NoncePayload {
  * and its binding payload. The payload is stage-bound: a signature produced on
  * `stage=test` cannot verify against `stage=prod` even if the byte stream is
  * replayed.
+ *
+ * When `boundContext` is supplied, the payload format becomes
+ * `${prefix}:${boundContext}:${stage}:${domain}:${nonce}:${issuedAt}` —
+ * used by the link flow to bind the caller's `personId` into the bytes the
+ * wallet signs (M1 fix). The verify counterpart parses the context out and
+ * rejects when it doesn't equal the calling session's personId.
  */
 export async function issueNonce(store: NonceStore, opts: NonceOpts): Promise<NoncePayload> {
   const issuedAt = Math.floor(opts.now ?? Date.now() / 1000);
   const rawBytes = new Uint8Array(randomBytes(32));
   const nonce = toBase64Url(rawBytes);
   const prefix = opts.prefix ?? DEFAULT_PAYLOAD_PREFIX;
-  const payload = `${prefix}:${opts.stage}:${opts.domain}:${nonce}:${issuedAt}`;
+  // boundContext MUST NOT contain a colon — that would shift the column
+  // shape parsePayload depends on. ULIDs (the only producer today) are
+  // [0-9A-HJKMNP-TV-Z]{26} — colon-free.
+  if (opts.boundContext?.includes(':')) {
+    throw new Error('issueNonce: boundContext must not contain a colon');
+  }
+  const payload =
+    opts.boundContext !== undefined
+      ? `${prefix}:${opts.boundContext}:${opts.stage}:${opts.domain}:${nonce}:${issuedAt}`
+      : `${prefix}:${opts.stage}:${opts.domain}:${nonce}:${issuedAt}`;
   await store.put(nonce, payload, NONCE_TTL_SEC);
   return { nonce, payload };
 }
@@ -64,23 +92,30 @@ interface ParsedPayload {
   domain: string;
   nonce: string;
   issuedAt: number;
+  /** Present only on payloads issued with a `boundContext` (link flow).
+   *  When the payload prefix is the bare `DEFAULT_PAYLOAD_PREFIX` this
+   *  field is undefined; when the prefix is `LINK_PAYLOAD_PREFIX` the
+   *  embedded context is parsed out and surfaced here. */
+  boundContext?: string;
 }
 
 /**
  * Parses a stage-bound nonce payload. Returns null when the shape is wrong.
  *
- * The format is `${prefix}:${stage}:${domain}:${nonce}:${issuedAt}`. The
- * domain may not contain colons in practice (DNS labels), and the nonce is
- * base64url (no colons), so a simple right-anchored split is unambiguous as
- * long as we know how many trailing segments to expect.
+ * The format is `${prefix}:${stage}:${domain}:${nonce}:${issuedAt}` (or
+ * `${prefix}:${boundContext}:${stage}:${domain}:${nonce}:${issuedAt}` for
+ * link-flow payloads — the link prefix has an extra context segment after
+ * the prefix). The domain may not contain colons in practice (DNS labels),
+ * and the nonce is base64url (no colons), so a simple right-anchored split
+ * is unambiguous as long as we know how many trailing segments to expect.
  */
 function parsePayload(payload: string, expectedPrefix: string): ParsedPayload | null {
   const parts = payload.split(':');
-  // prefix:stage:domain:nonce:issuedAt → at least 5 segments. Stage is
-  // assumed colon-free (it's `dev`/`test`/`prod`); the only segment that
-  // could contain colons is the domain — but DNS labels never contain `:`,
-  // so 5 segments is the firm shape.
-  if (parts.length < 5) return null;
+  const isLink = expectedPrefix === LINK_PAYLOAD_PREFIX;
+  // Standard payload: prefix:stage:domain:nonce:issuedAt → ≥5 segments.
+  // Link payload:     prefix:boundContext:stage:domain:nonce:issuedAt → ≥6 segments.
+  const minSegments = isLink ? 6 : 5;
+  if (parts.length < minSegments) return null;
   const prefix = parts[0];
   if (prefix !== expectedPrefix) return null;
   const issuedAtStr = parts[parts.length - 1];
@@ -90,11 +125,23 @@ function parsePayload(payload: string, expectedPrefix: string): ParsedPayload | 
   const issuedAt = Number.parseInt(issuedAtStr, 10);
   if (!Number.isFinite(issuedAt)) return null;
   if (nonce === undefined) return null;
-  const stage = parts[1];
+  // For link payloads, the boundContext slot is parts[1]; stage shifts to parts[2].
+  // For standard payloads, stage is parts[1] (no boundContext slot).
+  const stage = isLink ? parts[2] : parts[1];
   // Domain may contain colons in theory — rebuild it from the remaining slots.
-  const domain = parts.slice(2, parts.length - 2).join(':');
+  const domainStart = isLink ? 3 : 2;
+  const domain = parts.slice(domainStart, parts.length - 2).join(':');
   if (stage === undefined || domain.length === 0) return null;
-  return { prefix, stage, domain, nonce, issuedAt };
+  const boundContext = isLink ? parts[1] : undefined;
+  if (isLink && (boundContext === undefined || boundContext.length === 0)) return null;
+  return {
+    prefix,
+    stage,
+    domain,
+    nonce,
+    issuedAt,
+    ...(boundContext !== undefined ? { boundContext } : {}),
+  };
 }
 
 export interface NonceCheckOpts {
@@ -160,6 +207,14 @@ export async function peekNonce(
  * both succeed — the conditional delete in the production DDB store fails
  * one side cleanly.
  *
+ * M2 fix (2026-06-10 security review): returns the boolean from
+ * `store.delete`, so a racer that lost the conditional-delete arm
+ * receives `false` and does NOT mint a session. Pre-fix, the DDB
+ * adapter swallowed `ConditionalCheckFailedException` as `void` and
+ * this function returned `true` regardless — meaning N concurrent
+ * consumers of the same signature could ALL return `true` and N
+ * sessions could be minted from a single proof.
+ *
  * Never throws; returns false on any failure.
  */
 export async function consumeNonce(
@@ -170,8 +225,9 @@ export async function consumeNonce(
   try {
     const peek = await peekNonce(store, payload, opts);
     if (!peek.ok) return false;
-    await store.delete(peek.nonce);
-    return true;
+    // M2 — propagate the atomic-delete outcome. `false` means a
+    // concurrent consumer won the race; we did NOT mint a session.
+    return await store.delete(peek.nonce);
   } catch {
     return false;
   }
@@ -182,6 +238,12 @@ export async function consumeNonce(
  * check between `peek` and `delete`. The store record is only deleted if the
  * caller-supplied check returns true — preserving the per-attacker
  * burn-defense from the legacy `lib/auth.ts`.
+ *
+ * M2 fix (2026-06-10 security review): when `store.delete` returns
+ * `false` (a concurrent consumer won the conditional-delete race),
+ * surface `{ ok: false, reason: 'nonce already consumed' }` so the
+ * caller MUST NOT treat the crypto pass as a session-mintable success.
+ * The thrown-error path retains the same fail-closed semantics.
  *
  * Returns `{ ok: true }` if everything passes; otherwise `{ ok: false, reason }`.
  */
@@ -197,13 +259,20 @@ export async function consumeNonceWithCheck<T>(
   if (!peek.ok) return { ok: false, reason: peek.reason };
   const checkResult = await check(peek.parsed);
   if (!checkResult.ok) return checkResult;
+  let removed: boolean;
   try {
-    await store.delete(peek.nonce);
+    removed = await store.delete(peek.nonce);
   } catch {
-    // The atomic delete failed — most likely a concurrent consume already
-    // burned the nonce. Fail closed: the caller MUST NOT treat this as a
-    // success even though the crypto check passed, because someone else
-    // claimed the nonce in the meantime.
+    // The atomic delete THREW — distinct from "row already gone".
+    // Most often a transient DDB error; fail closed so the caller does
+    // not treat the crypto pass as success when we can't prove we
+    // claimed the nonce.
+    return { ok: false, reason: 'nonce already consumed' };
+  }
+  if (!removed) {
+    // The atomic delete returned `false` — a concurrent consumer won
+    // the race. Fail closed: the crypto check passed but we didn't
+    // claim the nonce, so we mustn't mint a session here.
     return { ok: false, reason: 'nonce already consumed' };
   }
   return { ok: true, value: checkResult.value };

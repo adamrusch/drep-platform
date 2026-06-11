@@ -1,6 +1,14 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer } from 'aws-lambda';
 import type { CommitteeMemberItem, OnChainRole, UserRole } from '../lib/types';
 
+/** S1 (2026-06-10 security review) — which cookie / header the token
+ *  came in on. `/auth/onchain/*` handlers reject `legacy` so a
+ *  CIP-30 cookie can never bind credentials in the on-chain personId
+ *  model. Absent only on tests that construct an AuthContext by hand
+ *  without going through the authorizer (treated as legacy by callers
+ *  that gate on this). */
+export type TokenSource = 'legacy' | 'onchain';
+
 export interface AuthContext {
   walletAddress: string;
   roles: UserRole[];
@@ -33,6 +41,14 @@ export interface AuthContext {
    *  carries). Legacy CIP-30 tokens omit it entirely — they're not
    *  participating in the on-chain person model. */
   personId?: string;
+  /** S1 fix (2026-06-10 security review) — which cookie / header the
+   *  token came in on (set by `jwt-authorizer`). `/auth/onchain/*`
+   *  handlers MUST reject when this is `'legacy'` so a CIP-30 token
+   *  can't bind credentials in the on-chain personId model. Absent on
+   *  hand-built test contexts that bypass the authorizer; callers
+   *  that gate on this should treat absence as a coarse signal —
+   *  prefer the empty-`onChainRoles` backstop too. */
+  tokenSource?: TokenSource;
 }
 
 /**
@@ -62,6 +78,13 @@ interface LambdaAuthorizerContext {
   /** Decision #3 — canonical personId for the on-chain identity
    *  subsystem. Forwarded by the authorizer when present on the JWT. */
   personId?: string;
+  /** S1 fix — which cookie / header the token came in on, forwarded
+   *  by the Sprint 1 authorizer (post-S1). Older authorizer Lambdas
+   *  in the rollout window may omit it; treat absence as `legacy`
+   *  for the purpose of S1's reject-legacy check (defaults to the
+   *  safer side — a request without an explicit `tokenSource` should
+   *  not be allowed onto on-chain binding paths). */
+  tokenSource?: string;
 }
 
 /**
@@ -127,6 +150,14 @@ export function extractAuthContext(
     }
   }
 
+  // S1 fix — parse the tokenSource forwarded by the authorizer (post
+  // S1). Anything other than the two known values is dropped to
+  // undefined so callers don't misread a typo as `onchain`.
+  let tokenSource: TokenSource | undefined;
+  if (ctx.tokenSource === 'legacy' || ctx.tokenSource === 'onchain') {
+    tokenSource = ctx.tokenSource;
+  }
+
   return {
     walletAddress,
     roles,
@@ -136,6 +167,7 @@ export function extractAuthContext(
     onChainRoles,
     ...(ctx.jti ? { jti: ctx.jti } : {}),
     ...(ctx.personId ? { personId: ctx.personId } : {}),
+    ...(tokenSource ? { tokenSource } : {}),
   };
 }
 

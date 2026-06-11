@@ -99,7 +99,16 @@ export const handler = async (
     let revokedCount = 0;
     try {
       if (revokeAll) {
-        revokedCount = await revokeAllSessionsForUser(authCtx.walletAddress);
+        // M4 fix (2026-06-10 security review) — thread the caller's
+        // CURRENT jti so revoke-all explicitly tombstones the in-use
+        // session even when the GSI replica that backs the per-user
+        // enumeration is briefly stale. The current jti is always the
+        // one the user is most painful to miss (the one they're
+        // actively pressing "log out everywhere" with).
+        revokedCount = await revokeAllSessionsForUser(
+          authCtx.walletAddress,
+          authCtx.jti,
+        );
       } else if (authCtx.jti) {
         await revokeSessionByJti(authCtx.jti, authCtx.walletAddress);
         revokedCount = 1;

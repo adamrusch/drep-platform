@@ -171,10 +171,18 @@ function rawSign(payload: string): {
   };
 }
 
-function makeNoncePayload(): { payload: string; nonce: string } {
+/**
+ * Build a link-flow nonce payload bound to `personId` (M1 security
+ * review fix — the link payload format is
+ * `dreptalk-link:<personId>:<stage>:<domain>:<nonce>:<issuedAt>`).
+ * Stores the payload in the in-memory DDB stub under the nonce PK,
+ * matching what the production `linkChallenge` handler would have
+ * written.
+ */
+function makeNoncePayload(personId: string): { payload: string; nonce: string } {
   const nonce = randomBytes(16).toString('base64url');
   const issuedAt = Math.floor(Date.now() / 1000);
-  const payload = `dreptalk:${STAGE}:drep.tools:${nonce}:${issuedAt}`;
+  const payload = `dreptalk-link:${personId}:${STAGE}:drep.tools:${nonce}:${issuedAt}`;
   store.set(k('test-auth_nonces', nonce), {
     nonce,
     kind: 'identity',
@@ -224,7 +232,7 @@ describe('linkVerify — happy path (SPO links a CC credential)', () => {
     const personId = seed.personId;
 
     // The caller now signs the link challenge with a CC hot key.
-    const { payload } = makeNoncePayload();
+    const { payload } = makeNoncePayload(personId);
     const { publicKeyHex, signatureHex, pubKey } = rawSign(payload);
 
     // Compute the cc_hot_hex Koios would have for this key.
@@ -290,7 +298,7 @@ describe('linkVerify — rejects bad/absent signatures', () => {
     // Build a payload but do NOT store it — simulates an attacker
     // reusing a nonce that was already consumed.
     const issuedAt = Math.floor(Date.now() / 1000);
-    const payload = `dreptalk:${STAGE}:drep.tools:fake_nonce:${issuedAt}`;
+    const payload = `dreptalk-link:${personId}:${STAGE}:drep.tools:fake_nonce:${issuedAt}`;
     const { publicKeyHex, signatureHex } = rawSign(payload);
 
     const result = (await linkVerify(
@@ -307,7 +315,7 @@ describe('linkVerify — rejects bad/absent signatures', () => {
 
   it('rejects when the signature is forged (signed by a different key)', async () => {
     const { personId } = await resolveOrProvisionPerson('pool', 'pool1caller', 'login');
-    const { payload } = makeNoncePayload();
+    const { payload } = makeNoncePayload(personId);
     // Sign the payload with key A; submit key B's pubkey.
     const a = rawSign(payload);
     const b = rawSign(payload);
@@ -365,7 +373,7 @@ describe('linkVerify — refuses to merge two persons (the safety contract)', ()
     // Person B tries to link the SAME CC credential by signing fresh
     // — Koios will resolve to the same CONFLICT_COLD and the link
     // would silently merge B into A. The handler MUST refuse.
-    const { payload } = makeNoncePayload();
+    const { payload } = makeNoncePayload(b.personId);
     const { publicKeyHex, signatureHex, pubKey } = rawSign(payload);
     const { ccHotKeyHashHex } = await import('../../lib/identity/cardano/identity');
     const hotHex = ccHotKeyHashHex(pubKey);
@@ -408,7 +416,7 @@ describe('linkVerify — refuses to merge two persons (the safety contract)', ()
       personId,
     });
 
-    const { payload } = makeNoncePayload();
+    const { payload } = makeNoncePayload(personId);
     const { publicKeyHex, signatureHex, pubKey } = rawSign(payload);
     const { ccHotKeyHashHex } = await import('../../lib/identity/cardano/identity');
     const hotHex = ccHotKeyHashHex(pubKey);
@@ -435,5 +443,209 @@ describe('linkVerify — refuses to merge two persons (the safety contract)', ()
     expect(result.statusCode).toBe(200);
     const json = JSON.parse(result.body) as { data: { alreadyLinked: boolean } };
     expect(json.data.alreadyLinked).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M1 (2026-06-10 security review) — pre-registration account hijack defence
+//
+// An attacker authenticated as person P_A gets a victim (never-logged-in)
+// to sign P_A's link challenge. Pre-fix, `linkVerify` would attach the
+// victim's credential to P_A. Post-fix, the signed payload carries P_A's
+// personId in the bytes the wallet signs; the verify path cross-checks
+// that bound personId against the calling session's personId and 4xx
+// when they differ. The victim's wallet now signs bytes uniquely tied to
+// the attacker's account, and the server rejects the cross-account
+// attempt at the bind check.
+// ---------------------------------------------------------------------------
+
+describe('linkVerify — M1: rejects a link payload bound to a different personId', () => {
+  it('rejects a link payload bound to personId A presented in a session for person B', async () => {
+    // Person A — the attacker's account. Bound the link challenge to A.
+    const a = await resolveOrProvisionPerson('pool', 'pool1A_attacker', 'login');
+    // Person B — the victim. Logs in for the FIRST time, sees the
+    // attacker-supplied link challenge in their wallet, signs it.
+    const b = await resolveOrProvisionPerson('pool', 'pool1B_victim', 'login');
+    expect(a.personId).not.toBe(b.personId);
+
+    // Build a link payload bound to A's personId — what the attacker
+    // crafted server-side. Pre-fix, the verify side ignored the bound
+    // context and would have written `cc:<victim_cred> → A.personId`.
+    const { payload } = makeNoncePayload(a.personId);
+    const { publicKeyHex, signatureHex, pubKey } = rawSign(payload);
+    const { ccHotKeyHashHex } = await import('../../lib/identity/cardano/identity');
+    const hotHex = ccHotKeyHashHex(pubKey);
+    const VICTIM_COLD = 'cc_cold1victim_unlinked';
+    fakeKoios.committeeInfo.mockResolvedValueOnce([
+      {
+        status: 'authorized',
+        cc_hot_id: 'cc_hot1victim',
+        cc_cold_id: VICTIM_COLD,
+        cc_hot_hex: hotHex,
+        cc_cold_hex: null,
+        expiration_epoch: null,
+        cc_hot_has_script: false,
+        cc_cold_has_script: false,
+      },
+    ]);
+
+    // The victim is signed in as B (their own personId) and submits
+    // the attacker-bound link challenge — the verify path must reject
+    // because the payload's bound personId is A but the calling
+    // session is B.
+    const result = (await linkVerify(
+      buildEvent(
+        { payload, signatureHex, publicKeyHex, role: 'cc' },
+        { walletAddress: 'pool1B_victim', personId: b.personId, onChainRoles: ['spo'] },
+      ),
+    )) as { statusCode: number; body: string };
+
+    expect(result.statusCode).toBe(401);
+    // The victim's cc credential MUST NOT have been linked to person A.
+    const link = await getIdentityLink(identityKeyFor('cc', VICTIM_COLD));
+    expect(link).toBeUndefined();
+  });
+
+  it('accepts a link payload bound to the calling person (M1 happy path)', async () => {
+    // The mirror of the above — same flow but the payload's bound
+    // personId == the calling session's personId. The verify path
+    // must accept and write the link, proving the cross-check is
+    // surgical (not a blanket reject).
+    const caller = await resolveOrProvisionPerson('pool', 'pool1self_bind', 'login');
+    const { payload } = makeNoncePayload(caller.personId);
+    const { publicKeyHex, signatureHex, pubKey } = rawSign(payload);
+    const { ccHotKeyHashHex } = await import('../../lib/identity/cardano/identity');
+    const hotHex = ccHotKeyHashHex(pubKey);
+    const COLD_ID = 'cc_cold1self_bind';
+    fakeKoios.committeeInfo.mockResolvedValueOnce([
+      {
+        status: 'authorized',
+        cc_hot_id: 'cc_hot1self_bind',
+        cc_cold_id: COLD_ID,
+        cc_hot_hex: hotHex,
+        cc_cold_hex: null,
+        expiration_epoch: null,
+        cc_hot_has_script: false,
+        cc_cold_has_script: false,
+      },
+    ]);
+    const result = (await linkVerify(
+      buildEvent(
+        { payload, signatureHex, publicKeyHex, role: 'cc' },
+        {
+          walletAddress: 'pool1self_bind',
+          personId: caller.personId,
+          onChainRoles: ['spo'],
+        },
+      ),
+    )) as { statusCode: number };
+    expect(result.statusCode).toBe(200);
+    const link = await getIdentityLink(identityKeyFor('cc', COLD_ID));
+    expect(link?.personId).toBe(caller.personId);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S1 (2026-06-10 security review) — reject legacy-cookie session
+//
+// A request authenticated via the legacy CIP-30 cookie (empty
+// `onChainRoles`) hitting /auth/onchain/link/verify MUST be rejected.
+// Pre-fix, the handler fell back to deriving an on-chain identity from
+// the stake `sub` and could write a link row attributed to a legacy
+// caller. Post-fix the handler 4xx on missing/empty onChainRoles.
+// ---------------------------------------------------------------------------
+
+describe('linkVerify — S1: rejects legacy-cookie session', () => {
+  it('rejects a request with empty onChainRoles (legacy CIP-30 session)', async () => {
+    // No setup needed — the rejection MUST happen before any nonce
+    // lookup or signature work. We just need a valid-shaped body.
+    const payload = `dreptalk-link:01HSOMEPERSON:${STAGE}:drep.tools:fakenonce:${Math.floor(Date.now() / 1000)}`;
+    const { publicKeyHex, signatureHex } = rawSign(payload);
+    const result = (await linkVerify(
+      buildEvent(
+        { payload, signatureHex, publicKeyHex, role: 'spo' },
+        // Legacy session — walletAddress set, NO onChainRoles.
+        { walletAddress: 'stake1legacy_caller', onChainRoles: [] },
+      ),
+    )) as { statusCode: number; body: string };
+    expect(result.statusCode).toBe(401);
+    // Pre-fix this would have proceeded into the nonce/sig path.
+    expect(fakeKoios.poolCalidusKey).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S2 (2026-06-10 security review) — a bad signature does NOT burn the nonce
+//
+// The link verify path now uses `consumeNonceWithCheck` (peek → run
+// signature+role check → delete only on success). A bad signature must
+// NOT burn the nonce: a subsequent legit attempt with the same nonce
+// must still work.
+// ---------------------------------------------------------------------------
+
+describe('linkVerify — S2: bad signature does not burn the nonce', () => {
+  it('a forged-signature attempt followed by a valid attempt on the SAME nonce still succeeds', async () => {
+    const caller = await resolveOrProvisionPerson('pool', 'pool1burn_defense', 'login');
+    const { payload } = makeNoncePayload(caller.personId);
+    // Legit signer for the eventual success.
+    const legit = rawSign(payload);
+    // Attacker tries a forged signature — sig from key A, key from B.
+    const attackerSig = rawSign(payload).signatureHex;
+    const wrongKey = rawSign(payload).publicKeyHex;
+
+    // Build a roster Koios would return for the legit key.
+    const { ccHotKeyHashHex } = await import('../../lib/identity/cardano/identity');
+    const hotHex = ccHotKeyHashHex(legit.pubKey);
+    const COLD = 'cc_cold1burn';
+    const member = {
+      status: 'authorized',
+      cc_hot_id: 'cc_hot1burn',
+      cc_cold_id: COLD,
+      cc_hot_hex: hotHex,
+      cc_cold_hex: null,
+      expiration_epoch: null,
+      cc_hot_has_script: false,
+      cc_cold_has_script: false,
+    };
+    // First call (the forged one) — Koios is never reached past the
+    // sig check; this mock is defensive in case it ever is.
+    fakeKoios.committeeInfo.mockResolvedValue([member]);
+
+    // Attempt #1 — forged signature, MUST fail with 401.
+    const bad = (await linkVerify(
+      buildEvent(
+        {
+          payload,
+          signatureHex: attackerSig,
+          publicKeyHex: wrongKey,
+          role: 'cc',
+        },
+        {
+          walletAddress: 'pool1burn_defense',
+          personId: caller.personId,
+          onChainRoles: ['spo'],
+        },
+      ),
+    )) as { statusCode: number };
+    expect(bad.statusCode).toBe(401);
+
+    // Attempt #2 — same nonce, legit signature. Pre-fix the nonce was
+    // burned on attempt #1; post-fix it survived and #2 succeeds.
+    const good = (await linkVerify(
+      buildEvent(
+        {
+          payload,
+          signatureHex: legit.signatureHex,
+          publicKeyHex: legit.publicKeyHex,
+          role: 'cc',
+        },
+        {
+          walletAddress: 'pool1burn_defense',
+          personId: caller.personId,
+          onChainRoles: ['spo'],
+        },
+      ),
+    )) as { statusCode: number };
+    expect(good.statusCode).toBe(200);
   });
 });
