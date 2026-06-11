@@ -79,6 +79,7 @@ function buildEvent(opts: {
   walletAddress: string;
   roles: string[];
   drepId?: string;
+  personId?: string;
 }): APIGatewayProxyEventV2WithJWTAuthorizer {
   return {
     requestContext: {
@@ -88,6 +89,11 @@ function buildEvent(opts: {
           roles: JSON.stringify(opts.roles),
           sessionType: 'normal',
           ...(opts.drepId ? { drepId: opts.drepId } : {}),
+          // Decision #2 / Decision #3 — tokens issued after the legacy
+          // login cutover carry a `personId` claim, forwarded by the
+          // authorizer onto this context attribute. Tests can opt-in
+          // per case; absent simulates a pre-cutover token.
+          ...(opts.personId ? { personId: opts.personId } : {}),
         },
       },
     } as unknown as APIGatewayProxyEventV2WithJWTAuthorizer['requestContext'],
@@ -347,5 +353,45 @@ describe('GET /auth/me', () => {
     expect(res).toMatchObject({ statusCode: 200 });
     const data = parseBody(res);
     expect(data['pendingInvitations']).toEqual([]);
+  });
+
+  // ---- Decision #2 + #3 — surface personId on the legacy /auth/me surface ----
+
+  it('surfaces personId when the JWT carries it (post-legacy-cutover token)', async () => {
+    // The legacy CIP-30 login (`/auth/verify`) now reconciles via
+    // `resolveOrProvisionPerson('stake', stakeAddr, 'login')` and rides
+    // the resulting `personId` on the JWT. The authorizer forwards it
+    // onto the AuthContext; `/auth/me` MUST surface it so the SPA can
+    // route the wallet user into the same on-chain profile UI an
+    // on-chain login reaches (single profile per human across legacy +
+    // on-chain login paths).
+    mockGet.mockResolvedValueOnce(buildUserRow() as never);
+    mockLookup.mockResolvedValueOnce({ drepId: null, source: 'koios' });
+
+    const PERSON_ID = '01JBHNX9YH4Y4S0KX8C2X1J9TS';
+    const res = (await handler(
+      buildEvent({ walletAddress: WALLET, roles: ['delegator'], personId: PERSON_ID }),
+    )) as APIGatewayProxyResultV2;
+    expect(res).toMatchObject({ statusCode: 200 });
+    const data = parseBody(res);
+    expect(data['personId']).toBe(PERSON_ID);
+  });
+
+  it('OMITS personId when the JWT does not carry it (pre-cutover token)', async () => {
+    // A token issued before the legacy login cutover doesn't have a
+    // personId claim; the authorizer context doesn't carry one; the
+    // response must NOT manufacture one (the FE distinguishes
+    // pre-cutover legacy logins by field-absence to keep the
+    // legacy-wallet-only profile UI rendering for them until they
+    // re-auth).
+    mockGet.mockResolvedValueOnce(buildUserRow() as never);
+    mockLookup.mockResolvedValueOnce({ drepId: null, source: 'koios' });
+
+    const res = (await handler(
+      buildEvent({ walletAddress: WALLET, roles: ['delegator'] }),
+    )) as APIGatewayProxyResultV2;
+    expect(res).toMatchObject({ statusCode: 200 });
+    const data = parseBody(res);
+    expect('personId' in data).toBe(false);
   });
 });
