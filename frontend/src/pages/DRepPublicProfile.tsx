@@ -20,6 +20,7 @@ import { StatusPill } from '@/components/ui/StatusPill';
 import { Sparkline, seededRandomWalk } from '@/components/ui/Sparkline';
 import { useUiStore } from '@/stores/uiStore';
 import { useFormatters } from '@/hooks/useFormatters';
+import { resolveDrepAvatarUrl } from '@/lib/drepAvatar';
 import { cn } from '@/lib/utils';
 import type { DRepDetail, DRepReference } from '@/types';
 
@@ -73,43 +74,47 @@ function avatarColor(drepId: string): string {
 interface AvatarProps {
   drepId: string;
   name?: string;
-  imageUrl?: string;
+  /** Sprint 5 — sha256-hex of the self-hosted avatar bytes living at
+   *  `/api/avatar/<hash>`. Absent → cardenticon identicon fallback. */
+  imageContentHash?: string | null;
   size?: number;
 }
 
-function DRepAvatar({ drepId, name, imageUrl, size = 72 }: AvatarProps): React.ReactElement {
+function DRepAvatar({
+  drepId,
+  name,
+  imageContentHash,
+  size = 72,
+}: AvatarProps): React.ReactElement {
   const [errored, setErrored] = useState(false);
-  const initial = useMemo(() => {
-    const source = name?.trim() ?? '';
-    if (source.length > 0) return source[0]!.toUpperCase();
-    return drepId.startsWith('drep1') ? drepId[5]?.toUpperCase() ?? 'D' : 'D';
-  }, [name, drepId]);
-  const showImage = !errored && typeof imageUrl === 'string' && /^https?:\/\//i.test(imageUrl);
+  const src = useMemo(
+    () => resolveDrepAvatarUrl({ drepId, imageContentHash, size }),
+    [drepId, imageContentHash, size],
+  );
+  const finalSrc = useMemo(
+    () => (errored ? resolveDrepAvatarUrl({ drepId, size }) : src),
+    [errored, drepId, size, src],
+  );
+  void name;
   return (
     <div
-      className="flex-shrink-0 inline-flex items-center justify-center font-semibold rounded-token-full overflow-hidden"
+      className="flex-shrink-0 inline-flex items-center justify-center rounded-token-full overflow-hidden"
       style={{
         width: size,
         height: size,
-        background: showImage ? 'transparent' : avatarColor(drepId),
-        color: '#0d1b1f',
-        fontSize: Math.round(size * 0.42),
+        background: avatarColor(drepId),
       }}
       aria-hidden="true"
     >
-      {showImage ? (
-        <img
-          src={imageUrl}
-          alt=""
-          width={size}
-          height={size}
-          loading="lazy"
-          onError={() => setErrored(true)}
-          className="w-full h-full object-cover"
-        />
-      ) : (
-        <span>{initial}</span>
-      )}
+      <img
+        src={finalSrc}
+        alt=""
+        width={size}
+        height={size}
+        loading="lazy"
+        onError={() => setErrored(true)}
+        className="w-full h-full object-cover"
+      />
     </div>
   );
 }
@@ -255,7 +260,7 @@ export function DRepPublicProfile(): React.ReactElement {
           <DRepAvatar
             drepId={drep.drepId}
             name={drep.givenName}
-            imageUrl={drep.image}
+            imageContentHash={drep.imageContentHash}
             size={72}
           />
           <div className="min-w-0 flex-1">
