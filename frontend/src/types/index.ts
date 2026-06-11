@@ -410,6 +410,12 @@ export interface DRepDirectoryEntry {
    *  image fallback logic. Optional for backwards compat with rows
    *  synced before this flag existed. */
   isPredefined?: boolean;
+  /** Sprint 5 — sha256-hex of the self-hosted avatar bytes living at
+   *  `/api/avatar/<hash>`. Set once the avatar-store sync has
+   *  downloaded and validated the upstream `image` URL. Absent / null
+   *  means "no self-hosted avatar yet — render the cardenticon
+   *  identicon as fallback." See `lib/drepAvatar.ts`. */
+  imageContentHash?: string | null;
   lastSyncedAt: string;
   enrichmentVersion: number;
 }
