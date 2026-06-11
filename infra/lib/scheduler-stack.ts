@@ -12,6 +12,26 @@ import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import { Construct } from 'constructs';
 import * as path from 'path';
 import type { DatabaseStack } from './database-stack';
+import { type FreshnessSchedule, getFreshnessRow } from './freshness';
+
+/**
+ * Map a structured `FreshnessSchedule` (declared in `shared/freshness.ts`,
+ * mirrored into `infra/lib/freshness.ts`) to the CDK `events.Schedule` the
+ * EventBridge rule actually consumes. Single source of truth for cadences:
+ * the help page and this stack both read from the same FRESHNESS table, so
+ * a cadence change touches exactly one place and the documentation can
+ * never drift from the schedule the stack synthesises.
+ *
+ * Exported so a future test (or another stack) can call it without
+ * re-deriving the mapping by hand.
+ */
+export function scheduleFromFreshness(spec: FreshnessSchedule): events.Schedule {
+  if (spec.kind === 'rate') {
+    if ('minutes' in spec) return events.Schedule.rate(cdk.Duration.minutes(spec.minutes));
+    return events.Schedule.rate(cdk.Duration.hours(spec.hours));
+  }
+  return events.Schedule.cron({ minute: spec.minute, hour: spec.hour });
+}
 
 export interface SchedulerStackProps extends cdk.StackProps {
   stage: string;
@@ -137,7 +157,9 @@ export class SchedulerStack extends cdk.Stack {
     const syncRule = new events.Rule(this, 'GovernanceSyncRule', {
       ruleName: `drep-platform-${stage}-governance-sync`,
       description: 'Triggers governance intake sync (Koios primary, Blockfrost votes) every 1 minute',
-      schedule: events.Schedule.rate(cdk.Duration.minutes(1)),
+      // Cadence comes from `shared/freshness.ts` via the infra mirror so the
+      // help page and the scheduler can never disagree on how fresh a value is.
+      schedule: scheduleFromFreshness(getFreshnessRow('governance-intake').schedule),
       enabled: true,
     });
 
@@ -192,7 +214,7 @@ export class SchedulerStack extends cdk.Stack {
     const directorySyncRule = new events.Rule(this, 'DirectorySyncRule', {
       ruleName: `drep-platform-${stage}-drep-directory-sync`,
       description: 'Triggers DRep directory sync (Koios drep_list/info/metadata) every 30 minutes',
-      schedule: events.Schedule.rate(cdk.Duration.minutes(30)),
+      schedule: scheduleFromFreshness(getFreshnessRow('drep-directory').schedule),
       enabled: true,
     });
 
@@ -258,7 +280,7 @@ export class SchedulerStack extends cdk.Stack {
     const voteRationaleRule = new events.Rule(this, 'VoteRationaleSyncRule', {
       ruleName: `drep-platform-${stage}-vote-rationale-sync`,
       description: 'Caches voter rationale bodies for active governance actions every 30 minutes',
-      schedule: events.Schedule.rate(cdk.Duration.minutes(30)),
+      schedule: scheduleFromFreshness(getFreshnessRow('vote-rationale').schedule),
       enabled: true,
     });
 
@@ -322,7 +344,7 @@ export class SchedulerStack extends cdk.Stack {
       description: 'Triggers DRep voting-power history sync (Koios drep_voting_power_history) daily',
       // 02:00 UTC daily — outside US/EU prime-time so we don't compete
       // with the Koios anonymous-tier rate budget when users are active.
-      schedule: events.Schedule.cron({ minute: '0', hour: '2' }),
+      schedule: scheduleFromFreshness(getFreshnessRow('drep-power-history').schedule),
       enabled: true,
     });
 
@@ -381,7 +403,7 @@ export class SchedulerStack extends cdk.Stack {
       // 03:00 UTC — offset from the power-history sync (02:00) so two
       // anonymous-tier Koios sync passes don't share their RPS budget
       // with each other.
-      schedule: events.Schedule.cron({ minute: '0', hour: '3' }),
+      schedule: scheduleFromFreshness(getFreshnessRow('pool-metadata').schedule),
       enabled: true,
     });
 
@@ -439,7 +461,7 @@ export class SchedulerStack extends cdk.Stack {
     const ccMembersSyncRule = new events.Rule(this, 'CCMembersSyncRule', {
       ruleName: `drep-platform-${stage}-cc-members-sync`,
       description: 'Triggers CC members sync (Koios committee_info) hourly with epoch-skip',
-      schedule: events.Schedule.rate(cdk.Duration.hours(1)),
+      schedule: scheduleFromFreshness(getFreshnessRow('cc-members').schedule),
       enabled: true,
     });
 
@@ -552,7 +574,9 @@ export class SchedulerStack extends cdk.Stack {
         ruleName: `drep-platform-${stage}-revalidate-comment-stake-sync`,
         description:
           'Triggers comment-vote stake re-validation sweep every 3 hours (Sybil defense)',
-        schedule: events.Schedule.rate(cdk.Duration.hours(3)),
+        schedule: scheduleFromFreshness(
+          getFreshnessRow('revalidate-comment-stake').schedule,
+        ),
         enabled: true,
       },
     );
@@ -616,7 +640,7 @@ export class SchedulerStack extends cdk.Stack {
     const committeeEpochSweepRule = new events.Rule(this, 'CommitteeEpochSweepRule', {
       ruleName: `drep-platform-${stage}-committee-epoch-sweep`,
       description: 'Finalizes open committee proposals past their voting deadline (hourly)',
-      schedule: events.Schedule.rate(cdk.Duration.hours(1)),
+      schedule: scheduleFromFreshness(getFreshnessRow('committee-epoch-sweep').schedule),
       enabled: true,
     });
     committeeEpochSweepRule.addTarget(
@@ -722,7 +746,9 @@ export class SchedulerStack extends cdk.Stack {
         // 02:30 UTC daily — slotted between the existing power-history
         // sync (02:00) and pool-metadata sync (03:00) so the three
         // anonymous-tier Koios consumers don't share an RPS budget.
-        schedule: events.Schedule.cron({ minute: '30', hour: '2' }),
+        schedule: scheduleFromFreshness(
+          getFreshnessRow('revalidate-onchain-roles').schedule,
+        ),
         enabled: true,
       },
     );
