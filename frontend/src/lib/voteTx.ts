@@ -27,6 +27,11 @@
  */
 
 import type { CommitteePosition } from '@/types/committee';
+import {
+  CIP20_LABEL,
+  buildDefaultDrepToolsAttribution,
+  type Cip20Envelope,
+} from './cip20';
 
 /** Minimal wallet API used by the helper. Implemented by Mesh's
  *  `BrowserWallet` instance (after `.enable(walletName, [95])`). */
@@ -130,12 +135,33 @@ export interface BuildVoteTxInputs {
   anchorHash?: string | null;
   /** The wallet we sign + broadcast with — must be CIP-95-enabled. */
   wallet: VoteWallet;
+  /**
+   * CIP-20 attribution metadata (label 674) to attach to the tx.
+   *   - `undefined` (default) → attach the platform's drep.tools attribution.
+   *   - `null` → do not attach any CIP-20 metadata.
+   *   - `Cip20Envelope` → attach the provided envelope as-is.
+   *
+   * Most callers omit this to get the default "Voted via drep.tools"
+   * stamp. Tests use `null` to assert the no-metadata branch.
+   */
+  attributionMetadata?: Cip20Envelope | null;
 }
 
 /**
  * The Mesh imports the helper needs at runtime — injected by the caller
  * after a dynamic `import()` so the helper itself stays import-safe in
  * unit tests (which never touch the WASM bundle).
+ *
+ * The chain is modelled as nested return types rather than `this`-fluent
+ * — real Mesh returns `this` from every chainable call, but a `this`-typed
+ * mock complicates the existing vitest setup. The nested shape captures
+ * the exact methods we use in order and lets tests assert each call's
+ * args without redefining the whole builder.
+ *
+ * Sprint 6: the chain gains an optional `metadataValue(label, value)`
+ * step at the end so we can stamp CIP-20 (label 674) attribution onto
+ * every vote drep.tools assembles. Mesh accepts a plain JSON object at
+ * `metadataValue` and emits it under the label in the tx metadata map.
  */
 export interface MeshDeps {
   MeshTxBuilder: new (opts?: Record<string, unknown>) => {
@@ -149,6 +175,18 @@ export interface MeshDeps {
     ) => {
       changeAddress: (addr: string) => {
         selectUtxosFrom: (utxos: unknown[]) => {
+          /** CIP-20 transaction-message metadata (label 674). The real
+           *  Mesh API accepts `number | bigint | string` for the label
+           *  and any JSON object for the metadata value. We always pass
+           *  the literal number 674 and a `{ msg: string[] }` envelope
+           *  — see `shared/cip20.ts` for the chunking rules. */
+          metadataValue: (label: number, metadata: object) => {
+            complete: () => Promise<string>;
+          };
+          /** Kept for back-compat with callers that don't attach
+           *  metadata. Today the platform always attaches; this branch
+           *  exists so a future caller (or test) can build the tx
+           *  without CIP-20. */
           complete: () => Promise<string>;
         };
       };
@@ -160,6 +198,22 @@ export interface MeshDeps {
  * Build the unsigned CIP-1694 vote tx. Pure assembly — the helper does
  * NOT sign, submit, or touch DOM; the panel orchestrates the wallet
  * dance.
+ *
+ * # CIP-20 attribution
+ *
+ * Every drep.tools-assembled vote carries a CIP-20 transaction-message
+ * metadata entry under label 674. The default envelope is
+ * `{ msg: ["Voted via drep.tools", "drep-tools"] }` — a human-readable
+ * line plus a machine tag chain analysts can grep for. The label and
+ * envelope shape come from `shared/cip20.ts` (mirrored byte-identically
+ * into `lib/cip20.ts`).
+ *
+ * Callers can override or suppress attribution via the optional
+ * `attributionMetadata` input:
+ *   - omit / undefined → default drep.tools attribution attached.
+ *   - `null`            → no metadata attached (escape hatch for tests
+ *                         and any future caller that wants the bare tx).
+ *   - `Cip20Envelope`   → use the provided envelope as-is.
  */
 export async function buildUnsignedVoteTx(
   inputs: BuildVoteTxInputs,
@@ -180,10 +234,18 @@ export async function buildUnsignedVoteTx(
   const changeAddress = await inputs.wallet.getChangeAddress();
   const utxos = await inputs.wallet.getUtxos();
   const builder = new deps.MeshTxBuilder({});
-  const unsigned = await builder
+  const afterCoinSelect = builder
     .vote(voter, govActionId, votingProcedure)
     .changeAddress(changeAddress)
-    .selectUtxosFrom(utxos)
-    .complete();
+    .selectUtxosFrom(utxos);
+  // Sprint 6 — CIP-20 attribution. The platform always stamps; callers
+  // pass `attributionMetadata: null` to suppress.
+  const attribution =
+    inputs.attributionMetadata === null
+      ? null
+      : (inputs.attributionMetadata ?? buildDefaultDrepToolsAttribution());
+  const unsigned = attribution
+    ? await afterCoinSelect.metadataValue(CIP20_LABEL, attribution).complete()
+    : await afterCoinSelect.complete();
   return unsigned;
 }
