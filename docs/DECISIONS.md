@@ -333,3 +333,414 @@ disabled.
 
 See: `docs/TOPOLOGY.md` (runbook + "Migration history"), `infra/bin/app.ts`
 (`noCustomDomain`), `infra/lib/stage.ts` (`customDomainFor`).
+
+---
+
+## ADR-011: Adopt DRep Talk's identity subsystem (C-prime)
+
+**Status**: Accepted (2026-06-10, Sprint 0–1)
+
+**Context**: A comparative analysis between the in-house CIP-30 login in
+`backend/src/lib/auth.ts` and the upstream DRep Talk codebase
+(https://github.com/katomm/dreptalk.com, Apache-2.0) found DRep Talk's
+identity surface to be the more disciplined and more robust of the two:
+dependency-injected stores, structured `{ok, reason}` returns, fail-closed
+COSE verification, a tighter pubkey-vs-address binding, and a substantial
+test corpus including real wallet fixtures. With the platform's priorities
+being correctness and the most-robust login surface available, the
+question was not "do we improve our verifier" but "do we adopt the
+known-good one."
+
+**Decision**: Lift DRep Talk's `auth/*`, `crypto/*`, and
+`cardano/identity.ts` modules WHOLE into `backend/src/lib/identity/`,
+preserving the upstream module boundaries and dependency-injection
+shape. Stack adaptations (the seams):
+
+- **CBOR**: `cbor-x` instead of upstream `cborg`. `cborg` is ESM-only with
+  an exports map our backend's commonjs/node module resolution cannot
+  read; `cbor-x` is already a backend dep and `mapsAsObjects:false` gives
+  the JS `Map` shape DRep Talk's verifier expects.
+- **Ed25519**: Node `crypto` (`createPublicKey` + `verify` with an SPKI
+  prefix) instead of `@noble/curves`. Same ESM-only blocker.
+- **Blake2b**: existing `blake2b` dependency instead of `blakejs`. Same.
+- **Stores**: DynamoDB-backed `NonceStore` / `SessionStore` adapters
+  behind the upstream's KV/D1 interfaces.
+- **Koios**: the existing `lib/koios.ts` wrapped behind a thin
+  `KoiosAdapter` matching the upstream's resolver contracts.
+
+The port is kept as a self-contained subsystem; explicitly **do not
+dissolve into the legacy `backend/src/lib/auth.ts`** (the cohesion is
+the robustness we're adopting). The legacy CIP-30 login continues to
+run unchanged in parallel as the production surface; the ported code
+backs the new on-chain login (ADR-012) and is the verifier the legacy
+path cuts over to (ADR-016).
+
+**Consequences**:
+- A second auth implementation alongside the legacy one during the
+  parallel window. ADR-016 collapses the duplication by re-routing the
+  legacy `/auth/verify` through the same ported verifier.
+- Apache-2.0 attribution block added to `NOTICE` covering
+  `backend/src/lib/identity/*`, `backend/src/lib/dreps/*`, the
+  concentration / avatar handlers, and the matching frontend modules.
+- Backend test count rose from a baseline of 577 (snapshotted Sprint 0)
+  to 1034 today across the seven sprints plus the security-review fixes.
+  The 577-test governance baseline stayed untouched.
+- A `parity.test.ts` cross-implementation corpus pins the ported COSE
+  verifier against the legacy reference behavior wallet-fixture-by-
+  fixture, so a future refactor can't silently drift.
+
+See: `backend/src/lib/identity/` (the whole module tree),
+`backend/src/lib/identity/README.md` (provenance + adaptation seams),
+`backend/src/lib/identity/parity.test.ts` (DRep Talk parity corpus),
+`NOTICE` (Apache-2.0 attribution).
+
+---
+
+## ADR-012: Four-role on-chain login as an additive parallel surface
+
+**Status**: Accepted (2026-06-10, Sprint 2)
+
+**Context**: The legacy CIP-30 login authenticates a stake address —
+sufficient for governance discussion but insufficient for surfaces that
+need to recognise a caller's on-chain authority (DRep, SPO, CC member,
+Proposer). A naive approach would have extended the `UserRole` union
+with the four new values, but doing so would have churned every
+exhaustive `switch` over `UserRole` across handlers / middleware /
+frontend, with no functional benefit (the legacy role set and the
+on-chain set are semantically distinct — legacy roles are platform-
+internal grants; on-chain roles are cryptographic proofs of chain
+state).
+
+**Decision**: Add the four on-chain roles via a **parallel JWT claim**
+(`onChainRoles: ('drep' | 'spo' | 'cc' | 'proposer')[]`) and a **new
+endpoint family** under `/auth/onchain/*`, leaving the legacy
+`UserRole` union and the legacy `/auth/*` surface untouched. Endpoints:
+
+- `POST /auth/onchain/challenge` — issue a fresh nonce.
+- `POST /auth/onchain/verify` — verify a CIP-8 (DRep / Proposer) /
+  raw-Ed25519 (SPO Calidus, CC hot key) signature, resolve the on-chain
+  role via Koios, mint a JWT carrying `onChainRoles` + `jti` + `personId`.
+- `POST /auth/onchain/link/challenge` + `POST /auth/onchain/link/verify`
+  — add a second credential to an already-authenticated person (ADR-014).
+- `GET /auth/onchain/me` — aggregate response for the current person.
+- `GET /auth/onchain/profile` / `PUT /auth/onchain/profile` — read/edit
+  the canonical person profile (`onchain_users` row).
+
+The verifier mix per role:
+
+- **DRep / Proposer** — CIP-8 (COSE_Sign1) via the ported `verifyCip8`.
+- **SPO** — Calidus pubkey + raw Ed25519 signature, resolved against the
+  pool's currently-registered Calidus key via Koios (CIP-151).
+- **CC** — raw Ed25519 signature against a pasted CC hot key, resolved
+  against the active committee roster via Koios `/committee_info`.
+
+**Consequences**:
+- Zero churn on legacy handlers / middleware / frontend — every
+  `switch(role)` over `UserRole` stays exhaustive.
+- Pre-Sprint-1 JWTs continue to verify; the new claims are read
+  defensively (`onChainRoles: []` when absent).
+- New roles are resolved + gated entirely via Koios — no Blockfrost
+  dependency on the on-chain login path.
+- The on-chain login mints a `personId` (ADR-014); the parallel
+  surface means a wallet can legitimately log in TWICE (once
+  cookie-based legacy, once on-chain) and still resolve to one person
+  (completed by ADR-016).
+
+See: `backend/src/handlers/auth/onchainChallenge.ts`,
+`backend/src/handlers/auth/onchainVerify.ts`,
+`backend/src/lib/identity/auth/resolveRole.ts`,
+`backend/src/lib/identity/auth/koios.ts`,
+`backend/src/lib/auth.ts` (`issueJWT` / `verifyJWT` — `onChainRoles` +
+`personId` + `jti` reader/writer),
+`infra/lib/api-stack.ts` (route wiring under `/auth/onchain/*`).
+
+---
+
+## ADR-013: Dedicated `identity_sessions` table for per-session revocation
+
+**Status**: Accepted (2026-06-10, Sprint 2 + Decision #1)
+
+**Context**: The legacy `tokenVersion` revocation model on the `users`
+table is a single monotonic counter per wallet — perfect for "log me
+out everywhere" but useless for "log THIS device out, leave my other
+sessions intact." The four-role on-chain login needs the latter
+(a stolen tab on one machine should not invalidate the user's pinned
+governance dashboard on another). Sprint 1 implemented session
+revocation by reusing the `authNonces` table with `kind='session' |
+'session_index'` discriminators; review for the production cutover
+flagged three problems: a filtered Scan would have been required for
+per-identity enumeration, two separate rows (tombstone + index) had to
+be kept in sync via best-effort writes, and the session-store traffic
+would have cost-coupled to the high-churn challenge/mutation nonce
+traffic on the same table.
+
+**Decision**: Carve a dedicated `identity_sessions` table with one row
+per session.
+
+- **PK** = `sessionKey` (SHA-256(jti) hex — opaque, deterministic,
+  cheap to derive from the JWT).
+- **Attributes**: `identityId`, `onChainRoles[]`, `issuedAt`,
+  `expiresAt`, `revoked?`, `spoCalidusPubKeyHex?` (M5).
+- **GSI**: `identityId-issuedAt-index` (PK `identityId`, SK `issuedAt`,
+  projection ALL) so revoke-all and the cron enumeration are
+  single-partition Queries, not Scans.
+- **TTL** on `expiresAt` so rows are removed when the JWT can no longer
+  be presented.
+
+The public surface (`recordSessionForUser`, `isSessionRevoked`,
+`revokeSessionByJti`, `revokeAllSessionsForUser`,
+`listActiveSessionIndices`) is table-agnostic — a future migration
+moves the storage without changing any caller.
+
+The authorizer's `isSessionRevoked` fails **OPEN** on a store-read
+error (a thrown read resolves to `false`): the JWT itself is already
+cryptographically valid, an outage shouldn't lock every authenticated
+user out, and the M3 fix (2026-06-10) adds `ConsistentRead: true` so a
+just-landed revoke is visible on the next request.
+
+A daily **role-revalidation cron** (EventBridge `02:30 UTC`,
+`backend/src/sync/revalidate-onchain-roles.ts`) enumerates every active
+identity via the GSI and revokes sessions whose role no longer holds
+on-chain — closes the window where a deregistered DRep / retired SPO /
+revoked CC keeps an unexpired JWT for up to 30 days. Critical
+invariant: the cron uses a **strict Koios adapter** that propagates
+errors (so a Koios outage surfaces as `upstream-failure` and skips,
+NEVER as "role gone, revoke"); the verify-path adapter swallows them
+for clean 401s.
+
+**Consequences**:
+- `revokeAllSessionsForUser` and the cron enumeration are O(per-identity)
+  single-partition Queries.
+- IAM footprint of the cron Lambda tightens to the one table it
+  touches (previously `authNonces` RW; now `identitySessions` RW only).
+- Session storage cost is decoupled from the auth-nonces hot path.
+- Granular revoke (one session) and bulk revoke (everywhere) are
+  semantically distinct operations, not different rows in the same
+  table.
+
+See: `infra/lib/database-stack.ts` (`identitySessionsTable`),
+`backend/src/lib/sessionRevocation.ts` (the public surface),
+`backend/src/middleware/jwt-authorizer.ts` (the `isSessionRevoked`
+consult on every authenticated request),
+`backend/src/sync/revalidate-onchain-roles.ts` (the daily cron +
+strict adapter),
+`backend/src/handlers/auth/logout.ts` (granular + revoke-all paths),
+`docs/SECURITY_REVIEW_IDENTITY.md` (the deeper threat-model walk).
+
+---
+
+## ADR-014: Canonical person model + verified credential linking (no silent merge)
+
+**Status**: Accepted (2026-06-10, Sprint 2 + Decision #3)
+
+**Context**: A single human may legitimately authenticate to the
+platform via several on-chain credentials — a wallet stake address
+(legacy CIP-30), a DRep id (CIP-8), a pool's Calidus key (raw Ed25519),
+a CC hot key (raw Ed25519). Without a canonical-person layer, four
+logins from one person look like four unrelated identities: profile
+edits don't transfer, the moderation surface mis-counts, and the
+flagging primitive can be Sybil-gamed by one human producing four
+"distinct" flag votes.
+
+**Decision**: A two-table canonical-person model.
+
+- **`onchain_users`** — PK = `personId` (ULID, opaque, never reused).
+  Holds the editable profile (`displayName`, `bio`, `socialLinks`) +
+  bookkeeping (`createdAt`, `updatedAt`). Distinct from the legacy
+  `users` table — `users` is keyed by stake address and bound to the
+  CIP-30 session; folding the person model there would collide on the
+  PK for the wallet-stake case and break every legacy read site.
+
+- **`identity_links`** — PK = `identityKey` =
+  `${credentialType}:${credentialId}` (`drep:<drepId>` |
+  `pool:<poolId>` | `cc:<ccCred>` | `stake:<stakeAddr>`). The
+  namespace prefix is load-bearing — it makes the credential type
+  self-describing on read and prevents cross-type collisions. GSI
+  `personId-verifiedAt-index` (PK `personId`, SK `verifiedAt`,
+  projection ALL) enumerates every credential one person controls in
+  a single-partition Query.
+
+Login auto-provisions: first on-chain login for an unmapped credential
+mints a fresh `personId`, writes the `identity_links` row first (with
+a conditional Put on `attribute_not_exists` so a concurrent racer
+doesn't orphan a person row — S3 fix, 2026-06-10), then writes the
+`onchain_users` row. The link's `verifiedVia: 'login' | 'link'` is the
+audit breadcrumb for which path created it.
+
+**Safety contract — no silent merge.** An already-authenticated user
+linking another credential must produce a fresh cryptographic proof of
+control. A credential already mapped to a DIFFERENT `personId` than
+the caller's session person is **REJECTED** with a 409
+"credential already linked to another account" — never silently
+re-pointed. Account-merge is a future product decision; do not infer
+it from a signature.
+
+The link challenge's signed payload binds the caller's `personId`
+into the bytes the wallet signs (M1 fix, 2026-06-10) — format
+`dreptalk-link:<personId>:<stage>:<domain>:<nonce>:<issuedAt>` — so a
+victim cannot be socially engineered into signing a challenge that
+attaches their credential to the attacker's account. The link-verify
+nonce is consumed only on a fully successful pass (signature + bound-
+personId match), via `consumeNonceWithCheck`, so a forged signature
+doesn't DoS the legitimate caller.
+
+ADR-016 completes the reconciliation: the legacy CIP-30 login also
+provisions a person under `stake:<stakeAddr>`, so wallet + raw-key
+logins for the same human resolve to one `personId`.
+
+**Consequences**:
+- One person, many credentials — moderation, flagging, and profile
+  surfaces are unified at the person level.
+- Linking requires fresh proof of control on the new credential AND
+  binds the caller's identity into the signed bytes; neither sufficient
+  alone.
+- The `users` table is untouched; the legacy CIP-30 surface keeps its
+  existing read/write paths exactly.
+- `personId` rides the JWT as an optional claim; pre-Decision-3 tokens
+  omit it and downstream handlers fall back to resolving via the
+  on-chain credential.
+
+See: `infra/lib/database-stack.ts` (`onchainUsersTable`,
+`identityLinksTable`),
+`backend/src/lib/identityPerson.ts` (`resolveOrProvisionPerson` and
+the conditional-put-first order),
+`backend/src/handlers/auth/linkChallenge.ts` /
+`backend/src/handlers/auth/linkVerify.ts` (the bound-personId
+challenge + the same-person check + `consumeNonceWithCheck`),
+`backend/src/handlers/auth/onchainMe.ts` (per-person aggregation),
+`backend/src/handlers/auth/onchainProfileGet.ts` /
+`backend/src/handlers/auth/onchainProfileUpdate.ts`,
+`docs/SECURITY_REVIEW_IDENTITY.md` (M1 / S3 deep dive).
+
+---
+
+## ADR-015: Relax the strict COSE address-header to a credential fallback
+
+**Status**: Accepted (2026-06-10, Decision #4). Supersedes the strict-
+reject documented in `docs/SECURITY_REVIEW_IDENTITY.md` (`§ Strict
+address-header decision`).
+
+**Context**: CIP-8's protected header carries an optional `address`
+field that DRep Talk's upstream verifier required. Some older wallet
+builds (and a handful of currently-shipping ones) omit it. Sprint 3
+kept the strict reject and added an `IdentityCoseMissingAddressHeader`
+CloudWatch metric to quantify the affected wallet population before
+making a decision. After observation, the reject was found to be
+forcing user-visible failures on legitimate wallets without buying
+meaningful security — every protection the address header offers is
+ALSO enforced by the Ed25519 signature check that always runs first.
+
+**Decision**: Relax the address-header requirement to a **fallback**:
+when the protected header carries `address`, verify the signature AND
+cross-check the pubkey-derived credential against the address bytes
+(the existing bind step); when the header is absent, verify the
+signature and **derive the identity from the pubkey alone**, matching
+the legacy `verifyWalletSignature`'s behavior for the same case. The
+returned `addressBound: boolean` discriminates the two paths so
+downstream handlers can branch (and emit
+`METRIC_IDENTITY_PROPOSER_ADDRESS_UNBOUND` on the unbound proposer
+path — S4c, 2026-06-10).
+
+Safe because the COSE protected header is part of the signed
+`Sig_structure` — any tampering would invalidate the signature, which
+is always verified first. Relaxing the header requirement therefore
+cannot enable a forgery that the signature check would have caught.
+The `IdentityCoseMissingAddressHeader` metric stays in place so a
+sudden change in the affected-wallet population still surfaces.
+
+**Consequences**:
+- Legitimate wallets that omit the address header now log in
+  successfully via the on-chain login.
+- The legacy verifier's address-header handling and the ported
+  verifier's now match exactly — important for ADR-016, which routes
+  the legacy login through the ported code.
+- A metric still tracks the affected-wallet shape; the threat-model
+  walk in `docs/SECURITY_REVIEW_IDENTITY.md` records why a relaxed
+  header is signature-evident.
+
+See: `backend/src/lib/identity/auth/cose.ts` (the `addressBound`
+discriminator + the relaxed-header logic with the pubkey-fallback
+comment), `backend/src/handlers/auth/onchainVerify.ts` (the
+`addressBound === false` branch + the metric emit), `backend/src/lib/
+metrics.ts` (`IdentityCoseMissingAddressHeader`,
+`METRIC_IDENTITY_PROPOSER_ADDRESS_UNBOUND`),
+`docs/SECURITY_REVIEW_IDENTITY.md` (`§ Strict address-header
+decision + telemetry metric`).
+
+---
+
+## ADR-016: Cut the legacy CIP-30 login over to the ported verifier (parity-gated)
+
+**Status**: Accepted (2026-06-11, sibling PR #71)
+
+**Context**: With the ported `verifyCip8` running in production on the
+on-chain login surface, fixing-once-vs-twice became the question:
+maintain two CIP-8 verifiers (legacy `verifyWalletSignature` for
+`/auth/verify`, ported `verifyCip8` for `/auth/onchain/verify`), or
+collapse to one. The ported verifier is stricter, better-tested, and
+shares the COSE header relaxation (ADR-015) and the bound-pubkey →
+claimed-address contract with the legacy path. Keeping both means
+every security fix has to land in two places.
+
+**Decision**: Reroute `backend/src/handlers/auth/verify.ts` from
+`verifyWalletSignature` to the ported `verifyCip8`, with the legacy
+path's load-bearing **identity-binding guard re-asserted after**
+verification:
+
+1. **Pubkey → claimed-address binding** (the P0-1 impersonation guard):
+   the verified Ed25519 pubkey's blake2b-224 hash must match a
+   credential embedded in the claimed `walletAddress`. Mismatch /
+   script-credential / malformed address all reject. This is the
+   load-bearing legacy check; preserving it byte-for-byte is the
+   parity-gate's primary concern.
+2. **Protected-header cross-check** (when present): when the COSE
+   header carries an `address`, the verifier already enforces
+   pubkey ↔ header-address binding; the handler additionally
+   byte-compares it against the body-supplied `walletAddress`. When
+   absent (ADR-015), the handler skips this step and trusts the
+   pubkey-fallback — exactly matching legacy behavior.
+
+The legacy JWT then carries `personId` (Decision #3 reconciliation):
+after a successful legacy verify, `resolveOrProvisionPerson('stake',
+stakeAddr, 'login')` provisions or resolves a person for the wallet's
+stake credential, so a wallet login and the same human's on-chain
+login resolve to one `personId`. Best-effort — never blocks login on a
+write blip.
+
+**Parity gate.** Two layers, both required green before the cutover
+merges:
+
+1. **`auth.walletSignature.test.ts` kept GREEN, untouched.** This is
+   the legacy reference suite. We do NOT weaken it to make the new
+   path pass. If the new path fails any case the legacy code accepted
+   (or accepts any case it rejected), the cutover is wrong.
+2. **`verify.parity.test.ts`** — a cross-implementation corpus
+   asserting new-path == legacy-path on accept/reject AND on bound
+   identity, including the wrong-claimed-address case (the impersonation
+   guard), header-spoof, payload tamper, signature tamper, and
+   missing-header cases.
+
+`verifyWalletSignature` is **DEPRECATED**, not removed — two callers
+remain (`handlers/comments/create.ts`, `handlers/committee/_committee.ts`)
+that verify a mutation-nonce-signed message rather than the auth
+challenge; migrating those is a follow-up.
+
+**Consequences**:
+- One CIP-8 verifier across the platform. Future fixes (e.g. a tighter
+  COSE check) land in one place.
+- Wallets that succeed under the legacy path continue to succeed (the
+  parity gate is its proof).
+- Wallets that produce headers slightly tighter than legacy accepted
+  may now fail — the ported verifier is stricter on alg / kty / crv
+  encoding. The parity tests pin the practical behavior; a regression
+  would surface in the corpus.
+- The two `verifyWalletSignature` mutation-nonce callers stay on the
+  legacy code until a follow-up migration.
+
+See: `backend/src/handlers/auth/verify.ts` (the cutover + the re-
+asserted bindings), `backend/src/handlers/auth/verify.parity.test.ts`
+(the corpus), `backend/src/lib/auth.walletSignature.test.ts` (the
+legacy reference, kept green), `backend/src/lib/identity/auth/cose.ts`
+(`verifyCip8`), `backend/src/lib/auth.ts`
+(`verifyWalletSignature` — deprecated; the two remaining callers
+documented inline).
