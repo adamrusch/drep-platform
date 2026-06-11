@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronRight,
   ExternalLink,
+  Flag,
   MessageSquare,
   Lock,
   Pin,
@@ -17,10 +18,12 @@ import {
   useClubhousePosts,
   useCreateClubhouseComment,
   useDeleteClubhousePost,
+  useFlagClubhousePost,
   useVotePoll,
 } from '@/hooks/useClubhouse';
 import { useMe } from '@/hooks/useAuth';
-import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
+import { useAuthStore, useIsAuthenticated, useOnChainRoles } from '@/stores/authStore';
+import { useUiStore } from '@/stores/uiStore';
 import { formatWalletAddress, cn } from '@/lib/utils';
 import { useFormatters } from '@/hooks/useFormatters';
 import { get } from '@/lib/api';
@@ -290,8 +293,17 @@ function PostCard({
   const { formatRelativeTime } = useFormatters();
   const [commentBody, setCommentBody] = useState('');
   const [showComments, setShowComments] = useState(false);
+  // Sprint 4 — local "I just flagged this" state for the flag button.
+  // Persisted only for the lifetime of the row's mount.
+  const [hasFlaggedLocally, setHasFlaggedLocally] = useState(false);
   const createComment = useCreateClubhouseComment();
   const votePoll = useVotePoll();
+  // Sprint 4 — community flagging surface. The mutation only fires
+  // when the caller is authenticated AND holds an on-chain role; the
+  // backend enforces both independently.
+  const flagPost = useFlagClubhousePost();
+  const onChainRoles = useOnChainRoles();
+  const { addToast } = useUiStore();
 
   // P0-3 de-inline migration (2026-05-28): the post listing handler
   // now projects OUT the inline `comments[]` array — we only get the
@@ -324,6 +336,13 @@ function PostCard({
   // affordance.
   const canDelete =
     !isAutoPost && (post.authorWallet === currentWallet || isLeadDRep);
+  // Sprint 4 — only an authenticated on-chain-verified writer who is
+  // NOT the author may flag. Auto-posts are flagged too (the system
+  // wallet `_system:governance_feed` can never be the caller's
+  // wallet, so the self-flag gate naturally allows on-chain writers
+  // to flag a problematic auto-post if one ever shipped).
+  const isOwnPost = post.authorWallet === currentWallet;
+  const canFlag = onChainRoles.length > 0 && currentWallet !== null && !isOwnPost;
   const myVote = currentWallet ? post.pollVotes?.[currentWallet] : undefined;
   const pollClosed =
     post.pollClosesAt && Date.parse(post.pollClosesAt) < Date.now();
@@ -361,6 +380,18 @@ function PostCard({
   const handleVote = (i: number): void => {
     if (pollClosed) return;
     votePoll.mutate({ drepId, postId: post.postId, optionIndex: i });
+  };
+
+  const handleFlag = async (): Promise<void> => {
+    if (!canFlag) return;
+    try {
+      await flagPost.mutateAsync({ drepId, postId: post.postId });
+      setHasFlaggedLocally(true);
+      addToast({ title: t('clubhouse.flagSubmitted'), variant: 'default' });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : t('clubhouse.flagFailed');
+      addToast({ title: t('clubhouse.flagFailed'), description: msg, variant: 'error' });
+    }
   };
 
   return (
@@ -437,6 +468,35 @@ function PostCard({
           <span className="text-xs text-[var(--text-tertiary)]">
             {formatRelativeTime(post.createdAt)}
           </span>
+          {/* Sprint 4 — community flag affordance. Renders only when
+              the caller is on-chain-verified AND is NOT the post
+              author. The backend independently enforces both gates;
+              the local `hasFlaggedLocally` flag gives immediate
+              feedback during the cache-invalidation roundtrip. */}
+          {canFlag && (
+            <button
+              type="button"
+              onClick={() => void handleFlag()}
+              disabled={flagPost.isPending || hasFlaggedLocally}
+              data-testid="clubhouse-post-flag-button"
+              title={
+                hasFlaggedLocally
+                  ? t('clubhouse.alreadyFlaggedTooltip')
+                  : t('clubhouse.flagTooltip')
+              }
+              className={cn(
+                'inline-flex items-center gap-1 text-xs',
+                'text-[var(--text-tertiary)] hover:text-[var(--warning)]',
+                'transition-colors disabled:opacity-50 disabled:cursor-not-allowed',
+                hasFlaggedLocally && 'text-[var(--warning)]',
+              )}
+            >
+              <Flag size={11} strokeWidth={2} />
+              {hasFlaggedLocally
+                ? t('clubhouse.flagged')
+                : t('clubhouse.flag')}
+            </button>
+          )}
           {canDelete && (
             <button
               onClick={onDelete}
@@ -447,6 +507,22 @@ function PostCard({
           )}
         </div>
       </header>
+
+      {/* Sprint 4 — moderation banner. Normal users never see hidden
+          posts (the backend filters them); the banner surfaces only
+          for `platform_admin` so they can spot what the community
+          shield has hidden and decide whether to reverse it. */}
+      {post.hidden === true && (
+        <div
+          className="inline-flex items-center gap-1.5 px-2 py-1 rounded-token-sm bg-[var(--warning-soft)] text-[var(--warning)] text-[11px] font-semibold uppercase tracking-wider w-fit"
+          data-testid="clubhouse-post-hidden-banner"
+        >
+          <Flag size={11} strokeWidth={2.4} />
+          {t('clubhouse.hiddenByCommunity', {
+            count: post.flagCount ?? 0,
+          })}
+        </div>
+      )}
 
       {/* GA link — only on auto-posts. Lives above the title so the
           user sees what action this is referring to before the

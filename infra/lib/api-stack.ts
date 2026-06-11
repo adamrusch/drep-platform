@@ -140,6 +140,13 @@ export class ApiStack extends cdk.Stack {
       databaseStack.committeeVotesTable,
       databaseStack.committeeMembershipTable,
       databaseStack.platformStateTable,
+      // Sprint 4 — community flagging primitive. Both the flag-write
+      // path (`comments/flag.ts` / `clubhouse/flagPost.ts`) and any
+      // future moderation surface need RW access to the per-flagger
+      // evidence rows. Same broad RW pattern as the sibling tables in
+      // this loop — read paths today are scoped by handler.
+      databaseStack.commentFlagsTable,
+      databaseStack.clubhousePostFlagsTable,
     ]) {
       table.grantReadWriteData(lambdaRole);
     }
@@ -273,6 +280,8 @@ export class ApiStack extends cdk.Stack {
     const commentsDeleteFn = fn('CommentsDeleteFn', 'handlers/comments/delete.ts');
     const commentsVoteFn = fn('CommentsVoteFn', 'handlers/comments/vote.ts');
     const commentsMyVotesFn = fn('CommentsMyVotesFn', 'handlers/comments/myVotes.ts');
+    // Sprint 4 — community flagging for governance-action comments.
+    const commentsFlagFn = fn('CommentsFlagFn', 'handlers/comments/flag.ts');
 
     // ---- Clubhouse handlers ----
     const clubhouseListFn = fn('ClubhouseListFn', 'handlers/clubhouse/list.ts');
@@ -289,6 +298,8 @@ export class ApiStack extends cdk.Stack {
     );
     const clubhouseDeletePostFn = fn('ClubhouseDeletePostFn', 'handlers/clubhouse/deletePost.ts');
     const clubhouseVotePollFn = fn('ClubhouseVotePollFn', 'handlers/clubhouse/votePoll.ts');
+    // Sprint 4 — community flagging for clubhouse posts.
+    const clubhouseFlagPostFn = fn('ClubhouseFlagPostFn', 'handlers/clubhouse/flagPost.ts');
     // Right-rail data — public reads, separate Lambdas so their in-memory
     // caches don't fight for warm-container space with the write path.
     // See backend/src/handlers/clubhouse/_rail.ts for the cache + ranking
@@ -550,6 +561,19 @@ export class ApiStack extends cdk.Stack {
       'CommentsMyVotes',
       true,
     );
+    // Sprint 4 — community flag a comment. Auth-only; the handler
+    // ALSO requires the caller to hold at least one on-chain role
+    // (`drep` / `spo` / `cc` / `proposer`) via `requireOnChainRole`.
+    // Three distinct on-chain-verified flaggers hide the comment from
+    // normal users; the per-flagger row + atomic-ADD counter mutation
+    // happen in `handlers/comments/flag.ts`.
+    addRoute(
+      apigwv2.HttpMethod.POST,
+      '/comments/{actionId}/{commentId}/flag',
+      commentsFlagFn,
+      'CommentsFlag',
+      true,
+    );
 
     // ---- Clubhouse routes ----
     addRoute(apigwv2.HttpMethod.GET, '/clubhouse/{drepId}', clubhouseListFn, 'ClubhouseList');
@@ -590,6 +614,18 @@ export class ApiStack extends cdk.Stack {
       '/clubhouse/{drepId}/post/{postId}/vote',
       clubhouseVotePollFn,
       'ClubhouseVotePoll',
+      true,
+    );
+    // Sprint 4 — community flag a clubhouse post. Auth-only; the
+    // handler ALSO requires the caller to hold at least one on-chain
+    // role (`drep` / `spo` / `cc` / `proposer`). Same threshold (3
+    // distinct flaggers) hides the post from normal users. See
+    // `handlers/clubhouse/flagPost.ts`.
+    addRoute(
+      apigwv2.HttpMethod.POST,
+      '/clubhouse/{drepId}/post/{postId}/flag',
+      clubhouseFlagPostFn,
+      'ClubhouseFlagPost',
       true,
     );
     // Right-rail data — public reads, no auth gate. These power the

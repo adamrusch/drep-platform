@@ -569,6 +569,16 @@ export interface Comment {
   supportLovelace?: string;
   upvoteCount?: number;
   downvoteCount?: number;
+  /** Sprint 4 — community-flag counter. Distinct on-chain-verified
+   *  flaggers tracked by `comment_flags`; the backend reaches the
+   *  hide threshold at 3. Optional for back-compat with rows written
+   *  before the field landed. */
+  flagCount?: number;
+  /** Sprint 4 — true when the row reached the hide threshold. Normal
+   *  users never see hidden rows on the wire (the backend filters
+   *  them); `platform_admin`s see them with this marker so the
+   *  moderation UI can render a "FLAGGED — HIDDEN" treatment. */
+  hidden?: boolean;
 }
 
 /** Map of `commentId → user's vote` returned by
@@ -641,6 +651,13 @@ export interface ClubhousePost {
    *  by the right-rail's "active in last 24h" filter. Absent on posts
    *  with zero comments. */
   lastReplyAt?: string;
+  /** Sprint 4 — community-flag counter on the post row. See the
+   *  `Comment.flagCount` doc for the threshold semantic. */
+  flagCount?: number;
+  /** Sprint 4 — true when the post reached the hide threshold. Filtered
+   *  out by the backend for normal users; surfaced to `platform_admin`
+   *  for moderation. */
+  hidden?: boolean;
 }
 
 export interface ClubhouseComment {

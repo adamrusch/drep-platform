@@ -114,3 +114,46 @@ export function useVoteComment() {
     },
   });
 }
+
+interface FlagCommentParams {
+  actionId: string;
+  commentId: string;
+}
+
+/** Backend response from `POST /comments/{actionId}/{commentId}/flag`.
+ *  `outcome === 'already_flagged'` means the same wallet flagged this
+ *  comment before; the FE treats both outcomes identically (the affordance
+ *  switches to a "Flagged" state on first click; subsequent clicks are
+ *  no-ops). */
+export interface FlagCommentResponse {
+  outcome: 'flagged' | 'already_flagged';
+  commentId: string;
+  flagCount?: number;
+  hidden?: boolean;
+}
+
+/**
+ * Sprint 4 — community flag a comment.
+ *
+ * Requires the caller to be authenticated AND to hold at least one
+ * on-chain role (`drep` / `spo` / `cc` / `proposer`). The FE renders
+ * the affordance only for callers with `onChainRoles.length > 0`; this
+ * hook does not enforce that gate itself (the backend rejects with 403
+ * for callers without an on-chain role). On success we invalidate the
+ * comment list so the per-row `flagCount` / `hidden` propagate.
+ */
+export function useFlagComment() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ actionId, commentId }: FlagCommentParams) =>
+      post<FlagCommentResponse>(
+        `/comments/${encodeURIComponent(actionId)}/${encodeURIComponent(commentId)}/flag`,
+        {},
+      ),
+    onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({
+        queryKey: QUERY_KEYS.list(variables.actionId),
+      });
+    },
+  });
+}

@@ -11,6 +11,7 @@ import {
 import { lookupRecognition, lookupStake } from '../../lib/recognition';
 import { writeAuditEvent } from '../../lib/audit';
 import { upsertCommentVoter } from '../../lib/comment-voters';
+import { sanitizeUserText, SanitizationError } from '../../lib/sanitizeContent';
 import { created, badRequest, unauthorized, notFound, handleError } from '../_response';
 
 interface CreateCommentBody {
@@ -52,6 +53,25 @@ export const handler = async (
     }
     if (body.body.length > 10_000) {
       return badRequest('body exceeds maximum length of 10,000 characters');
+    }
+
+    // Sprint 4 — server-side content sanitization (defense in depth).
+    // Strips/escapes HTML injection vectors from the body BEFORE it
+    // lands on the comment row. The client renders markdown via
+    // `Markdown.tsx` (react-markdown + rehype-sanitize) which is the
+    // first line of defense; this is the second line — every future
+    // render path (SSR, email digest, third-party scrape) gets safe
+    // bytes off disk. See `lib/sanitizeContent.ts` for the threat
+    // model and the corpus test for the locked vector list.
+    let sanitizedBody: string;
+    try {
+      sanitizedBody = sanitizeUserText(body.body, {
+        maxLength: 10_000,
+        fieldLabel: 'body',
+      });
+    } catch (err) {
+      if (err instanceof SanitizationError) return badRequest(err.message);
+      throw err;
     }
     if (typeof body.isPublic !== 'boolean') {
       return badRequest('isPublic must be a boolean');
@@ -147,7 +167,9 @@ export const handler = async (
       actionId: decodedActionId,
       commentId,
       walletAddress: authCtx.walletAddress,
-      body: body.body.trim(),
+      // Sanitized + trimmed body. Sanitisation runs above; this trim
+      // matches the legacy whitespace behaviour.
+      body: sanitizedBody.trim(),
       isPublic: body.isPublic,
       isDRep,
       createdAt: now,

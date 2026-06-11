@@ -26,6 +26,9 @@ export class DatabaseStack extends cdk.Stack {
   public readonly committeeVotesTable: dynamodb.Table;
   public readonly committeeMembershipTable: dynamodb.Table;
   public readonly platformStateTable: dynamodb.Table;
+  // ---- Sprint 4: community flagging primitive ----
+  public readonly commentFlagsTable: dynamodb.Table;
+  public readonly clubhousePostFlagsTable: dynamodb.Table;
 
   private readonly tablePrefix: string;
 
@@ -655,6 +658,79 @@ export class DatabaseStack extends cdk.Stack {
       removalPolicy: isPersistent(props.stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
+    // ---- comment_flags (Sprint 4) ----
+    // Community-flagging primitive for governance-action comments.
+    //
+    // **Threat model:** an on-chain-verified writer (a wallet that has
+    // proven `drep` / `spo` / `cc` / `proposer` via the Sprint 1
+    // `/auth/onchain/verify` flow) raises a flag against a comment.
+    // Three DISTINCT such flags hide the comment from normal users.
+    // `platform_admin`s still see the row (with a `hidden: true`
+    // marker) so they can moderate. The per-flagger uniqueness
+    // prevents one wallet from racking up the count alone.
+    //
+    // **Shape:**
+    //   PK = `commentId`  — same ULID used as the SK on the comments
+    //     table; co-locates every flag for one comment under one
+    //     partition, so a future audit/moderation surface can
+    //     `Query(commentId)` to enumerate the flaggers in one round-trip.
+    //   SK = `flaggerId`  — the flagger's bech32 stake address.
+    //
+    // **Counter integrity:** the matching `flagCount` counter on the
+    // parent `comments` row is mutated via a denormalised atomic ADD
+    // gated by `putItemIfAbsent` on this table — see
+    // `handlers/comments/flag.ts`. Only a FRESH insert (outcome
+    // `'written'`) bumps the counter. A duplicate flag (outcome
+    // `'skipped'`) leaves the counter alone, so the count tracks
+    // distinct-flagger headcount even under retries.
+    //
+    // **Capacity:** modest. ~50 flags per high-traffic comment × small
+    // number of high-traffic comments = pennies. PAY_PER_REQUEST. PITR
+    // ON because flag rows are evidence — accidental table truncation
+    // should be recoverable.
+    //
+    // No GSIs at launch — every access pattern is `GetItem(commentId,
+    // flaggerId)` (idempotent insert) or `Query(commentId)` (audit).
+    // A future "wallets that have flagged the most content" leaderboard
+    // would need a GSI on `flaggerId`; that's out-of-scope for Sprint 4.
+    this.commentFlagsTable = new dynamodb.Table(this, 'CommentFlagsTable', {
+      tableName: `${this.tablePrefix}comment_flags`,
+      partitionKey: { name: 'commentId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'flaggerId', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: isPersistent(props.stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
+    // ---- clubhouse_post_flags (Sprint 4) ----
+    // Same primitive as `comment_flags`, but scoped to clubhouse posts.
+    //
+    // **PK shape (`postKey`):** intentionally MATCHES the partition-key
+    // format already used by the `clubhouse_comments` table —
+    // `${drepId}#${postId}`. The helper `clubhouseCommentPostKey` in
+    // `lib/types.ts` is reused for compose; see `handlers/clubhouse/
+    // flagPost.ts`. Reusing the format means a future moderation UI
+    // can correlate flags on a post with flags on its threaded
+    // comments without learning a second key shape.
+    //
+    // SK = `flaggerId` — bech32 stake address of the flagging wallet,
+    // identical to the comment-flags semantics.
+    //
+    // **Counter integrity:** `clubhouse_posts.flagCount` atomic-ADDed
+    // only when the per-flagger row is freshly inserted; conditional
+    // `hidden` set when the count crosses the threshold. See
+    // `handlers/clubhouse/flagPost.ts`.
+    //
+    // **Capacity / PITR:** same rationale as `comment_flags` above.
+    this.clubhousePostFlagsTable = new dynamodb.Table(this, 'ClubhousePostFlagsTable', {
+      tableName: `${this.tablePrefix}clubhouse_post_flags`,
+      partitionKey: { name: 'postKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'flaggerId', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: isPersistent(props.stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
     // ---- Outputs ----
     new cdk.CfnOutput(this, 'UsersTableName', { value: this.usersTable.tableName, exportName: `${props.stage}-UsersTableName` });
     new cdk.CfnOutput(this, 'DRepCommitteesTableName', { value: this.drepCommitteesTable.tableName, exportName: `${props.stage}-DRepCommitteesTableName` });
@@ -673,5 +749,7 @@ export class DatabaseStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'CommitteeVotesTableName', { value: this.committeeVotesTable.tableName, exportName: `${props.stage}-CommitteeVotesTableName` });
     new cdk.CfnOutput(this, 'CommitteeMembershipTableName', { value: this.committeeMembershipTable.tableName, exportName: `${props.stage}-CommitteeMembershipTableName` });
     new cdk.CfnOutput(this, 'PlatformStateTableName', { value: this.platformStateTable.tableName, exportName: `${props.stage}-PlatformStateTableName` });
+    new cdk.CfnOutput(this, 'CommentFlagsTableName', { value: this.commentFlagsTable.tableName, exportName: `${props.stage}-CommentFlagsTableName` });
+    new cdk.CfnOutput(this, 'ClubhousePostFlagsTableName', { value: this.clubhousePostFlagsTable.tableName, exportName: `${props.stage}-ClubhousePostFlagsTableName` });
   }
 }

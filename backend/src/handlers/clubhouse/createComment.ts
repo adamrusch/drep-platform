@@ -15,6 +15,7 @@ import {
 import { extractAuthContext } from '../../middleware/role-guard';
 import { writeAuditEvent } from '../../lib/audit';
 import { resolveIdentity } from '../../lib/identity';
+import { sanitizeUserText, SanitizationError } from '../../lib/sanitizeContent';
 import { resolveClubhouseMembership } from './_membership';
 import { ok, badRequest, forbidden, notFound, serviceUnavailable, handleError } from '../_response';
 
@@ -113,6 +114,20 @@ export const handler = async (
     }
     if (reqBody.parentCommentId !== undefined && typeof reqBody.parentCommentId !== 'string') {
       return badRequest('parentCommentId must be a string when provided');
+    }
+
+    // Sprint 4 — server-side content sanitization (defense in depth).
+    // See `lib/sanitizeContent.ts` for the threat model. Applies the
+    // same XSS-corpus-tested filter that `comments/create.ts` uses.
+    let sanitizedBody: string;
+    try {
+      sanitizedBody = sanitizeUserText(reqBody.body, {
+        maxLength: 5_000,
+        fieldLabel: 'body',
+      });
+    } catch (err) {
+      if (err instanceof SanitizationError) return badRequest(err.message);
+      throw err;
     }
 
     const drepId = decodeURIComponent(drepIdRaw);
@@ -232,7 +247,7 @@ export const handler = async (
       postId,
       authorWallet: authCtx.walletAddress,
       ...(authorDisplayName ? { authorDisplayName } : {}),
-      body: reqBody.body.trim(),
+      body: sanitizedBody.trim(),
       createdAt: now,
       depth: newDepth,
       ...(reqBody.parentCommentId ? { parentCommentId: reqBody.parentCommentId } : {}),
@@ -330,7 +345,7 @@ export const handler = async (
     const inlineComment: ClubhouseCommentItem = {
       commentId,
       authorWallet: authCtx.walletAddress,
-      body: reqBody.body.trim(),
+      body: sanitizedBody.trim(),
       createdAt: now,
       ...(reqBody.parentCommentId ? { parentCommentId: reqBody.parentCommentId } : {}),
     };
