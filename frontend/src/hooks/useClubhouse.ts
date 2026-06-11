@@ -128,6 +128,46 @@ export function useDeleteClubhousePost() {
   });
 }
 
+interface FlagClubhousePostParams {
+  drepId: string;
+  postId: string;
+}
+
+/** Backend response from `POST /clubhouse/{drepId}/post/{postId}/flag`.
+ *  Matches `FlagCommentResponse` in `useComments.ts`. */
+export interface FlagClubhousePostResponse {
+  outcome: 'flagged' | 'already_flagged';
+  postId: string;
+  flagCount?: number;
+  hidden?: boolean;
+}
+
+/**
+ * Sprint 4 — community flag a clubhouse post.
+ *
+ * Requires the caller to be authenticated AND to hold at least one
+ * on-chain role. The FE renders the affordance only for callers with
+ * `onChainRoles.length > 0`; this hook does not enforce that gate
+ * itself (the backend rejects with 403). On success we invalidate the
+ * clubhouse post list so the per-row `flagCount` / `hidden`
+ * propagate.
+ */
+export function useFlagClubhousePost() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ drepId, postId }: FlagClubhousePostParams) =>
+      post<FlagClubhousePostResponse>(
+        `/clubhouse/${encodeURIComponent(drepId)}/post/${encodeURIComponent(postId)}/flag`,
+        {},
+      ),
+    onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({
+        queryKey: QUERY_KEYS.posts(variables.drepId),
+      });
+    },
+  });
+}
+
 interface VotePollParams {
   drepId: string;
   postId: string;

@@ -152,6 +152,21 @@ export const tableNames = {
   committeeMembership: `${TABLE_PREFIX}committee_membership`,
   /** Platform-wide flags. PK=`stateKey` (today: 'SAFETY_MODE'). */
   platformState: `${TABLE_PREFIX}platform_state`,
+  /** Sprint 4 — community flagging primitive for governance-action
+   *  comments. PK=`commentId` (ULID), SK=`flaggerId` (the flagger's
+   *  on-chain identity / stake address). One row per (comment, flagger);
+   *  duplicate-flag attempts are idempotent at the schema layer via
+   *  `putItemIfAbsent`. The matching denormalised counter on the
+   *  comment row (`flagCount`) is atomically `ADD`-bumped only on a
+   *  fresh insert. See `handlers/comments/flag.ts`. */
+  commentFlags: `${TABLE_PREFIX}comment_flags`,
+  /** Sprint 4 — community flagging primitive for clubhouse posts.
+   *  PK=`postKey` (= `${drepId}#${postId}`, matching the de-inlined
+   *  `clubhouse_comments` partition format), SK=`flaggerId`. Same
+   *  semantics as `commentFlags` — atomic `ADD` of `flagCount` on the
+   *  parent post row only fires on a fresh insert. See
+   *  `handlers/clubhouse/flagPost.ts`. */
+  clubhousePostFlags: `${TABLE_PREFIX}clubhouse_post_flags`,
 } as const;
 
 export type TableName = keyof typeof tableNames;

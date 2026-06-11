@@ -1181,6 +1181,48 @@ export interface CommentItem {
   upvoteCount?: number;
   /** Headcount of active downvotes. */
   downvoteCount?: number;
+  /** Sprint 4 — community-flagging counter. Atomically `ADD`ed when a
+   *  fresh per-flagger row is inserted in `comment_flags`. Optional for
+   *  backwards compat with rows written before the field landed —
+   *  treat absence as zero. */
+  flagCount?: number;
+  /** Sprint 4 — true when `flagCount` reached the hide threshold
+   *  (`HIDE_THRESHOLD` in `handlers/comments/flag.ts`). Set via a
+   *  conditional `SET hidden = :true` in the same atomic update that
+   *  bumps the counter. Hidden rows are excluded from list responses
+   *  for normal users; `platform_admin`s see them with a
+   *  `hidden: true` marker so they can moderate. Absent / `false`
+   *  means visible. */
+  hidden?: boolean;
+  [key: string]: unknown;
+}
+
+/**
+ * One row of `comment_flags` (Sprint 4) — PK=`commentId`, SK=`flaggerId`.
+ *
+ * The minimal evidence row backing the per-comment `flagCount` counter
+ * on the parent comment. One row per (comment, flagger) — the flag
+ * handler uses `putItemIfAbsent` so duplicate-flag attempts from the
+ * same wallet are idempotent at the schema layer.
+ *
+ * `role` carries the on-chain role the flagger proved at the time the
+ * flag was raised (`'drep' | 'spo' | 'cc' | 'proposer'`). It's stored
+ * for the audit trail — a future moderation surface can reconstruct
+ * "who flagged this and by what authority." NOT consumed by the count
+ * math: any one of the four on-chain roles counts equally toward the
+ * hide threshold.
+ */
+export interface CommentFlagItem {
+  /** PK — the ULID of the comment being flagged. */
+  commentId: string;
+  /** SK — the flagger's bech32 stake address. Combined with `commentId`
+   *  this is the per-(comment, flagger) uniqueness key. */
+  flaggerId: string;
+  /** The on-chain role the flagger had proved at the time of the flag.
+   *  See `OnChainRole` for the four values. */
+  role: OnChainRole;
+  /** ISO-8601 timestamp the flag was raised. */
+  createdAt: string;
   [key: string]: unknown;
 }
 
@@ -1370,6 +1412,40 @@ export interface ClubhousePostItem {
    *  filter without scanning the comment set. Absent on posts with zero
    *  comments. */
   lastReplyAt?: string;
+  /** Sprint 4 — community-flagging counter. Atomically `ADD`ed when a
+   *  fresh per-flagger row is inserted in `clubhouse_post_flags`.
+   *  Optional for backwards compat with rows written before the field
+   *  landed — treat absence as zero. */
+  flagCount?: number;
+  /** Sprint 4 — true when `flagCount` reached the hide threshold. Set
+   *  via a conditional `SET hidden = :true` in the same atomic update
+   *  that bumps the counter. Hidden posts are excluded from list
+   *  responses for normal users; `platform_admin`s see them with a
+   *  `hidden: true` marker for moderation. Absent / `false` means
+   *  visible. */
+  hidden?: boolean;
+  [key: string]: unknown;
+}
+
+/**
+ * One row of `clubhouse_post_flags` (Sprint 4) — PK=`postKey`,
+ * SK=`flaggerId`.
+ *
+ * Same shape and semantics as `CommentFlagItem` but scoped to clubhouse
+ * posts. The PK format matches `clubhouseCommentPostKey(drepId, postId)`
+ * — see `lib/types.ts` and the table-stack rationale for why it
+ * mirrors the de-inlined-comments partition format.
+ */
+export interface ClubhousePostFlagItem {
+  /** PK — `${drepId}#${postId}`, composed via
+   *  `clubhouseCommentPostKey(drepId, postId)`. */
+  postKey: string;
+  /** SK — the flagger's bech32 stake address. */
+  flaggerId: string;
+  /** The on-chain role the flagger had proved at the time of the flag. */
+  role: OnChainRole;
+  /** ISO-8601 timestamp the flag was raised. */
+  createdAt: string;
   [key: string]: unknown;
 }
 

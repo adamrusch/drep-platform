@@ -268,7 +268,15 @@
       "notDelegated": "まだDRepに委任していません。ディレクトリを見て委任先を見つけ、そのクラブハウスに参加しましょう。",
       "guest": "DRepに委任するウォレットを接続して、限定クラブハウスに参加してください。",
       "browseDReps": "DRepを見る"
-    }
+    },
+    "flag": "通報",
+    "flagged": "通報済み",
+    "flagTooltip": "この投稿をコミュニティレビューのために通報",
+    "alreadyFlaggedTooltip": "この投稿は既に通報済みです",
+    "flagSubmitted": "通報を送信しました",
+    "flagFailed": "通報に失敗しました",
+    "hiddenByCommunity_one": "コミュニティにより非表示 — {{count}}件の通報",
+    "hiddenByCommunity_other": "コミュニティにより非表示 — {{count}}件の通報"
   },
   "composer": {
     "kind": {
@@ -1016,7 +1024,15 @@
     "error": "エラー",
     "replyPosted": "返信を投稿しました",
     "commentPosted": "コメントを投稿しました",
-    "signatureNote": "投稿には新しいウォレット署名が必要です。ウォレットが一度限りのメッセージへの署名を求めます — これに手数料はかからず、トランザクションはブロードキャストされません。"
+    "signatureNote": "投稿には新しいウォレット署名が必要です。ウォレットが一度限りのメッセージへの署名を求めます — これに手数料はかからず、トランザクションはブロードキャストされません。",
+    "flag": "通報",
+    "flagged": "通報済み",
+    "flagTooltip": "このコメントをコミュニティレビューのために通報",
+    "alreadyFlaggedTooltip": "このコメントは既に通報済みです",
+    "flagSubmitted": "通報を送信しました",
+    "flagFailed": "通報に失敗しました",
+    "hiddenByCommunity_one": "コミュニティにより非表示 — {{count}}件の通報",
+    "hiddenByCommunity_other": "コミュニティにより非表示 — {{count}}件の通報"
   },
   "castVote": {
     "optionSupportLabel": "賛成",
