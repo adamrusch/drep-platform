@@ -22,6 +22,8 @@ export class DatabaseStack extends cdk.Stack {
   public readonly ccMembersTable: dynamodb.Table;
   public readonly auditLogTable: dynamodb.Table;
   public readonly authNoncesTable: dynamodb.Table;
+  // ---- Decision #1 (2026-06-10): dedicated per-session revocation store ----
+  public readonly identitySessionsTable: dynamodb.Table;
   // ---- Phase 2: committee voting ----
   public readonly committeeVotesTable: dynamodb.Table;
   public readonly committeeMembershipTable: dynamodb.Table;
@@ -586,6 +588,81 @@ export class DatabaseStack extends cdk.Stack {
       removalPolicy: isPersistent(props.stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
+    // ---- identity_sessions (Decision #1, 2026-06-10) ----
+    //
+    // Per-session revocation store for the on-chain login JWTs (DRep /
+    // SPO / CC / Proposer). Sprint 1 reused `authNonces` with a `kind`
+    // discriminator to defer infra changes; Decision #1 splits sessions
+    // off into a purpose-built table for two correctness wins and one
+    // perf win.
+    //
+    // **Why a dedicated table:**
+    //   1. A per-identity GSI makes `revokeAllSessionsForUser` and the
+    //      daily role-revalidation cron's enumeration into single-
+    //      partition Queries — no more filtered Scan of a shared
+    //      multi-purpose table.
+    //   2. One row per session (instead of separate tombstone +
+    //      session-index rows kept in sync via best-effort writes)
+    //      removes a race where a concurrent login could lose a hash
+    //      and leave a session out of the revoke-all set.
+    //   3. Decouples session-store cost from the high-churn
+    //      auth-nonces traffic (challenges/mutations get burned within
+    //      minutes) so a future migration of either subsystem moves
+    //      independently.
+    //
+    // **Shape:** see `lib/sessionRevocation.ts` for the full row spec.
+    //   PK = `sessionKey` (STRING) = SHA-256(jti) hex.
+    //   Attributes: `identityId`, `onChainRoles[]`, `issuedAt`,
+    //               `expiresAt`, `revoked?`.
+    //   TTL: `expiresAt` (NUMBER, epoch seconds).
+    //   GSI: `identityId-issuedAt-index`
+    //        PK=`identityId`, SK=`issuedAt`, projection ALL so the cron
+    //        + revoke-all path can read the full row in one Query
+    //        without a second GetItem per session.
+    //
+    // **Capacity:** modest. At steady state, one row per active on-chain
+    // session, expiring at the 30-day JWT max. Even a hypothetical
+    // 10k-DAU surface stays under ~300k rows total. PAY_PER_REQUEST keeps
+    // ops simple; the GSI is single-identity-partition so PPR's
+    // adaptive-capacity behaviour is well-suited.
+    //
+    // **PITR ON / RETAIN on persistent stages** — session rows aren't
+    // long-lived BUT a botched migration / accidental table truncation
+    // would lock out every active on-chain session until a fresh login,
+    // which we'd rather avoid. Consistent with the sibling auth tables.
+    //
+    // **Deploy order:** create the table FIRST (CDK DatabaseStack
+    // deploy), THEN ship the backend code that reads from it. The
+    // backend's `tableNames.identitySessions` is a string that resolves
+    // at module-load — if the table doesn't yet exist, the first
+    // authorizer / verify-handler invocation will get a
+    // ResourceNotFoundException. The `isSessionRevoked` fail-OPEN
+    // contract means the worst case during the brief deploy window is
+    // "per-session revocation is a no-op" (legacy `tokenVersion` is
+    // still authoritative); but the cleanest path is "database stack
+    // ACTIVE → api/scheduler stacks deploy".
+    this.identitySessionsTable = new dynamodb.Table(this, 'IdentitySessionsTable', {
+      tableName: `${this.tablePrefix}identity_sessions`,
+      partitionKey: { name: 'sessionKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      timeToLiveAttribute: 'expiresAt',
+      removalPolicy: isPersistent(props.stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
+    // Per-identity GSI — single-partition Query target for
+    // `revokeAllSessionsForUser` (logout `{"all":true}`) AND the daily
+    // role-revalidation cron's identity enumeration. SK `issuedAt`
+    // (epoch seconds) keeps the per-identity row set sortable so a
+    // future "show me my recent sessions" surface gets it for free
+    // without another GSI.
+    this.identitySessionsTable.addGlobalSecondaryIndex({
+      indexName: 'identityId-issuedAt-index',
+      partitionKey: { name: 'identityId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'issuedAt', type: dynamodb.AttributeType.NUMBER },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
     // ---- committee_votes (Phase 2) ----
     // One partition per (committee, governance action): PK=`${drepId}#${actionId}`.
     // Co-locates the single proposal, every member's latest cast, the rationale
@@ -790,6 +867,7 @@ export class DatabaseStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'CCMembersTableName', { value: this.ccMembersTable.tableName, exportName: `${props.stage}-CCMembersTableName` });
     new cdk.CfnOutput(this, 'AuditLogTableName', { value: this.auditLogTable.tableName, exportName: `${props.stage}-AuditLogTableName` });
     new cdk.CfnOutput(this, 'AuthNoncesTableName', { value: this.authNoncesTable.tableName, exportName: `${props.stage}-AuthNoncesTableName` });
+    new cdk.CfnOutput(this, 'IdentitySessionsTableName', { value: this.identitySessionsTable.tableName, exportName: `${props.stage}-IdentitySessionsTableName` });
     new cdk.CfnOutput(this, 'CommitteeVotesTableName', { value: this.committeeVotesTable.tableName, exportName: `${props.stage}-CommitteeVotesTableName` });
     new cdk.CfnOutput(this, 'CommitteeMembershipTableName', { value: this.committeeMembershipTable.tableName, exportName: `${props.stage}-CommitteeMembershipTableName` });
     new cdk.CfnOutput(this, 'PlatformStateTableName', { value: this.platformStateTable.tableName, exportName: `${props.stage}-PlatformStateTableName` });

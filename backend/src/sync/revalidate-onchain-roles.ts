@@ -29,13 +29,17 @@
  *
  * # The fix
  *
- * Daily, enumerate every active on-chain identity via the per-identity
- * session index (`kind='session_index'` rows in `authNonces`) and
- * re-resolve each identity's role via the same `resolveRole` +
- * `koiosAdapter` the live verify path uses. If a role the session was
- * granted no longer holds on-chain, revoke ALL of that identity's
- * sessions via `revokeAllSessionsForUser` (which writes per-jti
- * tombstones the JWT authorizer fails CLOSED on).
+ * Daily, enumerate every active on-chain identity via the dedicated
+ * `identity_sessions` table (`listActiveSessionIndices` folds per-row
+ * data into one entry per identity; Decision #1 backed this with a
+ * purpose-built table replacing the Sprint-1 shared-`authNonces`
+ * reuse) and re-resolve each identity's role via the same
+ * `resolveRole` + `koiosAdapter` the live verify path uses. If a
+ * role the session was granted no longer holds on-chain, revoke ALL
+ * of that identity's sessions via `revokeAllSessionsForUser` (which
+ * flips `revoked:true` on every active session row via the
+ * `identityId-issuedAt-index` GSI — the JWT authorizer fails CLOSED
+ * on the revoked rows).
  *
  * # CRITICAL: fail-safe on Koios errors / inconclusive data
  *
@@ -81,8 +85,12 @@
  * At steady state (mainnet ~2k DReps + ~3k SPOs + ~7 CC + a handful
  * of proposers, of which a small fraction log into THIS platform) the
  * total is well under the public-tier anonymous Koios quota. DDB cost
- * is one Scan (filtered by `kind='session_index'`) + the revoke writes
- * (only on definitive deregistrations).
+ * is one Scan of the dedicated `identity_sessions` table (filtered
+ * server-side to `revoked!=true AND expiresAt>now`) + per-identity
+ * GSI Queries on the revoke path (only on definitive deregistrations).
+ * The Sprint-1 shared-`authNonces` Scan was wider (had to filter
+ * across nonce + tombstone + session-index kinds); Decision #1's
+ * single-purpose table tightens the per-pass cost.
  *
  * # Structured logging
  *

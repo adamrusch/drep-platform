@@ -32,7 +32,30 @@ export interface Cip8VerifyResult {
   ok: boolean;
   reason?: string; // why it failed (for logging, NOT leaked to clients)
   pubKey?: Uint8Array; // 32-byte Ed25519 pubkey (present when signature math validates)
-  addressBytes?: Uint8Array; // raw address bytes from the protected header
+  addressBytes?: Uint8Array; // raw address bytes from the protected header (only when addressBound===true)
+  /**
+   * True when the COSE protected header carried an `address` field AND the
+   * Ed25519 public key's blake2b-224 hash matched a credential embedded in
+   * that address (the CIP-30 contract). False when the header omitted the
+   * `address` field — the Ed25519 signature was STILL cryptographically
+   * verified (signature verification is non-negotiable), but the address-
+   * binding step was skipped because there is no claimed address to bind
+   * against. Callers reading the verified `pubKey` must take the
+   * unbound case as "trust the pubkey to derive identity, do not consult
+   * `addressBytes`" — which is undefined in that case.
+   *
+   * Matches the legacy `verifyCoseSign1Core` / `verifyWalletSignature`
+   * fallback behavior in `lib/auth.ts` (P0-1 fix, 2026-05-28 audit): the
+   * load-bearing check there was pubkey→address credential binding via
+   * `publicKeyMatchesAddress(decodedClaimedAddress)`, with the
+   * protected-header address being a defense-in-depth cross-check that
+   * was skipped silently when the field was absent. The on-chain login
+   * path here mirrors that: when the wallet omits the header field, we
+   * still verify the signature and derive the on-chain identity from the
+   * verified pubkey (no claimed address to bind against on the on-chain
+   * surface; the on-chain identity IS the pubkey-derived credential).
+   */
+  addressBound?: boolean;
 }
 
 // COSE algorithm label for EdDSA (-8 in CBOR integer space).
@@ -209,10 +232,20 @@ async function verifyCip8Internal(input: {
     };
   }
 
+  // CIP-30 wallets SHOULD include the signing address in the COSE protected
+  // header under the string key "address". Some older wallet builds (and a
+  // handful of current ones) omit it. We don't reject on absence: the
+  // Ed25519 signature is still verified below — non-negotiable, see the
+  // function header docblock — and the caller falls back to deriving the
+  // on-chain identity from the verified pubkey instead of binding it to a
+  // claimed address. This matches the legacy `lib/auth.ts` fallback
+  // (`verifyWalletSignature` skips the protected-header cross-check when
+  // the field is absent because the load-bearing pubkey↔address binding
+  // there is done against the body-supplied `walletAddress` independently).
+  // The on-chain login flow doesn't have a body-supplied address — the
+  // pubkey IS the identity — so absence here means "skip the bind step,
+  // trust the verified pubkey".
   const addressBytes = toUint8Array(mapGet(protectedHeader, 'address'));
-  if (!addressBytes) {
-    return { ok: false, reason: 'protected header missing or invalid "address" field' };
-  }
 
   // Step 4: Payload check.
   // Read hashed flag from unprotected header (default false).
@@ -251,16 +284,34 @@ async function verifyCip8Internal(input: {
   const toBeSigned = encodeCose(sigStructure);
 
   // Step 6: Verify Ed25519 signature.
+  // CRITICAL: this MUST run regardless of whether the protected-header
+  // `address` field is present. A missing address means we skip the
+  // pubkey↔address binding step below, but a missing address must NEVER
+  // skip signature verification (that would let any unsigned byte sequence
+  // through). Tests in `cose.test.ts` lock in this invariant
+  // ("missing-address with a bad signature is still rejected").
   const sigValid = await verifyEd25519(sigBstr, toBeSigned, pubKey);
   if (!sigValid.ok) {
     return { ok: false, reason: sigValid.reason };
   }
 
-  // Step 7: Bind signature to address.
-  if (!keyHashMatchesAddress(pubKey, addressBytes)) {
-    return { ok: false, reason: 'pubkey hash does not match address in protected header' };
+  // Step 7: Bind signature to address — only when the wallet supplied one
+  // in the protected header. When absent, we return `addressBound: false`
+  // and the caller derives the on-chain identity from the verified pubkey
+  // directly (see `onchainVerify.ts`). When present, the bind step is
+  // mandatory and a mismatch fails the verification — same strict
+  // contract as before.
+  if (addressBytes) {
+    if (!keyHashMatchesAddress(pubKey, addressBytes)) {
+      return { ok: false, reason: 'pubkey hash does not match address in protected header' };
+    }
+    // Step 8: All checks passed (address-bound path).
+    return { ok: true, pubKey, addressBytes, addressBound: true };
   }
 
-  // Step 8: All checks passed.
-  return { ok: true, pubKey, addressBytes };
+  // Step 8 (address-absent path): signature verified, no address to bind
+  // against. The caller MUST derive identity from `pubKey` and treat
+  // `addressBytes` as undefined. `addressBound: false` is the explicit
+  // discriminator so callers can't accidentally read a stale address.
+  return { ok: true, pubKey, addressBound: false };
 }

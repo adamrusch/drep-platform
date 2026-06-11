@@ -80,22 +80,6 @@ import {
 import type { OnChainRole, SessionType, UserRole } from '../../lib/types';
 import { ok, badRequest, unauthorized, internalError } from '../_response';
 
-/**
- * Sentinel substring from `lib/identity/auth/cose.ts` line ~214 — the
- * exact reason text returned when a wallet's CIP-8 protected header
- * lacks the `address` field. Some older wallets omit it. We keep
- * rejecting (strict) but emit a CloudWatch metric on each rejection so
- * Adam can quantify the affected population BEFORE any future decision
- * to relax. The metric DOES NOT change the wire response (still a
- * generic 'Signature verification failed' — we never leak the internal
- * reason to a caller). If `cose.ts` ever changes that string, this
- * detector silently stops counting — the test
- * `metric fires on missing-address-header rejection` in
- * `onchainVerify.test.ts` is the canary.
- */
-const COSE_MISSING_ADDRESS_HEADER_REASON_FRAGMENT =
-  'protected header missing or invalid "address" field';
-
 interface VerifyRequestBody {
   payload: string;
   signatureHex: string;
@@ -178,30 +162,53 @@ export const handler = async (
         keyHex: body.keyHex,
         expectedPayload: body.payload,
       });
-      if (!verifyResult.ok || !verifyResult.pubKey || !verifyResult.addressBytes) {
-        // Sprint 3 — emit a CloudWatch metric (via EMF) when the
-        // rejection root cause is specifically the missing/invalid
-        // `address` field on the COSE protected header. Quantifies the
-        // affected-wallet population so Adam can later decide whether
-        // to relax the strict requirement. The wire response stays
-        // generic — we never leak the internal reason to clients.
-        if (
-          typeof verifyResult.reason === 'string' &&
-          verifyResult.reason.includes(COSE_MISSING_ADDRESS_HEADER_REASON_FRAGMENT)
-        ) {
-          emitIdentityMetric(METRIC_IDENTITY_COSE_MISSING_ADDRESS_HEADER, 1, { Role: role });
-        }
+      if (!verifyResult.ok || !verifyResult.pubKey) {
         return unauthorized('Signature verification failed');
       }
-      const { pubKey, addressBytes } = verifyResult;
-      if (addressBytes.length === 0) {
-        return unauthorized('Invalid address in signature');
+      const { pubKey, addressBytes, addressBound } = verifyResult;
+
+      // Decision #4 (2026-06-10) — relaxed COSE address-header.
+      //
+      // Per `cose.ts` (post-relax): the Ed25519 signature is verified
+      // unconditionally; the protected-header `address` field is bound
+      // when present (`addressBound===true`) and silently skipped when
+      // absent (`addressBound===false`). When absent, we still emit the
+      // `IdentityCoseMissingAddressHeader` metric so the affected-wallet
+      // population stays quantifiable in CloudWatch — the prior strict
+      // behavior counted on rejection; this counts on the now-successful
+      // address-absent path. Net population is the SAME (every wallet
+      // that omits the header still hits the metric exactly once per
+      // login attempt). The wire response is unchanged in either mode.
+      //
+      // Identity derivation BRANCHES on `addressBound`:
+      //   - bound   → bind step already enforced pubkey↔address.
+      //               Address-type-for-role gate is meaningful (we have
+      //               header bytes); derive identity from pubkey
+      //               regardless (the bind guarantees they agree).
+      //   - unbound → there is no claimed address. Skip the
+      //               address-type-for-role gate (no header bytes to
+      //               check) and derive identity directly from the
+      //               verified pubkey. Koios resolution downstream is
+      //               the authoritative role check — a wallet that
+      //               omits the header but ISN'T a registered DRep /
+      //               proposer still fails at the Koios gate.
+      if (addressBound === false) {
+        emitIdentityMetric(METRIC_IDENTITY_COSE_MISSING_ADDRESS_HEADER, 1, { Role: role });
       }
 
       if (role === 'proposer') {
-        const expectedHeader = network === 'mainnet' ? REWARD_ADDR_MAINNET : REWARD_ADDR_PREPROD;
-        if (addressBytes[0] !== expectedHeader) {
-          return unauthorized('Address type mismatch for proposer role');
+        // When address-bound, gate on the reward-address header byte as a
+        // cheap pre-filter before the Koios call. When unbound, fall
+        // through directly to the Koios resolution — Koios is the
+        // authoritative "is this stake address a proposer" check.
+        if (addressBound !== false) {
+          if (!addressBytes || addressBytes.length === 0) {
+            return unauthorized('Invalid address in signature');
+          }
+          const expectedHeader = network === 'mainnet' ? REWARD_ADDR_MAINNET : REWARD_ADDR_PREPROD;
+          if (addressBytes[0] !== expectedHeader) {
+            return unauthorized('Address type mismatch for proposer role');
+          }
         }
         const stakeAddr = stakeAddressFromPubKey(pubKey, network);
         const resolution = await resolveProposer(koios, stakeAddr);
@@ -211,8 +218,18 @@ export const handler = async (
         credentialId = stakeAddr;
         onChainRole = 'proposer';
       } else {
-        if (!isDrepCredentialAddress(addressBytes)) {
-          return unauthorized('Address type mismatch for DRep role');
+        // DRep role — same shape. The address-type gate
+        // (`isDrepCredentialAddress`) is a pre-filter that only makes
+        // sense when we have header bytes. When unbound, skip it; the
+        // Koios resolution downstream confirms the derived drep id is
+        // registered.
+        if (addressBound !== false) {
+          if (!addressBytes || addressBytes.length === 0) {
+            return unauthorized('Invalid address in signature');
+          }
+          if (!isDrepCredentialAddress(addressBytes)) {
+            return unauthorized('Address type mismatch for DRep role');
+          }
         }
         const drepId = drepIdFromPubKey(pubKey);
         const resolution = await resolveDRep(koios, drepId);

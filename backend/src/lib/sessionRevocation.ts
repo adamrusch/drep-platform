@@ -1,14 +1,16 @@
 /**
- * Per-session JWT revocation store (Sprint 1).
+ * Per-session JWT revocation store, backed by the dedicated
+ * `identity_sessions` DynamoDB table (Decision #1, 2026-06-10).
  *
- * Backs the granular revocation surface of the new on-chain login flow.
+ * Backs the granular revocation surface of the on-chain login flow.
  * Every JWT minted by the on-chain verify path carries a unique `jti`
- * (ULID); revoking that one session writes a tombstone keyed by
- * SHA-256(jti) into the existing `authNonces` table (kind='session').
- * The JWT authorizer consults this store on every authenticated request:
- *   - tombstone present (and unexpired)  → token rejected
- *   - tombstone absent                    → token accepted (subject to
- *                                          legacy `tokenVersion` check)
+ * (ULID); on login we write a session row keyed by SHA-256(jti); on
+ * revocation we mark the same row `revoked:true`. The JWT authorizer
+ * consults this store on every authenticated request:
+ *   - row present with `revoked:true` (and unexpired) → token rejected
+ *   - row absent, OR row present with `revoked:false` → token accepted
+ *                                          (subject to legacy
+ *                                          `tokenVersion` check)
  *   - read error (DynamoDB blip)          → FAIL OPEN (token is already
  *                                          cryptographically valid; we
  *                                          prefer availability over
@@ -17,178 +19,213 @@
  *
  * Coexists with the legacy `tokenVersion` row-counter: a "log out
  * everywhere" still bumps `tokenVersion`, and a per-session revoke
- * writes a tombstone here. Either one fails the token closed.
+ * marks the row. Either one fails the token closed.
  *
- * # Why this table?
+ * # Why a dedicated table (Decision #1, 2026-06-10)
  *
- * The brief explicitly defers infra changes — reusing `authNonces`
- * (PK=`nonce`, TTL=`expiresAt`) avoids a CDK PR. We discriminate via the
- * `kind` attribute so the legacy nonce-kind invariants in `lib/auth.ts`
- * (`'challenge' | 'mutation' | 'circuit' | 'drep_link'`) never touch
- * these rows. A dedicated table can replace this in a later sprint
- * without changing the public surface (`revokeSessionByJti` /
- * `isSessionRevoked` / `revokeAllSessionsForUser`).
+ * Sprint 1 reused `authNonces` with a `kind` discriminator (`'session'`
+ * / `'session_index'`) to defer infra changes. Decision #1 splits
+ * sessions off into a purpose-built table for three concrete wins:
  *
- * # `userId` index
+ *   1. **A GSI for cheap enumeration.** Sprint-3 added the daily
+ *      role-revalidation cron, which previously paid for a filtered
+ *      Scan of the shared `authNonces` table to enumerate active
+ *      session indices. With a dedicated table and a per-identity
+ *      GSI, "list every active session for one identity" is a
+ *      single-partition Query.
+ *   2. **`revokeAllSessionsForUser` does the same Query** instead of
+ *      reading a per-user "index row" maintained by best-effort
+ *      writes — a race-y design where a concurrent login could lose a
+ *      hash and leave a session out of the revoke-all set. Reading
+ *      the GSI removes the index row entirely.
+ *   3. **One row per session.** Active state + revoked state live on
+ *      the same primary key. No more "tombstone" vs "session_index"
+ *      split, no more two rows to keep in sync.
  *
- * `revokeAllSessionsForUser` is the "log out every on-chain session"
- * path. We store the per-user list of revocable `jti`s under a
- * separate row keyed by `nonce = userIndexKey(userId)` so a single
- * GetItem yields the full set without a Scan. The list is best-
- * effort — `recordSessionForUser` is called from the verify path with
- * an additive `try/catch` so a write failure can't block a successful
- * login.
+ * # Table schema
+ *
+ *   PK = `sessionKey` (STRING)  = SHA-256(jti) in hex (64 chars).
+ *        Deterministic, opaque, identical-shape to the prior
+ *        `tombstoneKey`'s hash component so the migration is
+ *        meaning-preserving — only the table changes.
+ *   TTL = `expiresAt` (NUMBER, epoch seconds). DynamoDB-managed delete
+ *         lags by minutes; readers MUST re-check expiry and treat a
+ *         stale row as absent (matches the pattern used elsewhere).
+ *   Attributes:
+ *     - `identityId` (STRING) — the on-chain credential the JWT's
+ *       `sub` carries. Same value the legacy `walletAddress` field
+ *       did, renamed to reflect the on-chain semantic.
+ *     - `onChainRoles` (LIST<STRING>) — the role set the session was
+ *       granted under. The cron's role-revalidation reads this to know
+ *       which `resolveRole` variant to re-run.
+ *     - `issuedAt` (NUMBER, epoch seconds) — used as the GSI SK so the
+ *       per-identity enumeration is sortable.
+ *     - `expiresAt` (NUMBER) — TTL attribute; also used by readers to
+ *       detect stale rows.
+ *     - `revoked` (BOOLEAN, optional) — `true` when the session was
+ *       revoked. Missing / false = active.
+ *   GSI: `identityId-issuedAt-index`
+ *     PK = `identityId`, SK = `issuedAt`, projection ALL so a single
+ *     Query yields the full row set the cron's enumerator needs.
+ *
+ * The `walletAddress` parameter names on the public functions below
+ * are preserved for caller compatibility — semantically they now
+ * carry the on-chain `identityId` (which is what the legacy callers
+ * already passed: the JWT `sub` of an on-chain login).
  */
 
 import { createHash } from 'node:crypto';
-import { putItem, getItem, deleteItem, scanItems, tableNames } from './dynamodb';
+import {
+  putItem,
+  getItem,
+  updateItem,
+  queryItems,
+  scanItems,
+  tableNames,
+} from './dynamodb';
 import type { OnChainRole } from './types';
 
-interface SessionTombstoneItem extends Record<string, unknown> {
-  /** PK on `authNonces`. For a tombstone, `nonce = SHA-256(jti)` in hex —
-   *  deterministic, opaque, fits the existing 64-char nonce shape. */
-  nonce: string;
-  /** Discriminator — kept distinct from the legacy nonce kinds so legacy
-   *  nonce code in `lib/auth.ts` never matches and the kind invariants
-   *  there stay narrow. */
-  kind: 'session';
-  /** Convenience field for ops/debug; mirrors the wallet subject of the
-   *  revoked JWT. Not load-bearing — the load-bearing key is the hashed
-   *  `jti` in `nonce`. */
-  walletAddress: string;
-  /** Epoch seconds — DynamoDB TTL deletion lags by minutes; readers MUST
-   *  re-check expiry and treat a stale tombstone as absent (matches the
-   *  pattern used elsewhere in this codebase). */
+interface SessionRow extends Record<string, unknown> {
+  /** PK on `identity_sessions`. SHA-256(jti) in hex (64 chars). */
+  sessionKey: string;
+  /** The on-chain identity (drep1... / stake1... / pool1... / cc_cold1...).
+   *  Mirrors the wallet subject of the JWT. Indexed via the
+   *  `identityId-issuedAt-index` GSI so per-identity enumeration is a
+   *  single-partition Query (used by revoke-all + the role-revalidation
+   *  cron). */
+  identityId: string;
+  /** The on-chain roles this session was granted under. Always an array,
+   *  may be empty in defensive code paths (a pre-Decision-1 record could
+   *  in theory have lacked this — those rows are migrating naturally as
+   *  they age out via TTL). */
+  onChainRoles: OnChainRole[];
+  /** Epoch seconds the session was issued. Used as the GSI SK so the
+   *  cron's enumeration is sortable, and so a future "newest N sessions
+   *  per identity" surface gets a cheap partition Query. */
+  issuedAt: number;
+  /** Epoch seconds — DynamoDB TTL attribute. Readers MUST re-check
+   *  expiry (DDB TTL deletion lags by minutes) and treat a stale row as
+   *  absent — matches the pattern used elsewhere in this codebase. */
   expiresAt: number;
+  /** True after a revoke. Missing / false = active. */
+  revoked?: boolean;
 }
 
-interface UserSessionIndexItem extends Record<string, unknown> {
-  nonce: string;
-  kind: 'session_index';
-  walletAddress: string;
-  /** Hex-encoded SHA-256 hashes of every `jti` we've issued for this user
-   *  that's still in its TTL window. Bounded by the JWT TTL on the high
-   *  side — entries naturally expire alongside their tombstones. */
-  jtiHashes: string[];
-  expiresAt: number;
-  /** Sprint 3 — the on-chain role this identity's sessions were granted
-   *  under. Optional for backward compatibility with pre-Sprint-3 records
-   *  (those naturally fall out as their `expiresAt` passes; cron skips
-   *  them with a warning). Present on every record written from Sprint 3
-   *  onward; consumed by the daily role-revalidation cron to pick the
-   *  right `resolveRole` to re-run. */
-  onChainRole?: OnChainRole;
-}
-
-/** Default tombstone TTL — 30 days, matches the maximum JWT lifetime
+/** Default TTL — 30 days, matches the maximum JWT lifetime
  *  (`remember_me`). A revoke that lives at least as long as the token
- *  itself ensures the tombstone outlives the JWT and the revocation can
- *  never be defeated by table-cleanup lag. */
-const DEFAULT_TOMBSTONE_TTL_SEC = 30 * 24 * 60 * 60;
+ *  itself ensures the revocation can never be defeated by table-cleanup
+ *  lag. */
+const DEFAULT_SESSION_TTL_SEC = 30 * 24 * 60 * 60;
 
 function hashJti(jti: string): string {
   return createHash('sha256').update(jti, 'utf8').digest('hex');
 }
 
-function tombstoneKey(jti: string): string {
-  return `session:${hashJti(jti)}`;
-}
-
-function userIndexKey(walletAddress: string): string {
-  return `session_index:${walletAddress}`;
-}
-
 /**
- * Record a freshly-issued session's `jti` against the user so a future
- * `revokeAllSessionsForUser` can enumerate them. Best-effort — never
- * throws. The caller (the on-chain verify handler) wraps in try/catch so
- * a session-index blip can't block login.
+ * Record a freshly-issued session against the identity so the
+ * authorizer's revocation check + revoke-all + cron enumeration can
+ * find it. Best-effort — never throws. The caller (the on-chain verify
+ * handler) wraps in try/catch so a write blip can't block login.
  *
- * `ttlSec` defaults to the 30-day JWT max — entries don't outlive the
- * token they're tracking by more than a day or two of TTL-deletion lag.
+ * `ttlSec` defaults to the 30-day JWT max — rows are removed by DDB TTL
+ * after the JWT can no longer be presented anyway.
  *
- * Sprint 3 addition — `onChainRole` is the on-chain role this session
- * was granted under (drep / proposer / spo / cc). Stored on the index
- * row so the daily role-revalidation cron knows which `resolveRole`
- * variant to re-run for this identity. Optional for backward compat —
- * a pre-Sprint-3 record (no role on it) is skipped with a warning by
- * the cron rather than acted on with the wrong role check.
+ * `onChainRole` — the on-chain role(s) the session was granted under.
+ * For the four-role on-chain login each session carries exactly one
+ * role; the schema stores it as an array for forward-compatibility
+ * with future multi-role sessions (no migration needed) and to keep
+ * the cron's read path uniform.
+ *
+ * Public signature (parameter NAMES preserved) for backward
+ * compatibility — semantically `walletAddress` here is the on-chain
+ * identity id (the JWT `sub`), which is what every caller already
+ * passes.
  */
 export async function recordSessionForUser(
   walletAddress: string,
   jti: string,
   onChainRole?: OnChainRole,
-  ttlSec: number = DEFAULT_TOMBSTONE_TTL_SEC,
+  ttlSec: number = DEFAULT_SESSION_TTL_SEC,
 ): Promise<void> {
-  const indexNonce = userIndexKey(walletAddress);
-  const expiresAt = Math.floor(Date.now() / 1000) + ttlSec;
-  const newHash = hashJti(jti);
+  const nowSec = Math.floor(Date.now() / 1000);
+  const row: SessionRow = {
+    sessionKey: hashJti(jti),
+    identityId: walletAddress,
+    onChainRoles: onChainRole ? [onChainRole] : [],
+    issuedAt: nowSec,
+    expiresAt: nowSec + ttlSec,
+    revoked: false,
+  };
   try {
-    const existing = await getItem<UserSessionIndexItem>(tableNames.authNonces, {
-      nonce: indexNonce,
-    });
-    const prior =
-      existing?.kind === 'session_index' && Array.isArray(existing.jtiHashes)
-        ? existing.jtiHashes
-        : [];
-    // De-dup and bound the list — a long-lived wallet might have a few
-    // dozen sessions but should not accumulate thousands. 1024 is a
-    // generous cap; oldest entries fall off if the list grows past it.
-    const merged = Array.from(new Set([...prior, newHash])).slice(-1024);
-    // Prefer the freshly-supplied `onChainRole` on every write so a
-    // mid-life code rollout reaches steady state quickly. If the caller
-    // didn't pass one (legacy call site), preserve whatever role was on
-    // the prior record — never silently downgrade an indexed identity
-    // to "unknown role".
-    const resolvedRole: OnChainRole | undefined =
-      onChainRole ??
-      (existing?.kind === 'session_index' ? existing.onChainRole : undefined);
-    const item: UserSessionIndexItem = {
-      nonce: indexNonce,
-      kind: 'session_index',
-      walletAddress,
-      jtiHashes: merged,
-      expiresAt,
-      ...(resolvedRole !== undefined ? { onChainRole: resolvedRole } : {}),
-    };
-    // `putItem` overwrites unconditionally — the per-user index has no
-    // append-only invariant; concurrent logins racing here may lose a hash
-    // but the worst case is "one session can't be revoked via the user
-    // index" (it's still revocable individually via its own `jti`).
-    await putItem(tableNames.authNonces, item as unknown as Record<string, unknown>);
+    // Unconditional Put: a row at this `sessionKey` (SHA-256(jti))
+    // can only exist if the same `jti` was previously issued — the
+    // jti is a ULID so collisions are astronomically unlikely. The
+    // worst case is overwriting a freshly-issued row with the same
+    // content. We deliberately do NOT use `attribute_not_exists` —
+    // a flake on the write path under that condition would 500 the
+    // login, which is worse than the (impossible) collision case.
+    await putItem(tableNames.identitySessions, row);
   } catch (err) {
     console.warn(
-      'recordSessionForUser: index upsert failed (non-fatal):',
+      'recordSessionForUser: session write failed (non-fatal):',
       err instanceof Error ? err.message : err,
     );
   }
 }
 
 /**
- * Write a tombstone for the supplied `jti`, revoking the corresponding
- * JWT immediately. Idempotent — re-revoking a `jti` overwrites the
- * existing tombstone with the same content. Never throws; on failure the
- * caller should surface a 500 but the auth path is unaffected (the JWT
- * is still cryptographically valid, just not granularly revoked).
+ * Mark the supplied `jti`'s session as revoked. Idempotent — re-revoking
+ * an already-revoked row is a no-op. The row is also re-written from
+ * scratch when the original `recordSessionForUser` missed (e.g. a write
+ * blip at login time) so the next `isSessionRevoked` returns `true`
+ * even in that degenerate case.
  *
- * `ttlSec` should be at least as long as the JWT's remaining lifetime.
- * Defaulting to the 30-day max keeps the tombstone alive longer than
- * any reachable token would be.
+ * `ttlSec` should be at least as long as the JWT's remaining lifetime;
+ * defaulting to the 30-day max ensures the revoke outlives any
+ * reachable token.
+ *
+ * Throws on a hard DDB error so the caller can surface a 500 — but the
+ * caller's contract (the logout handler) already wraps this in a
+ * try/catch and never lets the failure block the cookie-clear path.
  */
 export async function revokeSessionByJti(
   jti: string,
   walletAddress: string,
-  ttlSec: number = DEFAULT_TOMBSTONE_TTL_SEC,
+  ttlSec: number = DEFAULT_SESSION_TTL_SEC,
 ): Promise<void> {
-  const expiresAt = Math.floor(Date.now() / 1000) + ttlSec;
-  const item: SessionTombstoneItem = {
-    nonce: tombstoneKey(jti),
-    kind: 'session',
-    walletAddress,
-    expiresAt,
-  };
-  // putItem is unconditional — idempotent for the use case.
-  await putItem(tableNames.authNonces, item as unknown as Record<string, unknown>);
+  const nowSec = Math.floor(Date.now() / 1000);
+  const sessionKey = hashJti(jti);
+  try {
+    // Fast path — the row exists from `recordSessionForUser`. Flip
+    // `revoked` to true and extend `expiresAt` to the requested TTL
+    // (in case the JWT outlives the original row's TTL — `ttlSec` is
+    // the JWT's remaining lifetime per the docblock). `SET` is
+    // idempotent.
+    await updateItem(
+      tableNames.identitySessions,
+      { sessionKey },
+      'SET #revoked = :true, #expiresAt = :exp',
+      { '#revoked': 'revoked', '#expiresAt': 'expiresAt' },
+      { ':true': true, ':exp': nowSec + ttlSec },
+    );
+  } catch (err) {
+    // The row didn't exist — `recordSessionForUser` missed at login
+    // time (rare; best-effort write). Insert a revoked-by-default row
+    // directly so `isSessionRevoked` returns `true` for this jti.
+    console.warn(
+      'revokeSessionByJti: update on existing row failed; writing fresh revoked row:',
+      err instanceof Error ? err.message : err,
+    );
+    const row: SessionRow = {
+      sessionKey,
+      identityId: walletAddress,
+      onChainRoles: [],
+      issuedAt: nowSec,
+      expiresAt: nowSec + ttlSec,
+      revoked: true,
+    };
+    await putItem(tableNames.identitySessions, row);
+  }
 }
 
 /**
@@ -199,8 +236,10 @@ export async function revokeSessionByJti(
  * request).
  *
  * Returns:
- *   - `true`  → tombstone present and unexpired (revoked, reject token)
- *   - `false` → no tombstone OR tombstone expired (accept token)
+ *   - `true`  → row present, `revoked === true`, AND unexpired
+ *               (revoked, reject token)
+ *   - `false` → row absent, OR `revoked !== true`, OR row expired
+ *               (accept token)
  *
  * Errors caught here log to CloudWatch and resolve to `false` (fail
  * open). That matches the pattern already used for `tokenVersion` reads
@@ -208,19 +247,13 @@ export async function revokeSessionByJti(
  */
 export async function isSessionRevoked(jti: string): Promise<boolean> {
   try {
-    const stored = await getItem<SessionTombstoneItem>(tableNames.authNonces, {
-      nonce: tombstoneKey(jti),
+    const stored = await getItem<SessionRow>(tableNames.identitySessions, {
+      sessionKey: hashJti(jti),
     });
-    if (!stored || stored.kind !== 'session') return false;
-    // DynamoDB TTL deletion lags; an expired tombstone is treated as absent.
-    if (Math.floor(Date.now() / 1000) > stored.expiresAt) {
-      try {
-        await deleteItem(tableNames.authNonces, { nonce: tombstoneKey(jti) });
-      } catch {
-        // Best-effort cleanup; ignore.
-      }
-      return false;
-    }
+    if (!stored) return false;
+    if (stored.revoked !== true) return false;
+    // DynamoDB TTL deletion lags; an expired row is treated as absent.
+    if (Math.floor(Date.now() / 1000) > stored.expiresAt) return false;
     return true;
   } catch (err) {
     console.warn(
@@ -232,107 +265,126 @@ export async function isSessionRevoked(jti: string): Promise<boolean> {
 }
 
 /**
- * Revoke every on-chain session this wallet has issued. The per-user
- * index is consulted (best-effort) — on a missing/corrupt index we
- * silently bail. Callers SHOULD also bump the legacy `tokenVersion`
- * counter (which the legacy logout already does) so anything that
- * pre-dates the per-session index is still invalidated.
+ * Revoke every on-chain session this identity has issued. Enumerates
+ * via the `identityId-issuedAt-index` GSI — single-partition Query, no
+ * Scan. For each active row, flip `revoked:true`. Already-revoked rows
+ * are skipped (no-op). Returns the number of rows newly revoked this
+ * call.
  *
- * Returns the number of tombstones written so callers can report
- * "revoked N sessions" if they want. Best-effort throughout.
+ * Best-effort throughout — per-row update failures log + count under
+ * `revokeErrors` upstream. A GSI read failure returns 0 so the caller
+ * can surface the failure without blocking the legacy `tokenVersion`
+ * bump path (which is the authoritative "log out everywhere" for
+ * legacy CIP-30 sessions anyway).
  */
 export async function revokeAllSessionsForUser(walletAddress: string): Promise<number> {
   let written = 0;
-  let index: UserSessionIndexItem | null = null;
-  try {
-    const raw = await getItem<UserSessionIndexItem>(tableNames.authNonces, {
-      nonce: userIndexKey(walletAddress),
-    });
-    index = raw?.kind === 'session_index' ? raw : null;
-  } catch (err) {
-    console.warn(
-      'revokeAllSessionsForUser: index read failed (non-fatal):',
-      err instanceof Error ? err.message : err,
-    );
-    return 0;
-  }
-  if (!index || !Array.isArray(index.jtiHashes)) return 0;
-  const expiresAt = Math.floor(Date.now() / 1000) + DEFAULT_TOMBSTONE_TTL_SEC;
-  for (const jtiHash of index.jtiHashes) {
-    const item: SessionTombstoneItem = {
-      nonce: `session:${jtiHash}`,
-      kind: 'session',
-      walletAddress,
-      expiresAt,
-    };
+  const nowSec = Math.floor(Date.now() / 1000);
+  const newExpiresAt = nowSec + DEFAULT_SESSION_TTL_SEC;
+  let cursor: Record<string, unknown> | undefined;
+  do {
+    let page;
     try {
-      await putItem(tableNames.authNonces, item as unknown as Record<string, unknown>);
-      written += 1;
+      page = await queryItems<SessionRow>(tableNames.identitySessions, {
+        indexName: 'identityId-issuedAt-index',
+        keyConditionExpression: '#identityId = :identityId',
+        expressionAttributeNames: { '#identityId': 'identityId' },
+        expressionAttributeValues: { ':identityId': walletAddress },
+        ...(cursor ? { exclusiveStartKey: cursor } : {}),
+      });
     } catch (err) {
       console.warn(
-        'revokeAllSessionsForUser: tombstone write failed (non-fatal):',
+        'revokeAllSessionsForUser: GSI Query failed (non-fatal):',
         err instanceof Error ? err.message : err,
       );
+      return written;
     }
-  }
-  // After writing every tombstone, clear the user index so a future
-  // logout-all doesn't re-revoke the same long-gone sessions on every
-  // call. Best-effort.
-  try {
-    await deleteItem(tableNames.authNonces, { nonce: userIndexKey(walletAddress) });
-  } catch {
-    // Ignore.
-  }
+    for (const row of page.items) {
+      // Skip already-revoked rows so the count is "rows newly
+      // revoked this call" — the caller's revokedCount surfaces in
+      // the logout response and a re-logout shouldn't inflate it.
+      if (row.revoked === true) continue;
+      // Skip rows past their expiry — DDB TTL lag means we may see
+      // stale rows; revoking one is harmless but wastes a write.
+      if (typeof row.expiresAt === 'number' && row.expiresAt < nowSec) continue;
+      try {
+        await updateItem(
+          tableNames.identitySessions,
+          { sessionKey: row.sessionKey },
+          'SET #revoked = :true, #expiresAt = :exp',
+          { '#revoked': 'revoked', '#expiresAt': 'expiresAt' },
+          { ':true': true, ':exp': newExpiresAt },
+        );
+        written += 1;
+      } catch (err) {
+        console.warn(
+          'revokeAllSessionsForUser: per-row revoke failed (non-fatal):',
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+    cursor = page.lastEvaluatedKey;
+  } while (cursor);
   return written;
 }
 
 // ---------------------------------------------------------------------------
-// Sprint 3 — enumeration for the daily role-revalidation cron
+// Enumeration for the daily role-revalidation cron (Sprint 3, ported)
 // ---------------------------------------------------------------------------
 
-/** One active on-chain identity surfaced by `listActiveSessionIndices`. */
+/** One active on-chain identity surfaced by `listActiveSessionIndices`.
+ *
+ * Shape preserved across Decision #1 so the daily cron
+ * (`sync/revalidate-onchain-roles.ts`) requires no changes — same
+ * `walletAddress` / `onChainRole` / `jtiHashes` / `expiresAt` fields.
+ * Backed by the new `identity_sessions` table; the cron is none the
+ * wiser. */
 export interface ActiveSessionIndex {
   /** The on-chain credential identifier — drep1... / stake1... /
    *  pool1... / cc_cold1... depending on the role. Same string the
    *  identity's JWT `sub` carries. */
   walletAddress: string;
-  /** The role this identity's sessions were granted under. `undefined`
-   *  on pre-Sprint-3 records (those got recorded before the field was
-   *  added); the cron skips those with a warning rather than guess. */
+  /** The role this identity's sessions were granted under. We
+   *  collapse the first non-empty `onChainRoles[]` entry from the
+   *  identity's session rows — every session for an identity is
+   *  granted under exactly one role today. `undefined` only on
+   *  pre-Decision-1 rows that may have lacked the field (those age
+   *  out via TTL). */
   onChainRole: OnChainRole | undefined;
-  /** Hashed jti list — used by the cron to call `isSessionRevoked` on
-   *  each session individually if needed, though the cron's normal path
-   *  is `revokeAllSessionsForUser(walletAddress)` which re-reads this
-   *  record. */
+  /** The hashed-jti list (SHA-256(jti) values, i.e. `sessionKey`s)
+   *  for this identity's still-active sessions. Mirrors the prior
+   *  shape so the cron's `isSessionRevoked` per-jti loop (if any)
+   *  is unchanged. */
   jtiHashes: string[];
-  /** Epoch-seconds DDB TTL. Already-expired rows are filtered out by
-   *  the enumerator before they reach the caller — DDB's TTL deletion
-   *  lags by minutes, so the explicit check is required for
-   *  correctness (mirrors the pattern used elsewhere in this file). */
+  /** Latest `expiresAt` across the identity's active session rows.
+   *  Already-expired rows are filtered out by the enumerator before
+   *  they reach the caller (DDB TTL deletion lags by minutes, so the
+   *  explicit check is required for correctness — matches the prior
+   *  contract). */
   expiresAt: number;
 }
 
 /**
- * Enumerate every active per-identity session index. Used by the daily
+ * Enumerate every active per-identity session. Used by the daily
  * role-revalidation cron (`sync/revalidate-onchain-roles.ts`) to fan out
  * one role re-check per identity.
  *
- * # Why a Scan
+ * # Implementation
  *
- * The session-index rows are scattered across the `authNonces` table
- * (which is shared with the legacy `challenge` / `mutation` / `circuit`
- * / `drep_link` / `identity` / `session` rows). A `kind='session_index'`
- * filter narrows the response server-side. At today's scale the
- * authNonces table is tiny (thousands of in-flight nonces + a handful
- * of revoked-session tombstones + a small number of session indices —
- * one per active on-chain identity). Per-Lambda-invocation cost is on
- * the order of cents at most. Documented in `revalidate-onchain-roles.ts`
- * as a scale-watch.
+ * Scans the new dedicated `identity_sessions` table filtering rows
+ * where `revoked != true` and `expiresAt > now`, then groups by
+ * `identityId` and folds each identity's rows into one
+ * `ActiveSessionIndex` entry. A future optimisation could maintain a
+ * sparse-by-identity index, but a Scan of a single-purpose table
+ * (scoped to active on-chain sessions only) is cheap at today's scale
+ * — the prior implementation scanned the shared `authNonces` table
+ * with a more expensive `kind='session_index'` filter and a wider
+ * partition set.
  *
  * # Defensive
  *
- *   - Filters expired rows (DDB TTL lags by minutes).
- *   - Filters rows whose `walletAddress` isn't a string (defensive
+ *   - Filters expired rows (DDB TTL lag).
+ *   - Filters rows whose `identityId` isn't a string (defensive
  *     against schema drift).
  *   - Caller pages with `lastEvaluatedKey` until DDB reports none.
  *
@@ -343,37 +395,60 @@ export interface ActiveSessionIndex {
  * locks every on-chain identity out.
  */
 export async function listActiveSessionIndices(): Promise<ActiveSessionIndex[]> {
-  const out: ActiveSessionIndex[] = [];
+  // identityId → folded ActiveSessionIndex (jtiHashes appended, latest
+  // expiresAt + onChainRole carried forward).
+  const byIdentity = new Map<string, ActiveSessionIndex>();
   let cursor: Record<string, unknown> | undefined;
   const nowSec = Math.floor(Date.now() / 1000);
   do {
-    const page = await scanItems<UserSessionIndexItem>(tableNames.authNonces, {
-      filterExpression: '#kind = :sessionIndex',
-      expressionAttributeNames: { '#kind': 'kind' },
-      expressionAttributeValues: { ':sessionIndex': 'session_index' },
+    const page = await scanItems<SessionRow>(tableNames.identitySessions, {
+      // Filter out revoked rows + already-expired rows server-side so
+      // the per-page payload is just the active set.
+      filterExpression:
+        '(attribute_not_exists(#revoked) OR #revoked = :false) AND #expiresAt > :now',
+      expressionAttributeNames: {
+        '#revoked': 'revoked',
+        '#expiresAt': 'expiresAt',
+      },
+      expressionAttributeValues: { ':false': false, ':now': nowSec },
       ...(cursor ? { exclusiveStartKey: cursor } : {}),
     });
     for (const row of page.items) {
-      if (row.kind !== 'session_index') continue;
-      if (typeof row.walletAddress !== 'string' || row.walletAddress.length === 0) {
+      if (typeof row.identityId !== 'string' || row.identityId.length === 0) {
         continue;
       }
       if (typeof row.expiresAt !== 'number' || row.expiresAt < nowSec) {
-        // DDB TTL lag — filter expired rows so the cron doesn't waste a
-        // Koios call on a stale identity. The cron's `revokeAll` step
-        // would no-op for these anyway (the per-jti tombstones are
-        // either already TTL'd or sweeping them is harmless), but
-        // skipping them upstream keeps the metrics meaningful.
+        // Filter-expression should already exclude these, but DDB
+        // returns ConsumedCapacity-based pages so a stale row may
+        // squeak through under race conditions. Cheap to re-check.
         continue;
       }
-      out.push({
-        walletAddress: row.walletAddress,
-        onChainRole: row.onChainRole,
-        jtiHashes: Array.isArray(row.jtiHashes) ? row.jtiHashes : [],
-        expiresAt: row.expiresAt,
-      });
+      const role: OnChainRole | undefined =
+        Array.isArray(row.onChainRoles) && row.onChainRoles.length > 0
+          ? (row.onChainRoles[0] as OnChainRole)
+          : undefined;
+      const existing = byIdentity.get(row.identityId);
+      if (!existing) {
+        byIdentity.set(row.identityId, {
+          walletAddress: row.identityId,
+          onChainRole: role,
+          jtiHashes: [row.sessionKey],
+          expiresAt: row.expiresAt,
+        });
+      } else {
+        existing.jtiHashes.push(row.sessionKey);
+        if (row.expiresAt > existing.expiresAt) {
+          existing.expiresAt = row.expiresAt;
+        }
+        // Don't overwrite a known role with `undefined` from a
+        // pre-Decision-1 row; prefer a real role on any session row
+        // we've seen for this identity.
+        if (!existing.onChainRole && role) {
+          existing.onChainRole = role;
+        }
+      }
     }
     cursor = page.lastEvaluatedKey;
   } while (cursor);
-  return out;
+  return Array.from(byIdentity.values());
 }

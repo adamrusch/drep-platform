@@ -4,6 +4,7 @@
 // Ed25519 verifier — the same primitives the production module uses.
 import { describe, it, expect } from 'vitest';
 import { Encoder } from 'cbor-x';
+import { createPrivateKey, createPublicKey, sign as nodeSign } from 'node:crypto';
 import vectors from '../__fixtures__/cip8-vectors.json';
 import { makeCoseSignature, type6Address } from '../__fixtures__/makeCose';
 import { verifyCip8 } from './cose';
@@ -44,6 +45,8 @@ describe('verifyCip8 (stake-key-valid fixture)', () => {
     expect(bytesToHex(result.pubKey as Uint8Array)).toBe(stakeVector.expectedPubKeyHex);
     expect(result.addressBytes).toBeInstanceOf(Uint8Array);
     expect(bytesToHex(result.addressBytes as Uint8Array)).toBe(stakeVector.addressHex);
+    // Decision #4 — address-present path stays strict + bound.
+    expect(result.addressBound).toBe(true);
   });
 
   it('returns ok=false for a tampered signature (flipped byte 0)', async () => {
@@ -311,6 +314,163 @@ describe('verifyCip8 negative guard cases (alg, kty, crv, key size, sig)', () =>
       signatureHex: mutatedSigHex,
       keyHex: stakeVector.keyHex,
       expectedPayload: stakeVector.payloadUtf8,
+    });
+    expect(result.ok).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Decision #4 (2026-06-10) — relaxed protected-header `address` field.
+//
+// Prior strict behavior: a COSE_Sign1 whose protected header lacked the
+// `address` field was rejected (`ok:false`, reason mentioning "missing or
+// invalid \"address\" field"). Decision #4 relaxes that to a graceful
+// fallback that matches the legacy `lib/auth.ts` `verifyWalletSignature`:
+//
+//   - present  → verify signature AND bind pubkey↔address (unchanged).
+//   - absent   → STILL verify the Ed25519 signature (non-negotiable).
+//                Skip ONLY the address-binding step. Return
+//                `{ok:true, pubKey, addressBytes: undefined,
+//                  addressBound: false}`.
+//
+// The handler (`onchainVerify.ts`) reads `addressBound` to decide
+// identity-derivation: bound → from address+pubkey (matched); unbound →
+// from pubkey alone (the on-chain identity IS the pubkey-derived
+// credential — drep id / stake address / pool id / cc cred). Koios
+// resolution remains the authoritative role gate either way.
+//
+// These tests lock in:
+//   (a) signature verification ALWAYS runs (bad sig still rejects even
+//       when address is absent — the security invariant);
+//   (b) address-present path is unchanged (binds, rejects mismatch);
+//   (c) address-absent path now SUCCEEDS with `addressBound:false`,
+//       `addressBytes:undefined`, and a verified pubkey the caller can
+//       derive identity from.
+// ---------------------------------------------------------------------------
+
+/** Round-trip a COSE_Sign1 stripping the `address` entry from the
+ *  protected header. Re-signs from scratch using the seed so the resulting
+ *  signature is valid for the mutated protected bytes (otherwise the
+ *  Ed25519 verify would fail and we couldn't isolate the bind step).
+ *  Used to build the address-absent positive vector. */
+function makeCoseNoAddressFromSeed(opts: { seed: Uint8Array; payload: string }): {
+  signatureHex: string;
+  keyHex: string;
+} {
+  // The fixtures library already has `makeCoseSignature` but it
+  // unconditionally writes the address field. Reproducing its CBOR
+  // shape with the address dropped — keeps this test self-contained.
+  const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
+  const ED25519_SPKI_HEADER_LEN = 12;
+  const privKey = createPrivateKey({
+    key: Buffer.concat([ED25519_PKCS8_PREFIX, Buffer.from(opts.seed)]),
+    format: 'der',
+    type: 'pkcs8',
+  });
+  const pubKey = new Uint8Array(
+    (createPublicKey(privKey).export({ format: 'der', type: 'spki' }) as Buffer).subarray(
+      ED25519_SPKI_HEADER_LEN,
+    ),
+  );
+  // Protected header: alg only, NO `address` entry.
+  const protectedMap = new Map<number | string, unknown>([[1, -8]]);
+  const protectedBstr = new Uint8Array(codec.encode(protectedMap));
+  const payloadBytes = new TextEncoder().encode(opts.payload);
+  const toBeSigned = new Uint8Array(
+    codec.encode(['Signature1', protectedBstr, new Uint8Array(0), payloadBytes]),
+  );
+  const sig = new Uint8Array(nodeSign(null, Buffer.from(toBeSigned), privKey));
+  const unprotected = new Map<string, unknown>([['hashed', false]]);
+  const coseSign1 = [protectedBstr, unprotected, payloadBytes, sig];
+  const coseKey = new Map<number, unknown>([
+    [1, 1],
+    [3, -8],
+    [-1, 6],
+    [-2, pubKey],
+  ]);
+  return {
+    signatureHex: bytesToHex(new Uint8Array(codec.encode(coseSign1))),
+    keyHex: bytesToHex(new Uint8Array(codec.encode(coseKey))),
+  };
+}
+
+describe('verifyCip8 — Decision #4: relaxed address-header fallback', () => {
+  const SEED = new Uint8Array(32).fill(9);
+  const PAYLOAD = 'dreptalk:test:drep.tools:decision4:1700000000';
+
+  it('address absent → ok=true, addressBound=false, addressBytes undefined, pubKey present', async () => {
+    const { signatureHex, keyHex } = makeCoseNoAddressFromSeed({ seed: SEED, payload: PAYLOAD });
+    const result = await verifyCip8({
+      signatureHex,
+      keyHex,
+      expectedPayload: PAYLOAD,
+    });
+    if (!result.ok) throw new Error(`expected ok=true on relaxed path, got: ${result.reason}`);
+    expect(result.ok).toBe(true);
+    expect(result.addressBound).toBe(false);
+    expect(result.addressBytes).toBeUndefined();
+    expect(result.pubKey).toBeInstanceOf(Uint8Array);
+    expect(result.pubKey?.length).toBe(32);
+  });
+
+  it('address absent + bad signature → STILL rejected (signature verification is non-negotiable)', async () => {
+    // Build the address-absent positive vector, then flip the last byte of
+    // the signature. The Ed25519 verify must still run — and fail — on the
+    // address-absent path. The whole point of Decision #4 is to skip ONLY
+    // the address-binding step; never the signature math.
+    const { signatureHex, keyHex } = makeCoseNoAddressFromSeed({ seed: SEED, payload: PAYLOAD });
+    // Decode the COSE_Sign1, corrupt the sig bytes, re-encode.
+    const cose = codec.decode(Buffer.from(hexToBytes(signatureHex))) as [
+      Uint8Array,
+      unknown,
+      Uint8Array,
+      Uint8Array,
+    ];
+    const [protectedBstr, unprotectedHeader, payload, sig] = cose;
+    const corruptedSig = new Uint8Array(sig);
+    corruptedSig[corruptedSig.length - 1] = (corruptedSig[corruptedSig.length - 1]! ^ 0xff) & 0xff;
+    const corruptedSigHex = bytesToHex(
+      new Uint8Array(codec.encode([protectedBstr, unprotectedHeader, payload, corruptedSig])),
+    );
+
+    const result = await verifyCip8({
+      signatureHex: corruptedSigHex,
+      keyHex,
+      expectedPayload: PAYLOAD,
+    });
+    expect(result.ok).toBe(false);
+    expect(typeof result.reason).toBe('string');
+  });
+
+  it('address present + matching pubkey → ok=true, addressBound=true (strict path unchanged)', async () => {
+    // Fixture path explicitly asserts the bound flag — the address-present
+    // contract is unchanged by Decision #4. The earlier
+    // `stake-key-valid fixture` test already asserts the basics; this
+    // pinned assertion lives next to the relaxed path so the two
+    // contracts are visible side-by-side.
+    const result = await verifyCip8({
+      signatureHex: stakeVector.signatureHex,
+      keyHex: stakeVector.keyHex,
+      expectedPayload: stakeVector.payloadUtf8,
+    });
+    if (!result.ok) throw new Error(`stake-key-valid fixture failed: ${result.reason}`);
+    expect(result.addressBound).toBe(true);
+    expect(result.addressBytes).toBeInstanceOf(Uint8Array);
+  });
+
+  it('address present but key-hash mismatch → still REJECTED (bind step authoritative when bound)', async () => {
+    // The strict-bind path's hard-fail contract is unchanged. A signature
+    // whose pubkey hash doesn't match the embedded address still fails.
+    const seed = new Uint8Array(32).fill(11);
+    const cose = makeCoseSignature({
+      seed,
+      payload: PAYLOAD,
+      addressBytes: type6Address(new Uint8Array(28).fill(0xab), 'preprod'),
+    });
+    const result = await verifyCip8({
+      signatureHex: cose.signatureHex,
+      keyHex: cose.keyHex,
+      expectedPayload: PAYLOAD,
     });
     expect(result.ok).toBe(false);
   });
