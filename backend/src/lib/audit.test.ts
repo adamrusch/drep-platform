@@ -110,7 +110,7 @@ describe('buildAuditRow — pure key shape', () => {
       },
       new Date('2026-05-28T12:00:00.000Z'),
     );
-    expect(Object.prototype.hasOwnProperty.call(row, 'metadata')).toBe(false);
+    expect(Object.hasOwn(row, 'metadata')).toBe(false);
   });
 
   it('passes metadata through verbatim when supplied', () => {

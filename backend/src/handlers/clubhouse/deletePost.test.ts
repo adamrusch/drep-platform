@@ -90,7 +90,7 @@ const mockAudit = vi.mocked(writeAuditEvent);
 // Two distinct DReps: X (the post's owner clubhouse) and Y (the
 // attacker's clubhouse — they lead Y but not X).
 const DREP_X = 'drep1xownerclub1234567890abcdef1234567890abcdef1234567890';
-const DREP_Y = 'drep1yattackerclub567890abcdef1234567890abcdef1234567890';
+const _DREP_Y = 'drep1yattackerclub567890abcdef1234567890abcdef1234567890';
 
 const X_LEAD = 'stake1x_lead_wallet_for_drep_x';
 const X_MEMBER_AS_LEAD =

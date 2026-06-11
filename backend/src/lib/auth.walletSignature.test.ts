@@ -59,7 +59,7 @@ import { verifyWalletSignature } from './auth';
 import { blake2b224 } from './cardanoAddress';
 
 const MAINNET = 1;
-const TESTNET = 0;
+const _TESTNET = 0;
 
 /**
  * Build a CIP-30 DataSignature for the given message, signing key, and

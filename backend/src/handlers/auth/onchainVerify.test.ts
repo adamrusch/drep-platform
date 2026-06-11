@@ -60,7 +60,7 @@ vi.mock('../../lib/dynamodb', () => ({
         (item['identityKey'] as string | undefined);
       if (!pk) throw new Error('mock putItem: no recognised PK');
       const compositeKey = `${table}::${pk}`;
-      if (condition && condition.includes('attribute_not_exists') && ddbStore.has(compositeKey)) {
+      if (condition?.includes('attribute_not_exists') && ddbStore.has(compositeKey)) {
         const err = new Error('ConditionalCheckFailedException');
         err.name = 'ConditionalCheckFailedException';
         throw err;
@@ -105,7 +105,7 @@ vi.mock('../../lib/dynamodb', () => ({
         (key['identityKey'] as string | undefined);
       if (!pk) return;
       const compositeKey = `${table}::${pk}`;
-      if (condition && condition.includes('attribute_exists') && !ddbStore.has(compositeKey)) {
+      if (condition?.includes('attribute_exists') && !ddbStore.has(compositeKey)) {
         const err = new Error('ConditionalCheckFailedException');
         err.name = 'ConditionalCheckFailedException';
         throw err;

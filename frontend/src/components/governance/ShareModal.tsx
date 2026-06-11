@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import type React from 'react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Copy, Twitter, MessageCircle, Globe, X } from 'lucide-react';
@@ -82,6 +83,7 @@ export function ShareModal({ url, title, trigger }: ShareModalProps): React.Reac
             </Dialog.Title>
             <Dialog.Close asChild>
               <button
+                type="button"
                 aria-label={t('share.close')}
                 className="text-[var(--text-tertiary)] hover:text-[var(--text-primary)] transition-colors -mt-1 -mr-1 p-1"
               >

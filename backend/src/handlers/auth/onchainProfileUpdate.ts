@@ -97,7 +97,7 @@ export const handler = async (
       // prototype-pollution noise.
       const entries = Object.entries(body.socialLinks as Record<string, unknown>);
       for (const [key, value] of entries) {
-        if (!Object.prototype.hasOwnProperty.call(body.socialLinks, key)) continue;
+        if (!Object.hasOwn(body.socialLinks, key)) continue;
         if (!(KNOWN_SOCIAL_LINK_KEYS as readonly string[]).includes(key)) {
           return badRequest(
             `socialLinks contains unknown key '${key}' (allowed: ${KNOWN_SOCIAL_LINK_KEYS.join(', ')})`,

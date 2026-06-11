@@ -35,7 +35,6 @@ import type {
   CommitteeMember,
 } from './koios';
 
-// biome-ignore lint/complexity/useLiteralKeys: brackets match codebase convention for env-var access (`lib/auth.ts`, `lib/dynamodb.ts`).
 const KOIOS_BASE = process.env['KOIOS_BASE_URL'] ?? 'https://api.koios.rest/api/v1';
 /** Aggressive timeout for the SPO Calidus lookup — this is a small, single-
  *  row request, but a stuck Koios shouldn't keep the login hanging. */

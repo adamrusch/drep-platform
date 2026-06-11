@@ -1,5 +1,5 @@
 import { SignJWT, jwtVerify, type JWTPayload as JoseJWTPayload } from 'jose';
-import * as crypto from 'crypto';
+import * as crypto from 'node:crypto';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { decode as cborDecode, encode as cborEncode } from 'cbor-x';
 import type { JWTPayload, UserRole, SessionType, OnChainRole } from './types';
@@ -8,6 +8,7 @@ import {
   decodeCardanoAddress,
   publicKeyMatchesAddress,
   blake2b224,
+  type DecodedAddress,
 } from './cardanoAddress';
 import { drepIdFromDRepKey } from './drepId';
 
@@ -121,7 +122,7 @@ export async function peekChallenge(
   walletAddress: string,
 ): Promise<{ valid: boolean; reason?: string }> {
   const stored = await getItem<AuthNonceItem>(tableNames.authNonces, { nonce });
-  if (!stored || stored.kind !== 'challenge') {
+  if (stored?.kind !== 'challenge') {
     return { valid: false, reason: 'Challenge nonce not found or already used' };
   }
 
@@ -257,7 +258,7 @@ export function verifyWalletSignature(
   // We catch decode errors so a malformed/unsupported address rejects
   // cleanly (4xx-equivalent) rather than 5xx-ing through the handler's
   // generic catch.
-  let decoded;
+  let decoded: DecodedAddress;
   try {
     decoded = decodeCardanoAddress(walletAddress);
   } catch {
@@ -430,7 +431,7 @@ function verifyCoseSign1Core(
       if (Buffer.isBuffer(raw)) pubkeyBytes = raw;
       else if (raw instanceof Uint8Array) pubkeyBytes = Buffer.from(raw);
     }
-    if (!pubkeyBytes || pubkeyBytes.length !== 32) {
+    if (pubkeyBytes?.length !== 32) {
       return { valid: false, reason: 'Could not extract 32-byte Ed25519 public key from COSE_Key' };
     }
 
@@ -854,7 +855,7 @@ export async function validateMutationNonce(
   walletAddress: string,
 ): Promise<{ valid: boolean; reason?: string }> {
   const stored = await getItem<AuthNonceItem>(tableNames.authNonces, { nonce });
-  if (!stored || stored.kind !== 'mutation') {
+  if (stored?.kind !== 'mutation') {
     return { valid: false, reason: 'Mutation nonce not found or already used' };
   }
   if (Date.now() / 1000 > stored.expiresAt) {
@@ -982,7 +983,7 @@ export async function validateDRepLinkNonce(
   walletAddress: string,
 ): Promise<{ valid: boolean; reason?: string }> {
   const stored = await getItem<AuthNonceItem>(tableNames.authNonces, { nonce });
-  if (!stored || stored.kind !== 'drep_link') {
+  if (stored?.kind !== 'drep_link') {
     return { valid: false, reason: 'DRep-link nonce not found or already used' };
   }
   if (Date.now() / 1000 > stored.expiresAt) {

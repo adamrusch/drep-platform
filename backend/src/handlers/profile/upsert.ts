@@ -3,7 +3,7 @@ import { getItem, putItem, tableNames } from '../../lib/dynamodb';
 import type { UserItem, SocialLinks } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { writeAuditEvent } from '../../lib/audit';
-import { ok, badRequest, internalError, handleError } from '../_response';
+import { ok, badRequest, handleError } from '../_response';
 
 interface UpsertProfileBody {
   displayName?: string;

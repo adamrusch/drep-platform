@@ -194,6 +194,7 @@ function FormationWizard({ onCancel }: { onCancel: () => void }): React.ReactEle
   const checkRef = useRef<{ key: string; timer?: ReturnType<typeof setTimeout> }>(
     { key: '' },
   );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only re-run when the joined value-key changes; mutate identity + reactive `trimmedValues` aren't meaningful triggers
   useEffect(() => {
     if (checkRef.current.timer) clearTimeout(checkRef.current.timer);
     const inputs = trimmedValues.filter((v) => v.length > 0);
