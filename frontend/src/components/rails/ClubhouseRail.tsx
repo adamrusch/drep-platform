@@ -1,4 +1,4 @@
-import React from 'react';
+import type React from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Sparkles, Users } from 'lucide-react';
@@ -98,6 +98,7 @@ function ActiveThreadsCard({ drepId }: { drepId: string }): React.ReactElement {
                 {thread.title}
               </Link>
               <span
+                role="img"
                 className="text-[11px] text-[var(--text-tertiary)] tabular-nums flex-shrink-0"
                 aria-label={t('clubhouseRail.repliesIn24h', {
                   count: thread.replyCount24h,
@@ -168,6 +169,7 @@ function TopContributorsCard({ drepId }: { drepId: string }): React.ReactElement
                   {label}
                 </span>
                 <span
+                  role="img"
                   className="text-[11px] tabular-nums text-[var(--text-tertiary)]"
                   aria-label={t('clubhouseRail.contributions', {
                     count: c.contributionCount,

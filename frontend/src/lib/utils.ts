@@ -12,7 +12,7 @@ export function formatWalletAddress(address: string, chars = 8): string {
 
 export function formatLovelace(lovelace: string): string {
   const ada = Number(lovelace) / 1_000_000;
-  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(ada) + ' ADA';
+  return `${new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(ada)} ADA`;
 }
 
 export function formatRelativeTime(isoDate: string): string {

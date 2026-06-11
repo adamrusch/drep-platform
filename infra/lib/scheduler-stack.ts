@@ -10,8 +10,8 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
-import { Construct } from 'constructs';
-import * as path from 'path';
+import type { Construct } from 'constructs';
+import * as path from 'node:path';
 import type { DatabaseStack } from './database-stack';
 import { type FreshnessSchedule, getFreshnessRow } from './freshness';
 

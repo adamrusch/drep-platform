@@ -1,4 +1,4 @@
-import React from 'react';
+import type React from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { ArrowRight, Check, X, Clock, AlarmClock } from 'lucide-react';
@@ -124,9 +124,7 @@ export function GovernanceHistoryWidget(): React.ReactElement {
           {statsLoading ? (
             <span className="inline-block h-3.5 w-48 bg-[var(--bg-muted)] rounded animate-pulse" />
           ) : (
-            <>
-              {t('historyWidget.statusBreakdown', { enacted, dropped, expired, active })}
-            </>
+            t('historyWidget.statusBreakdown', { enacted, dropped, expired, active })
           )}
         </div>
         <div className="text-[12.5px] text-[var(--text-tertiary)] tabular-nums">

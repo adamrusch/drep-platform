@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import type React from 'react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Check, ThumbsUp, ThumbsDown, MinusCircle, Shield, X } from 'lucide-react';
@@ -119,6 +120,7 @@ export function CastVoteModal({ actionTitle, trigger }: CastVoteModalProps): Rea
             </div>
             <Dialog.Close asChild>
               <button
+                type="button"
                 aria-label={t('castVote.close')}
                 className="text-[var(--text-tertiary)] hover:text-[var(--text-primary)] transition-colors -mt-1 -mr-1 p-1"
               >

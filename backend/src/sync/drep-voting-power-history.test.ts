@@ -94,6 +94,7 @@ describe('buildPowerRow — TTL attribute', () => {
     expect(row.ttl).toBeLessThan(2_000_000_000);
   });
 
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: descriptive test name, not a template expression
   it('builds an SK of `POWER#${zero-padded epoch}`', async () => {
     const nowMs = Date.now();
     const row = buildPowerRow({

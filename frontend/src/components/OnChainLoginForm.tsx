@@ -31,7 +31,8 @@
  * leaf and shouldn't drag in the global UI store). Loading state is
  * tracked locally; the caller can wrap in their own `<Card>` chrome.
  */
-import React, { useCallback, useState } from 'react';
+import type React from 'react';
+import { useCallback, useState } from 'react';
 import { post } from '@/lib/api';
 import { useAuthStore } from '@/stores/authStore';
 import type { OnChainRole, SessionType } from '@/types';

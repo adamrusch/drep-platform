@@ -58,7 +58,7 @@ export const handler = async (
     }
 
     const draft = await loadRationaleDraft(voteScope);
-    if (!draft || !draft.rationaleStatement?.trim()) {
+    if (!draft?.rationaleStatement?.trim()) {
       return conflict('There is no rationale draft to finalize');
     }
 
