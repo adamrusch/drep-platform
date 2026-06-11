@@ -39,10 +39,18 @@ vi.mock('./dynamodb', () => {
       const key = item['sessionKey'] as string;
       store.set(key, { ...item });
     }),
-    getItem: vi.fn(async (_table: string, key: Record<string, unknown>) => {
-      const k = key['sessionKey'] as string;
-      return store.get(k) ?? null;
-    }),
+    // Captures the third `options` arg so M3 can assert
+    // `{consistentRead: true}` was requested by isSessionRevoked.
+    getItem: vi.fn(
+      async (
+        _table: string,
+        key: Record<string, unknown>,
+        _options?: { consistentRead?: boolean },
+      ) => {
+        const k = key['sessionKey'] as string;
+        return store.get(k) ?? null;
+      },
+    ),
     updateItem: vi.fn(
       async (
         _table: string,
@@ -251,6 +259,53 @@ describe('isSessionRevoked — fail OPEN on store errors', () => {
 });
 
 // ---------------------------------------------------------------------------
+// M3 (2026-06-10 security review) — strongly-consistent revocation read
+// ---------------------------------------------------------------------------
+
+describe('isSessionRevoked — M3: ConsistentRead', () => {
+  it('a revoked jti is visible on the next read (uses ConsistentRead)', async () => {
+    // Record then revoke. The next isSessionRevoked must see the
+    // tombstone — pre-fix an eventually-consistent read could miss
+    // it for ~subsecond.
+    const jti = '01H_M3_CONSISTENT';
+    await recordSessionForUser(WALLET, jti, 'drep');
+    await revokeSessionByJti(jti, WALLET);
+    expect(await isSessionRevoked(jti)).toBe(true);
+  });
+
+  it('passes consistentRead:true to the underlying getItem', async () => {
+    // The load-bearing invariant: the GetItem call MUST request
+    // strongly-consistent semantics. If a future maintainer drops the
+    // option, this test fails immediately rather than silently
+    // letting just-revoked tokens slip through one request.
+    const jti = '01H_M3_OPTIONS';
+    await recordSessionForUser(WALLET, jti, 'drep');
+    await revokeSessionByJti(jti, WALLET);
+    vi.mocked(dynamo.getItem).mockClear();
+    await isSessionRevoked(jti);
+    const calls = vi.mocked(dynamo.getItem).mock.calls;
+    // First call is the one isSessionRevoked makes; third arg is the
+    // options object with `consistentRead:true`.
+    expect(calls.length).toBeGreaterThan(0);
+    const optionsArg = calls[0]?.[2] as { consistentRead?: boolean } | undefined;
+    expect(optionsArg?.consistentRead).toBe(true);
+  });
+
+  it('preserves the fail-OPEN contract even with ConsistentRead enabled', async () => {
+    // Defensive — ConsistentRead is not allowed to break the existing
+    // fail-OPEN safety: a thrown read MUST still resolve to `false`.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      vi.mocked(dynamo.getItem).mockRejectedValueOnce(new Error('DDB out (consistent)'));
+      const result = await isSessionRevoked('01H_M3_FAILOPEN');
+      expect(result).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // recordSessionForUser + revokeAllSessionsForUser via the GSI
 // ---------------------------------------------------------------------------
 
@@ -330,6 +385,64 @@ describe('recordSessionForUser + revokeAllSessionsForUser', () => {
 });
 
 // ---------------------------------------------------------------------------
+// M4 (2026-06-10 security review) — current-jti backstop for GSI freshness
+// ---------------------------------------------------------------------------
+
+describe('revokeAllSessionsForUser — M4: current-jti backstop', () => {
+  it('revokes the caller current jti even when the GSI omits it (stale replica)', async () => {
+    // Pretend the caller's CURRENT session was just recorded
+    // sub-second ago and the GSI replica hasn't caught up — the GSI
+    // Query returns an empty page even though the session row
+    // exists. The M4 fix says we MUST still tombstone the caller's
+    // own jti.
+    const currentJti = '01H_M4_CURRENT';
+    await recordSessionForUser(WALLET, currentJti, 'drep');
+    // Mock the GSI Query to return ZERO rows so the walk produces
+    // nothing — the only way the current jti gets tombstoned is via
+    // the explicit M4 backstop.
+    vi.mocked(dynamo.queryItems).mockResolvedValueOnce({
+      items: [],
+      lastEvaluatedKey: undefined,
+      count: 0,
+    });
+
+    const written = await revokeAllSessionsForUser(WALLET, currentJti);
+
+    // The caller's session must be revoked even though the GSI was
+    // stale — this is the load-bearing M4 invariant.
+    expect(await isSessionRevoked(currentJti)).toBe(true);
+    expect(written).toBe(1);
+  });
+
+  it('does not double-count when the GSI also returns the current jti', async () => {
+    // Happy path — the GSI sees the row too. The explicit backstop
+    // path tombstones it first; the GSI walk MUST skip a row already
+    // in the tombstoned set so we don't count it twice.
+    const currentJti = '01H_M4_NO_DOUBLE_COUNT';
+    await recordSessionForUser(WALLET, currentJti, 'drep');
+
+    const written = await revokeAllSessionsForUser(WALLET, currentJti);
+    expect(written).toBe(1);
+    expect(await isSessionRevoked(currentJti)).toBe(true);
+  });
+
+  it('without currentJti the behavior is unchanged (no regression)', async () => {
+    // The optional `currentJti` parameter must not affect callers
+    // that don't pass it (the cron path, today). A vanilla
+    // revokeAllSessionsForUser without a currentJti still walks the
+    // GSI and tombstones every row.
+    const jtiA = '01H_M4_NO_PARAM_A';
+    const jtiB = '01H_M4_NO_PARAM_B';
+    await recordSessionForUser(WALLET, jtiA, 'drep');
+    await recordSessionForUser(WALLET, jtiB, 'drep');
+    const written = await revokeAllSessionsForUser(WALLET);
+    expect(written).toBe(2);
+    expect(await isSessionRevoked(jtiA)).toBe(true);
+    expect(await isSessionRevoked(jtiB)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // recordSessionForUser — onChainRole field
 // ---------------------------------------------------------------------------
 
@@ -347,6 +460,72 @@ describe('recordSessionForUser — onChainRole field', () => {
     const item = sessionPut![1] as Record<string, unknown>;
     expect(item['onChainRoles']).toEqual(['drep']);
     expect(item['identityId']).toBe('drep1aaa');
+  });
+
+  // -------------------------------------------------------------------------
+  // M5 (2026-06-10 security review) — SPO Calidus pubkey storage
+  // -------------------------------------------------------------------------
+
+  it('M5: stores spoCalidusPubKeyHex on an SPO session row when provided', async () => {
+    const KEY = '0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF';
+    await recordSessionForUser('pool1m5_record', '01H_M5_SPO', 'spo', undefined, {
+      spoCalidusPubKeyHex: KEY,
+    });
+    const putMock = vi.mocked(dynamo.putItem);
+    const sessionPut = putMock.mock.calls.find((c) => {
+      const item = c[1] as Record<string, unknown>;
+      return item['identityId'] === 'pool1m5_record';
+    });
+    expect(sessionPut).toBeDefined();
+    const item = sessionPut![1] as Record<string, unknown>;
+    // Lowercased on write — match how the cron compares.
+    expect(item['spoCalidusPubKeyHex']).toBe(KEY.toLowerCase());
+    expect(item['onChainRoles']).toEqual(['spo']);
+  });
+
+  it('M5: does NOT store spoCalidusPubKeyHex when no extras are supplied (additive)', async () => {
+    // Pre-M5 callers that don't pass extras must not have the field
+    // written onto their row. The field stays sparse so the cron's
+    // pre-M5 fallback (no stored key → no rotation check) keeps
+    // working without retroactive churn.
+    await recordSessionForUser('pool1pre_m5_record', '01H_PRE_M5', 'spo');
+    const putMock = vi.mocked(dynamo.putItem);
+    const sessionPut = putMock.mock.calls.find((c) => {
+      const item = c[1] as Record<string, unknown>;
+      return item['identityId'] === 'pool1pre_m5_record';
+    });
+    expect(sessionPut).toBeDefined();
+    const item = sessionPut![1] as Record<string, unknown>;
+    expect(item['spoCalidusPubKeyHex']).toBeUndefined();
+  });
+
+  it('M5: does NOT store spoCalidusPubKeyHex on a non-SPO session even if passed (defensive)', async () => {
+    // A drep/cc/proposer session must never carry an
+    // spoCalidusPubKeyHex — the cron's SPO branch keys off this
+    // field's presence, and stuffing it on a non-SPO row would
+    // muddy the contract.
+    const KEY = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    await recordSessionForUser('drep1m5_wrong_role', '01H_WRONG_ROLE', 'drep', undefined, {
+      spoCalidusPubKeyHex: KEY,
+    });
+    const putMock = vi.mocked(dynamo.putItem);
+    const sessionPut = putMock.mock.calls.find((c) => {
+      const item = c[1] as Record<string, unknown>;
+      return item['identityId'] === 'drep1m5_wrong_role';
+    });
+    expect(sessionPut).toBeDefined();
+    const item = sessionPut![1] as Record<string, unknown>;
+    expect(item['spoCalidusPubKeyHex']).toBeUndefined();
+  });
+
+  it('M5: listActiveSessionIndices surfaces spoCalidusPubKeyHex on SPO rows', async () => {
+    const KEY = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    await recordSessionForUser('pool1m5_enum', '01H_M5_ENUM', 'spo', undefined, {
+      spoCalidusPubKeyHex: KEY,
+    });
+    const result = await listActiveSessionIndices();
+    const row = result.find((r) => r.walletAddress === 'pool1m5_enum');
+    expect(row?.spoCalidusPubKeyHex).toBe(KEY);
   });
 });
 

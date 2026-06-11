@@ -67,16 +67,27 @@ const CRV_ED25519 = 6;
 
 /** Normalises a value that may be a Map or a plain object indexed by either
  *  numeric or string keys into a lookup function. Some CBOR decoders surface
- *  small-integer keys as JS numbers, others as decimal strings; we accept both. */
+ *  small-integer keys as JS numbers, others as decimal strings; we accept both.
+ *
+ *  S4 hardening (2026-06-10 security review) — the plain-object branch uses
+ *  `Object.prototype.hasOwnProperty.call(rec, key)` instead of the `in`
+ *  operator / unguarded property access. The `in` operator walks the
+ *  prototype chain, so a CBOR payload that decoded to an object whose
+ *  prototype was polluted (e.g. via `Object.prototype.foo = bar`) could
+ *  return non-own properties as "present". The COSE verifier is highly
+ *  unlikely to encounter this in practice (the CBOR decoder produces fresh
+ *  objects), but the own-property check eliminates the entire class of
+ *  prototype-pollution defense-in-depth concerns.
+ */
 function mapGet(value: unknown, key: number | string): unknown {
   if (value instanceof Map) return value.get(key);
   if (value !== null && typeof value === 'object') {
     const rec = value as Record<string, unknown>;
     if (typeof key === 'number') {
       const asStr = String(key);
-      return asStr in rec ? rec[asStr] : undefined;
+      return Object.hasOwn(rec, asStr) ? rec[asStr] : undefined;
     }
-    return rec[key];
+    return Object.hasOwn(rec, key) ? rec[key] : undefined;
   }
   return undefined;
 }

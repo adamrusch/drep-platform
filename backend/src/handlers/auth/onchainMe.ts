@@ -87,6 +87,16 @@ export const handler = async (
   try {
     const authCtx = extractAuthContext(event);
 
+    // S1 fix (2026-06-10 security review) — reject legacy-cookie
+    // sessions explicitly. Primary signal is `tokenSource === 'legacy'`
+    // (post-S1 authorizer); the empty-onChainRoles backstop below
+    // remains for in-flight authorizer rollout.
+    if (authCtx.tokenSource === 'legacy') {
+      return unauthorized(
+        'This endpoint requires an on-chain session. Use /auth/me for legacy wallet sessions.',
+      );
+    }
+
     // ---- Resolve personId — JWT claim preferred, fallback to
     // credential→person re-resolve for pre-Decision-3 tokens ----
     let personId = authCtx.personId;

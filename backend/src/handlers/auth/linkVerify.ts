@@ -64,7 +64,10 @@
  */
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { extractAuthContext } from '../../middleware/role-guard';
-import { consumeNonce } from '../../lib/identity/auth/nonce';
+import {
+  consumeNonceWithCheck,
+  LINK_PAYLOAD_PREFIX,
+} from '../../lib/identity/auth/nonce';
 import { verifyCip8 } from '../../lib/identity/auth/cose';
 import { verifyEd25519 } from '../../lib/identity/crypto/ed25519';
 import { hexToBytes } from '../../lib/identity/crypto/hex';
@@ -126,6 +129,22 @@ export const handler = async (
   try {
     const authCtx = extractAuthContext(event);
 
+    // S1 fix (2026-06-10 security review) — on-chain endpoints must
+    // reject legacy-cookie sessions. Primary signal is the
+    // authorizer-forwarded `tokenSource === 'legacy'`. Backstop signal
+    // (for in-flight authorizers that pre-date S1) is an empty
+    // `onChainRoles[]` array — every legacy session has it empty.
+    if (authCtx.tokenSource === 'legacy') {
+      return unauthorized(
+        'This endpoint requires an on-chain session. Sign in via /auth/onchain/verify first.',
+      );
+    }
+    if (!authCtx.onChainRoles || authCtx.onChainRoles.length === 0) {
+      return unauthorized(
+        'This endpoint requires an on-chain session. Sign in via /auth/onchain/verify first.',
+      );
+    }
+
     if (!event.body) {
       return badRequest('Request body is required');
     }
@@ -156,118 +175,13 @@ export const handler = async (
     const koios = buildKoiosAdapter();
     const network = readNetwork();
 
-    let credentialId: string | undefined;
-    let onChainRole: OnChainRole | undefined;
-
-    // ---- Signature verification — IDENTICAL contract to onchainVerify ----
-    if (role === 'drep' || role === 'proposer') {
-      if (
-        typeof body.keyHex !== 'string' ||
-        !isHex(body.keyHex, MAX_KEY_HEX_LEN) ||
-        !isHex(body.signatureHex, MAX_SIG_HEX_LEN)
-      ) {
-        return badRequest('keyHex and signatureHex must be hex within bounds');
-      }
-
-      const nonceValid = await consumeNonce(nonceStore, body.payload, { expectedStage: stage });
-      if (!nonceValid) {
-        return unauthorized('Invalid or expired nonce');
-      }
-
-      const verifyResult = await verifyCip8({
-        signatureHex: body.signatureHex,
-        keyHex: body.keyHex,
-        expectedPayload: body.payload,
-      });
-      if (!verifyResult.ok || !verifyResult.pubKey) {
-        return unauthorized('Signature verification failed');
-      }
-      const { pubKey, addressBytes, addressBound } = verifyResult;
-
-      if (role === 'proposer') {
-        if (addressBound !== false) {
-          if (!addressBytes || addressBytes.length === 0) {
-            return unauthorized('Invalid address in signature');
-          }
-          const expectedHeader = network === 'mainnet' ? REWARD_ADDR_MAINNET : REWARD_ADDR_PREPROD;
-          if (addressBytes[0] !== expectedHeader) {
-            return unauthorized('Address type mismatch for proposer role');
-          }
-        }
-        const stakeAddr = stakeAddressFromPubKey(pubKey, network);
-        const resolution = await resolveProposer(koios, stakeAddr);
-        if (!resolution.isProposer) {
-          return unauthorized('Not a proposer');
-        }
-        credentialId = stakeAddr;
-        onChainRole = 'proposer';
-      } else {
-        if (addressBound !== false) {
-          if (!addressBytes || addressBytes.length === 0) {
-            return unauthorized('Invalid address in signature');
-          }
-          if (!isDrepCredentialAddress(addressBytes)) {
-            return unauthorized('Address type mismatch for DRep role');
-          }
-        }
-        const drepId = drepIdFromPubKey(pubKey);
-        const resolution = await resolveDRep(koios, drepId);
-        if (!resolution.isDrep) {
-          return unauthorized('Not an active DRep');
-        }
-        credentialId = drepId;
-        onChainRole = 'drep';
-      }
-    } else {
-      if (
-        typeof body.publicKeyHex !== 'string' ||
-        !isHexExact(body.signatureHex, RAW_SIG_HEX_LEN) ||
-        !isHexExact(body.publicKeyHex, RAW_PUBKEY_HEX_LEN)
-      ) {
-        return badRequest(
-          `signatureHex must be ${RAW_SIG_HEX_LEN} hex chars and publicKeyHex must be ${RAW_PUBKEY_HEX_LEN}`,
-        );
-      }
-
-      const nonceValid = await consumeNonce(nonceStore, body.payload, { expectedStage: stage });
-      if (!nonceValid) {
-        return unauthorized('Invalid or expired nonce');
-      }
-
-      const pubKey = hexToBytes(body.publicKeyHex);
-      const sig = hexToBytes(body.signatureHex);
-      const msg = new TextEncoder().encode(body.payload);
-      const sigResult = await verifyEd25519(sig, msg, pubKey);
-      if (!sigResult.ok) {
-        return unauthorized('Signature verification failed');
-      }
-
-      if (role === 'spo') {
-        const resolution = await resolveSpo(koios, body.publicKeyHex.toLowerCase());
-        if (!resolution.isSpo || !resolution.poolId) {
-          return unauthorized('Not an active SPO');
-        }
-        credentialId = resolution.poolId;
-        onChainRole = 'spo';
-      } else {
-        const hotKeyHash = ccHotKeyHashHex(pubKey);
-        const resolution = await resolveCc(koios, hotKeyHash);
-        if (!resolution.isCc) {
-          return unauthorized('Not an authorized CC member');
-        }
-        credentialId = resolution.ccColdId ?? resolution.ccHotId;
-        if (!credentialId) {
-          return unauthorized('CC member has no credential identifier');
-        }
-        onChainRole = 'cc';
-      }
-    }
-
-    if (!credentialId || !onChainRole) {
-      return internalError('Verification produced no identity');
-    }
-
-    // ---- Resolve the caller's personId ----
+    // ---- Resolve the caller's personId (M1 binding cross-check) ----
+    //
+    // We need this BEFORE consuming the nonce so we can verify the
+    // payload's bound personId matches the calling session. Resolve
+    // strategy is identical to the link/challenge counterpart so the
+    // bound personId on the payload (issued by challenge) lines up
+    // with the personId we re-resolve here (verify).
     //
     // Prefer the JWT claim (set on tokens minted post-Decision-3). For
     // pre-Decision-3 on-chain tokens that omit the claim, fall back to
@@ -298,6 +212,156 @@ export const handler = async (
         );
         callerPersonId = provisioned.personId;
       }
+    }
+
+    let credentialId: string | undefined;
+    let onChainRole: OnChainRole | undefined;
+
+    // ---- Signature verification — IDENTICAL contract to onchainVerify ----
+    //
+    // S2 fix (2026-06-10 security review) — use `consumeNonceWithCheck`
+    // (peek → run signature+role check → delete only on success). The
+    // prior consume-then-verify sequence burned a victim's fresh nonce
+    // on a forged signature (a one-call DoS). The two-phase consume
+    // preserves single-use semantics on success and keeps the nonce
+    // alive after a bad-signature attempt so a subsequent legitimate
+    // verify still works.
+    //
+    // M1 cross-check is embedded inside the check closure: the parsed
+    // payload's `boundContext` (personId) MUST equal `callerPersonId`.
+    // Mismatch returns `{ok:false}` so the nonce is NOT deleted.
+    if (role === 'drep' || role === 'proposer') {
+      if (
+        typeof body.keyHex !== 'string' ||
+        !isHex(body.keyHex, MAX_KEY_HEX_LEN) ||
+        !isHex(body.signatureHex, MAX_SIG_HEX_LEN)
+      ) {
+        return badRequest('keyHex and signatureHex must be hex within bounds');
+      }
+
+      const consumeResult = await consumeNonceWithCheck<{
+        credentialId: string;
+        onChainRole: OnChainRole;
+      }>(
+        nonceStore,
+        body.payload,
+        async (parsed) => {
+          // M1 — reject when the embedded personId doesn't match
+          // the calling session. The signature is over bytes the
+          // attacker bound to their OWN personId, so this rejects
+          // the cross-account victim-replay.
+          if (parsed.boundContext !== callerPersonId) {
+            return { ok: false, reason: 'personId mismatch on link payload' };
+          }
+          const verifyResult = await verifyCip8({
+            signatureHex: body.signatureHex,
+            keyHex: body.keyHex!,
+            expectedPayload: body.payload,
+          });
+          if (!verifyResult.ok || !verifyResult.pubKey) {
+            return { ok: false, reason: 'signature verification failed' };
+          }
+          const { pubKey, addressBytes, addressBound } = verifyResult;
+          if (role === 'proposer') {
+            if (addressBound !== false) {
+              if (!addressBytes || addressBytes.length === 0) {
+                return { ok: false, reason: 'invalid address in signature' };
+              }
+              const expectedHeader =
+                network === 'mainnet' ? REWARD_ADDR_MAINNET : REWARD_ADDR_PREPROD;
+              if (addressBytes[0] !== expectedHeader) {
+                return { ok: false, reason: 'address type mismatch for proposer role' };
+              }
+            }
+            const stakeAddr = stakeAddressFromPubKey(pubKey, network);
+            const resolution = await resolveProposer(koios, stakeAddr);
+            if (!resolution.isProposer) {
+              return { ok: false, reason: 'not a proposer' };
+            }
+            return { ok: true, value: { credentialId: stakeAddr, onChainRole: 'proposer' } };
+          }
+          if (addressBound !== false) {
+            if (!addressBytes || addressBytes.length === 0) {
+              return { ok: false, reason: 'invalid address in signature' };
+            }
+            if (!isDrepCredentialAddress(addressBytes)) {
+              return { ok: false, reason: 'address type mismatch for DRep role' };
+            }
+          }
+          const drepId = drepIdFromPubKey(pubKey);
+          const resolution = await resolveDRep(koios, drepId);
+          if (!resolution.isDrep) {
+            return { ok: false, reason: 'not an active DRep' };
+          }
+          return { ok: true, value: { credentialId: drepId, onChainRole: 'drep' } };
+        },
+        { expectedStage: stage, prefix: LINK_PAYLOAD_PREFIX },
+      );
+      if (!consumeResult.ok) {
+        // The reason is logged but never leaked to the caller; the
+        // wire response is a uniform 401 so a probe can't classify
+        // failure modes.
+        return unauthorized('Invalid or expired nonce');
+      }
+      credentialId = consumeResult.value.credentialId;
+      onChainRole = consumeResult.value.onChainRole;
+    } else {
+      if (
+        typeof body.publicKeyHex !== 'string' ||
+        !isHexExact(body.signatureHex, RAW_SIG_HEX_LEN) ||
+        !isHexExact(body.publicKeyHex, RAW_PUBKEY_HEX_LEN)
+      ) {
+        return badRequest(
+          `signatureHex must be ${RAW_SIG_HEX_LEN} hex chars and publicKeyHex must be ${RAW_PUBKEY_HEX_LEN}`,
+        );
+      }
+
+      const consumeResult = await consumeNonceWithCheck<{
+        credentialId: string;
+        onChainRole: OnChainRole;
+      }>(
+        nonceStore,
+        body.payload,
+        async (parsed) => {
+          if (parsed.boundContext !== callerPersonId) {
+            return { ok: false, reason: 'personId mismatch on link payload' };
+          }
+          const pubKey = hexToBytes(body.publicKeyHex!);
+          const sig = hexToBytes(body.signatureHex);
+          const msg = new TextEncoder().encode(body.payload);
+          const sigResult = await verifyEd25519(sig, msg, pubKey);
+          if (!sigResult.ok) {
+            return { ok: false, reason: 'signature verification failed' };
+          }
+          if (role === 'spo') {
+            const resolution = await resolveSpo(koios, body.publicKeyHex!.toLowerCase());
+            if (!resolution.isSpo || !resolution.poolId) {
+              return { ok: false, reason: 'not an active SPO' };
+            }
+            return { ok: true, value: { credentialId: resolution.poolId, onChainRole: 'spo' } };
+          }
+          const hotKeyHash = ccHotKeyHashHex(pubKey);
+          const resolution = await resolveCc(koios, hotKeyHash);
+          if (!resolution.isCc) {
+            return { ok: false, reason: 'not an authorized CC member' };
+          }
+          const ccId = resolution.ccColdId ?? resolution.ccHotId;
+          if (!ccId) {
+            return { ok: false, reason: 'CC member has no credential identifier' };
+          }
+          return { ok: true, value: { credentialId: ccId, onChainRole: 'cc' } };
+        },
+        { expectedStage: stage, prefix: LINK_PAYLOAD_PREFIX },
+      );
+      if (!consumeResult.ok) {
+        return unauthorized('Invalid or expired nonce');
+      }
+      credentialId = consumeResult.value.credentialId;
+      onChainRole = consumeResult.value.onChainRole;
+    }
+
+    if (!credentialId || !onChainRole) {
+      return internalError('Verification produced no identity');
     }
 
     // ---- Link the new credential ----

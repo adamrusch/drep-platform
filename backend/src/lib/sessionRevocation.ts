@@ -109,6 +109,20 @@ interface SessionRow extends Record<string, unknown> {
   expiresAt: number;
   /** True after a revoke. Missing / false = active. */
   revoked?: boolean;
+  /** M5 fix (2026-06-10 security review) — the Ed25519 Calidus pubkey
+   *  (hex, lowercase) the SPO presented at login. Stored ONLY on
+   *  `onChainRoles.includes('spo')` sessions; absent on every other
+   *  role. The daily role-revalidation cron's SPO branch reads this
+   *  to detect Calidus-key rotation: when the pool's CURRENT
+   *  registered Calidus key differs from this stored one, the
+   *  session is revoked (pool ownership has transferred to a new
+   *  operator).
+   *
+   *  Optional + additive — pre-M5 SPO session rows omit this field
+   *  and the cron's decision logic falls back to a still-valid
+   *  reading for them (they'll age out via the 30-day JWT TTL).
+   *  New SPO logins always carry it. */
+  spoCalidusPubKeyHex?: string;
 }
 
 /** Default TTL — 30 days, matches the maximum JWT lifetime
@@ -119,6 +133,19 @@ const DEFAULT_SESSION_TTL_SEC = 30 * 24 * 60 * 60;
 
 function hashJti(jti: string): string {
   return createHash('sha256').update(jti, 'utf8').digest('hex');
+}
+
+/**
+ * Optional extras for the session row write (M5 fix, 2026-06-10).
+ * Additive — every field is optional and pre-M5 callers that don't
+ * supply any continue to work unchanged.
+ */
+export interface RecordSessionExtras {
+  /** M5 — the SPO's Calidus pubkey verified at login (hex, lowercase).
+   *  Stored on `onChainRole === 'spo'` sessions only; the cron reads
+   *  it to detect Calidus-key rotation and revoke when the pool's
+   *  current registered key differs. */
+  spoCalidusPubKeyHex?: string;
 }
 
 /**
@@ -136,6 +163,10 @@ function hashJti(jti: string): string {
  * with future multi-role sessions (no migration needed) and to keep
  * the cron's read path uniform.
  *
+ * `extras` — optional per-role metadata (M5 fix, 2026-06-10). SPO
+ * logins pass `spoCalidusPubKeyHex` so the cron can detect Calidus
+ * key rotation. Every other role omits the extras entirely.
+ *
  * Public signature (parameter NAMES preserved) for backward
  * compatibility — semantically `walletAddress` here is the on-chain
  * identity id (the JWT `sub`), which is what every caller already
@@ -146,6 +177,7 @@ export async function recordSessionForUser(
   jti: string,
   onChainRole?: OnChainRole,
   ttlSec: number = DEFAULT_SESSION_TTL_SEC,
+  extras: RecordSessionExtras = {},
 ): Promise<void> {
   const nowSec = Math.floor(Date.now() / 1000);
   const row: SessionRow = {
@@ -155,6 +187,14 @@ export async function recordSessionForUser(
     issuedAt: nowSec,
     expiresAt: nowSec + ttlSec,
     revoked: false,
+    // M5 — only store the Calidus pubkey for SPO sessions where the
+    // caller explicitly supplied it. Other roles must NEVER carry
+    // this attribute (defensive: the cron's SPO branch keys off its
+    // presence, and stuffing it on a non-SPO row would muddle the
+    // contract).
+    ...(onChainRole === 'spo' && extras.spoCalidusPubKeyHex
+      ? { spoCalidusPubKeyHex: extras.spoCalidusPubKeyHex.toLowerCase() }
+      : {}),
   };
   try {
     // Unconditional Put: a row at this `sessionKey` (SHA-256(jti))
@@ -244,12 +284,23 @@ export async function revokeSessionByJti(
  * Errors caught here log to CloudWatch and resolve to `false` (fail
  * open). That matches the pattern already used for `tokenVersion` reads
  * in `middleware/jwt-authorizer.ts`.
+ *
+ * M3 fix (2026-06-10 security review): the GetItem uses
+ * `ConsistentRead: true` so a revoke that lands within DDB's
+ * eventual-consistency window (typically <1s) is visible on the next
+ * request. Pre-fix, an eventually-consistent read could let a
+ * just-logged-out token slip through a single request. The fail-OPEN
+ * contract is unchanged — a thrown read still resolves to `false`.
+ * Cost: 1 RCU per authenticated request vs the prior 0.5 RCU; trivial
+ * at the platform's scale (cents/month) and a meaningful security win.
  */
 export async function isSessionRevoked(jti: string): Promise<boolean> {
   try {
-    const stored = await getItem<SessionRow>(tableNames.identitySessions, {
-      sessionKey: hashJti(jti),
-    });
+    const stored = await getItem<SessionRow>(
+      tableNames.identitySessions,
+      { sessionKey: hashJti(jti) },
+      { consistentRead: true },
+    );
     if (!stored) return false;
     if (stored.revoked !== true) return false;
     // DynamoDB TTL deletion lags; an expired row is treated as absent.
@@ -271,16 +322,62 @@ export async function isSessionRevoked(jti: string): Promise<boolean> {
  * are skipped (no-op). Returns the number of rows newly revoked this
  * call.
  *
+ * # M4 fix (2026-06-10 security review) — current-jti backstop
+ *
+ * The GSI on `identity_sessions` is a local secondary index in the
+ * DDB sense but in CDK terms it's a global secondary index; either
+ * way DDB replicates to it asynchronously. A session recorded
+ * <subsecond ago via `recordSessionForUser` MAY not yet appear in
+ * the GSI's view when the caller's logout-all pass walks it. The
+ * caller's CURRENT session is the most painful one to miss (the
+ * caller is the user actively pressing "log out everywhere"); we
+ * therefore accept an optional `currentJti` and explicitly
+ * tombstone its row at the start of the call, BEFORE the GSI walk.
+ * This guarantees the in-use session is closed regardless of GSI
+ * replica freshness.
+ *
+ * The residual gap is "very recent OTHER sessions may miss this
+ * pass". The legacy `tokenVersion` bump on `users` (kept by every
+ * caller's caller — see `handlers/auth/logout.ts`) is the backstop
+ * for that case.
+ *
  * Best-effort throughout — per-row update failures log + count under
- * `revokeErrors` upstream. A GSI read failure returns 0 so the caller
- * can surface the failure without blocking the legacy `tokenVersion`
- * bump path (which is the authoritative "log out everywhere" for
- * legacy CIP-30 sessions anyway).
+ * `revokeErrors` upstream. A GSI read failure returns the
+ * current-jti-only revoke count (≥0) so the caller can surface the
+ * failure without blocking the legacy `tokenVersion` bump path.
  */
-export async function revokeAllSessionsForUser(walletAddress: string): Promise<number> {
+export async function revokeAllSessionsForUser(
+  walletAddress: string,
+  currentJti?: string,
+): Promise<number> {
   let written = 0;
   const nowSec = Math.floor(Date.now() / 1000);
   const newExpiresAt = nowSec + DEFAULT_SESSION_TTL_SEC;
+  // M4 — keep a set of already-tombstoned sessionKeys so we don't
+  // double-count if the explicit currentJti revoke and the GSI walk
+  // both hit the same row.
+  const tombstoned = new Set<string>();
+
+  // M4: tombstone the caller's CURRENT session FIRST so a stale GSI
+  // replica that omits it can't leave the in-use session valid.
+  if (currentJti) {
+    const currentKey = hashJti(currentJti);
+    try {
+      // Use the same SET expression revokeSessionByJti does — and on
+      // a missing row, fall back to writing a fresh `revoked:true`
+      // row so the authorizer's next consistent read sees the
+      // tombstone.
+      await revokeSessionByJti(currentJti, walletAddress);
+      tombstoned.add(currentKey);
+      written += 1;
+    } catch (err) {
+      console.warn(
+        'revokeAllSessionsForUser: current-jti revoke failed (non-fatal):',
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
   let cursor: Record<string, unknown> | undefined;
   do {
     let page;
@@ -300,6 +397,8 @@ export async function revokeAllSessionsForUser(walletAddress: string): Promise<n
       return written;
     }
     for (const row of page.items) {
+      // Skip rows the explicit current-jti pass already tombstoned.
+      if (tombstoned.has(row.sessionKey)) continue;
       // Skip already-revoked rows so the count is "rows newly
       // revoked this call" — the caller's revokedCount surfaces in
       // the logout response and a re-logout shouldn't inflate it.
@@ -315,6 +414,7 @@ export async function revokeAllSessionsForUser(walletAddress: string): Promise<n
           { '#revoked': 'revoked', '#expiresAt': 'expiresAt' },
           { ':true': true, ':exp': newExpiresAt },
         );
+        tombstoned.add(row.sessionKey);
         written += 1;
       } catch (err) {
         console.warn(
@@ -362,6 +462,20 @@ export interface ActiveSessionIndex {
    *  explicit check is required for correctness — matches the prior
    *  contract). */
   expiresAt: number;
+  /** M5 fix (2026-06-10 security review) — the SPO Calidus pubkey
+   *  (hex, lowercase) stored at login on `onChainRole === 'spo'`
+   *  rows. The cron's SPO branch compares this against the pool's
+   *  CURRENT registered Calidus key and revokes on mismatch.
+   *  Undefined on non-SPO identities and on pre-M5 SPO sessions
+   *  (those age out via the 30-day JWT TTL).
+   *
+   *  When folding multiple SPO session rows for one pool, we keep
+   *  the LATEST stored pubkey (highest `issuedAt`) — different
+   *  sessions for the same pool could in principle have presented
+   *  different Calidus keys if the user logged in across a
+   *  rotation; the latest one is the operator the cron should
+   *  re-validate against. */
+  spoCalidusPubKeyHex?: string;
 }
 
 /**
@@ -413,6 +527,10 @@ export async function listActiveSessionIndices(): Promise<ActiveSessionIndex[]> 
       expressionAttributeValues: { ':false': false, ':now': nowSec },
       ...(cursor ? { exclusiveStartKey: cursor } : {}),
     });
+    // M5 — track per-identity latest issuedAt so the Calidus pubkey
+    // we surface is the freshest one (rotation across multiple
+    // sessions for one pool would carry the new key on the latest).
+    const latestIssuedAt = new Map<string, number>();
     for (const row of page.items) {
       if (typeof row.identityId !== 'string' || row.identityId.length === 0) {
         continue;
@@ -427,6 +545,9 @@ export async function listActiveSessionIndices(): Promise<ActiveSessionIndex[]> 
         Array.isArray(row.onChainRoles) && row.onChainRoles.length > 0
           ? (row.onChainRoles[0] as OnChainRole)
           : undefined;
+      const rowIssuedAt = typeof row.issuedAt === 'number' ? row.issuedAt : 0;
+      const rowCalidus =
+        typeof row.spoCalidusPubKeyHex === 'string' ? row.spoCalidusPubKeyHex : undefined;
       const existing = byIdentity.get(row.identityId);
       if (!existing) {
         byIdentity.set(row.identityId, {
@@ -434,7 +555,9 @@ export async function listActiveSessionIndices(): Promise<ActiveSessionIndex[]> 
           onChainRole: role,
           jtiHashes: [row.sessionKey],
           expiresAt: row.expiresAt,
+          ...(rowCalidus ? { spoCalidusPubKeyHex: rowCalidus } : {}),
         });
+        latestIssuedAt.set(row.identityId, rowIssuedAt);
       } else {
         existing.jtiHashes.push(row.sessionKey);
         if (row.expiresAt > existing.expiresAt) {
@@ -445,6 +568,15 @@ export async function listActiveSessionIndices(): Promise<ActiveSessionIndex[]> 
         // we've seen for this identity.
         if (!existing.onChainRole && role) {
           existing.onChainRole = role;
+        }
+        // M5 — prefer the latest stored Calidus pubkey across an
+        // identity's session rows. A pool that re-logged-in after a
+        // key rotation would have a session row with the NEW key;
+        // that's what we want the cron to revalidate against.
+        const prevLatest = latestIssuedAt.get(row.identityId) ?? 0;
+        if (rowCalidus && rowIssuedAt >= prevLatest) {
+          existing.spoCalidusPubKeyHex = rowCalidus;
+          latestIssuedAt.set(row.identityId, rowIssuedAt);
         }
       }
     }

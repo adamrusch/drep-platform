@@ -63,7 +63,7 @@ export class DynamoDbNonceStore implements NonceStore {
     return stored.payload;
   }
 
-  async delete(nonce: string): Promise<void> {
+  async delete(nonce: string): Promise<boolean> {
     try {
       await deleteItem(
         tableNames.authNonces,
@@ -71,12 +71,20 @@ export class DynamoDbNonceStore implements NonceStore {
         'attribute_exists(#nonce)',
         { '#nonce': 'nonce' },
       );
+      // Conditional delete succeeded → THIS caller removed the row.
+      return true;
     } catch (err) {
-      // ConditionalCheckFailedException means "already gone" — the consume
-      // was racing with another, or expiry cleanup already happened. Treat
-      // as success for delete semantics; anything else rethrows.
+      // M2 fix (2026-06-10 security review) — return `false` instead of
+      // swallowing as `void` when the row was already gone. A concurrent
+      // consumer that lost the race needs to learn it lost; without this
+      // signal, two consumers could both report `consumeNonce → true`
+      // and mint two sessions from one signature. The DDB conditional
+      // delete is atomic: exactly one caller flips the row from present
+      // to absent and sees no exception; every other caller sees CCFE
+      // and returns `false`. Anything else (real DDB error) rethrows so
+      // the caller can fail closed.
       if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
-        return;
+        return false;
       }
       throw err;
     }

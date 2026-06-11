@@ -106,6 +106,7 @@ import {
 import {
   fetchDRepInfoBatch,
   getCommitteeMembers,
+  invalidateCommitteeCache,
   listAllPools,
   listProposals,
   type KoiosDRepInfo,
@@ -116,6 +117,7 @@ import type {
   KoiosClient,
   DrepInfo,
   Proposal,
+  PoolCalidusKeyRow,
   PoolStatusRow,
   CommitteeMember,
 } from '../lib/identity/auth/koios';
@@ -128,6 +130,14 @@ import type { OnChainRole } from '../lib/types';
 // ---------------------------------------------------------------------------
 // STRICT KoiosClient — propagates errors instead of swallowing.
 // ---------------------------------------------------------------------------
+//
+// biome-ignore lint/complexity/useLiteralKeys: brackets match codebase env-var convention
+const KOIOS_BASE = process.env['KOIOS_BASE_URL'] ?? 'https://api.koios.rest/api/v1';
+/** Aggressive timeout for the SPO Calidus-by-pool lookup — small POST,
+ *  shouldn't hang the cron pass under brownouts. Matches the verify-path
+ *  adapter's `CALIDUS_TIMEOUT_MS`. */
+const STRICT_CALIDUS_TIMEOUT_MS = 8_000;
+
 //
 // The production `buildKoiosAdapter` (lib/identity/auth/koiosAdapter.ts)
 // catches every Koios failure and returns `null` / `[]` so the LIVE verify
@@ -206,11 +216,22 @@ function buildStrictKoiosAdapter(): KoiosClient {
         );
       return filtered.filter((p): p is Proposal => p !== null);
     },
-    // Not used by the cron — return null defensively.
+    // Calidus-by-pubkey isn't used by the cron — the SPO branch uses
+    // `poolCalidusKeyByPool` below to look up the CURRENT Calidus key
+    // for a known pool id (M5 fix).
     async poolCalidusKey(): Promise<null> {
       return null;
     },
     async committeeInfo(): Promise<CommitteeMember[]> {
+      // S4 hardening (2026-06-10 security review) — bypass the 1h
+      // committee cache so a resigned CC member is caught on the next
+      // daily run. A warm Lambda container that served live verify
+      // traffic earlier in the day would otherwise hold a stale
+      // committee roster; for daily-cadence cron use the cache TTL
+      // is effectively dead weight. The legacy verify path keeps
+      // the cache (it's request-latency-sensitive); the cron pays
+      // the extra Koios call willingly.
+      invalidateCommitteeCache();
       const rows = await getCommitteeMembers();
       return rows.map(mapCommitteeMember);
     },
@@ -225,6 +246,79 @@ function buildStrictKoiosAdapter(): KoiosClient {
       const rows = await listAllPools();
       const match = rows.find((r) => r.pool_id_bech32 === poolIdBech32);
       return match ? mapPoolStatus(match) : null;
+    },
+    // M5 fix (2026-06-10 security review) — STRICT lookup of one
+    // pool's CURRENT registered Calidus key. PROPAGATES errors so the
+    // cron's SPO branch can distinguish "brownout" from "Calidus key
+    // rotated"; the verify-path adapter (`koiosAdapter.poolCalidusKeyByPool`)
+    // swallows errors and returns null.
+    //
+    // Returns the registered row when present, null when the pool has
+    // no registered Calidus key (either never registered, or revoked
+    // and not yet rotated). The decision logic in `decideForIdentity`
+    // SPO branch treats `null` AND `registered!=true` as revoke
+    // triggers (no current key → can't be the original operator), and
+    // a key that DIFFERS from the session's stored key as a revoke
+    // trigger too (rotation = ownership transfer).
+    async poolCalidusKeyByPool(poolIdBech32: string): Promise<PoolCalidusKeyRow | null> {
+      // Direct `/pool_calidus_keys` POST; the legacy koios.ts module
+      // doesn't wrap this endpoint, mirroring the verify-path adapter.
+      const url = `${KOIOS_BASE}/pool_calidus_keys`;
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), STRICT_CALIDUS_TIMEOUT_MS);
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify({ _pool_id_bech32: [poolIdBech32] }),
+          signal: ac.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+      if (!res.ok) {
+        // Strict: surface non-2xx so the decision logic treats it as
+        // upstream-failure (skip), not a definitive "no key" signal.
+        throw new Error(`Koios poolCalidusKeyByPool HTTP ${res.status} ${res.statusText}`);
+      }
+      const parsed = (await res.json()) as unknown;
+      if (!Array.isArray(parsed)) return null;
+      const rows = parsed as Array<{
+        pool_id_bech32?: string;
+        calidus_pub_key?: string;
+        calidus_id_bech32?: string;
+        registered?: boolean;
+        pool_status?: string;
+      }>;
+      // CIP-151 says at most one Calidus key is registered per pool
+      // at a time. Pick the registered row for the requested pool.
+      const match = rows.find(
+        (r) =>
+          typeof r.pool_id_bech32 === 'string' &&
+          r.pool_id_bech32 === poolIdBech32 &&
+          r.registered === true,
+      );
+      if (!match) return null;
+      if (
+        typeof match.pool_id_bech32 !== 'string' ||
+        typeof match.calidus_pub_key !== 'string' ||
+        typeof match.calidus_id_bech32 !== 'string' ||
+        typeof match.registered !== 'boolean' ||
+        typeof match.pool_status !== 'string'
+      ) {
+        return null;
+      }
+      return {
+        pool_id_bech32: match.pool_id_bech32,
+        calidus_pub_key: match.calidus_pub_key,
+        calidus_id_bech32: match.calidus_id_bech32,
+        registered: match.registered,
+        pool_status: match.pool_status,
+      };
     },
   };
 }
@@ -323,26 +417,46 @@ export async function decideForIdentity(
       }
       case 'spo': {
         // SPO revalidation (Sprint 3 follow-up — closes the previously-
-        // no-op gap).
+        // no-op gap; M5 fix 2026-06-10 closes the Calidus-rotation gap).
         //
-        // The session index stores the SPO's bech32 `pool1...` id (NOT
-        // the originating Calidus pub key), so we re-check via the
-        // adapter's `poolStatus(poolId)` method, added at the same time
-        // as this branch. Decision table:
+        // The session index stores the SPO's bech32 `pool1...` id AND
+        // (post-M5) the Calidus pubkey verified at login. The cron now
+        // checks BOTH:
         //
-        //   - `poolStatus()` THREW → adapter contract says strict
-        //     propagation; caught by the surrounding try/catch and
-        //     mapped to upstream-failure (skip).
-        //   - returned `null` (DEFINITIVE absence — the `/pool_list`
-        //     walk succeeded, pool not present) → revoke.
-        //   - returned a row whose `pool_status === 'retired'` → revoke.
-        //   - returned a row whose `pool_status === 'registered'` (or
-        //     any other non-`retired` lifecycle bucket) → still-valid.
-        //     A pool that has FILED a retirement cert but isn't past
-        //     the epoch yet still has `pool_status='registered'` and
-        //     CAN still vote, so we don't treat the `retiring_epoch`
-        //     field as a revoke signal here. The next pass will revoke
-        //     once the retirement actually lands.
+        //   - Pool lifecycle (`poolStatus(poolId)`): null/retired →
+        //     revoke. This is the Sprint-3 check; it still runs first
+        //     because a retired pool's session shouldn't survive even
+        //     if the Calidus check would have agreed.
+        //   - Calidus key currency (`poolCalidusKeyByPool(poolId)`):
+        //     for sessions that stored a `spoCalidusPubKeyHex` (every
+        //     post-M5 SPO login), the cron compares the pool's CURRENT
+        //     registered Calidus pubkey against the stored one. A
+        //     mismatch means the original operator's Calidus key was
+        //     rotated — pool ownership transfer is the canonical reason
+        //     — so the session must be revoked.
+        //
+        // Decision table (M5 final):
+        //
+        //   - `poolStatus()` THREW → upstream-failure (skip).
+        //   - `poolStatus()` returned `null` → revoke (pool retired or
+        //     absent).
+        //   - `poolStatus()` returned `pool_status='retired'` → revoke.
+        //   - Pool is still registered, and there's NO stored
+        //     `spoCalidusPubKeyHex` (pre-M5 row) → still-valid. The
+        //     row will age out via the 30-day JWT TTL; we can't
+        //     retroactively rotate-check sessions that didn't capture
+        //     the originating key.
+        //   - Pool is still registered, stored Calidus key present:
+        //       * `poolCalidusKeyByPool()` THREW → upstream-failure
+        //         (skip). Never revoke an SPO on a Koios brownout.
+        //       * Returned `null` OR `registered != true` → revoke
+        //         (no current key — the pool dropped its Calidus
+        //         registration; the old session can no longer
+        //         legitimately represent the operator).
+        //       * Returned a row whose `calidus_pub_key` matches the
+        //         stored one (case-insensitive) → still-valid.
+        //       * Returned a row whose `calidus_pub_key` DIFFERS from
+        //         the stored one → revoke (rotation/ownership transfer).
         const r = await koios.poolStatus(index.walletAddress);
         if (r === null) {
           return {
@@ -354,6 +468,30 @@ export async function decideForIdentity(
           return {
             action: 'revoke',
             reason: `pool_status='retired'`,
+          };
+        }
+        // M5 — Calidus key rotation check. Only meaningful when the
+        // session row captured the originating Calidus pubkey
+        // (post-M5 logins). Pre-M5 rows have no stored key and we
+        // can't retroactively detect rotation — those sessions
+        // continue under the pool-lifecycle-only check and age out
+        // via the 30-day JWT TTL.
+        const storedCalidus = index.spoCalidusPubKeyHex;
+        if (!storedCalidus) {
+          return { action: 'still-valid' };
+        }
+        const current = await koios.poolCalidusKeyByPool(index.walletAddress);
+        if (current === null || current.registered !== true) {
+          return {
+            action: 'revoke',
+            reason:
+              'no current registered Calidus key for pool (revoked, never registered, or pool dropped registration)',
+          };
+        }
+        if (current.calidus_pub_key.toLowerCase() !== storedCalidus.toLowerCase()) {
+          return {
+            action: 'revoke',
+            reason: 'Calidus key rotated (pool ownership transfer)',
           };
         }
         return { action: 'still-valid' };

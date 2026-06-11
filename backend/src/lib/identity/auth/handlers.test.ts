@@ -37,6 +37,7 @@ function koiosRejectAll(): KoiosClient {
     poolCalidusKey: async () => null,
     committeeInfo: async () => [],
     poolStatus: async () => null,
+    poolCalidusKeyByPool: async () => null,
   };
 }
 
