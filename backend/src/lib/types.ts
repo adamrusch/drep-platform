@@ -745,6 +745,29 @@ export interface DRepDirectoryItem {
    *  contract; on the Item shape it's the same value persisted to
    *  DynamoDB. */
   isPredefined?: boolean;
+  /** Sprint 5 — content-addressed avatar pipeline. sha256-hex of the
+   *  fetched-and-validated bytes living at S3 key `avatars/<hash>`. Set
+   *  once the avatar-store sync has successfully downloaded the upstream
+   *  `image` URL and persisted the bytes. Absent / null means "no
+   *  self-hosted avatar yet; the frontend renders the identicon
+   *  fallback." Decoupled from the on-chain `image` field so the
+   *  presence of a Cardanoscan-style anchor URL doesn't automatically
+   *  mean we're proxying it (we never proxy at request time — only
+   *  serve previously-validated bytes from S3). */
+  imageContentHash?: string | null;
+  /** Sprint 5 — the upstream `image` URL the bytes hashed at
+   *  `imageContentHash` originally came from. Stored so the avatar-store
+   *  sync can cheap-skip rows whose upstream URL is unchanged (no
+   *  re-download), and so an operator can trace a given hash back to its
+   *  source. Cleared together with `imageContentHash` when the upstream
+   *  removes the avatar. */
+  imageStoredUrl?: string | null;
+  /** Sprint 5 — unix-ms timestamp of the most recent failed download
+   *  attempt. Set by the avatar-store sync when fetch / validation
+   *  fails; the next sync run uses it to rotate the row to the back of
+   *  the work queue so a single broken upstream doesn't starve fresh
+   *  rows. Cleared on a successful store. */
+  imageFetchFailedAt?: number | null;
   lastSyncedAt: string;
   enrichmentVersion: number;
   [key: string]: unknown;
@@ -1058,6 +1081,39 @@ export interface PlatformSafetyModeItem {
   triggeredByCount?: number;
   clearedBy?: string;
   clearedAt?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * platform_state — PK stateKey='DREP_DVT_THRESHOLDS' (Sprint 5).
+ *
+ * Persisted snapshot of the live DRep voting thresholds from Koios's
+ * `/epoch_params`. Written by the directory sync (best-effort each cycle)
+ * and read by the concentration handler so the donut can render the
+ * 60/67/75 threshold markers without doing a per-request Koios round-trip.
+ *
+ * All `dvt_*` fields are fractional doubles in [0, 1]; the concentration
+ * handler converts them to integer percents (0..100) for the donut and
+ * coalesces duplicate-percent thresholds into one marker that lists every
+ * gated action. Optional because not every Koios revision exposes every
+ * threshold; absent fields are simply skipped on render.
+ */
+export interface PlatformDrepDvtThresholdsItem {
+  stateKey: 'DREP_DVT_THRESHOLDS';
+  /** Epoch the snapshot was taken from. */
+  epochNo: number;
+  /** ISO-8601 of the sync cycle that wrote this row. */
+  capturedAt: string;
+  dvt_motion_no_confidence?: number;
+  dvt_committee_normal?: number;
+  dvt_committee_no_confidence?: number;
+  dvt_update_to_constitution?: number;
+  dvt_hard_fork_initiation?: number;
+  dvt_p_p_network_group?: number;
+  dvt_p_p_economic_group?: number;
+  dvt_p_p_technical_group?: number;
+  dvt_p_p_gov_group?: number;
+  dvt_treasury_withdrawal?: number;
   [key: string]: unknown;
 }
 

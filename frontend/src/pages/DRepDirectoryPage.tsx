@@ -11,7 +11,10 @@ import {
 } from 'lucide-react';
 import { get } from '@/lib/api';
 import { StatusPill } from '@/components/ui/StatusPill';
+import DrepConcentration from '@/components/DrepConcentration';
 import { useFormatters } from '@/hooks/useFormatters';
+import { useDrepConcentration } from '@/hooks/useDrepConcentration';
+import { resolveDrepAvatarUrl } from '@/lib/drepAvatar';
 import { cn } from '@/lib/utils';
 import type { DRepDirectoryEntry, PaginatedResponse } from '@/types';
 
@@ -65,51 +68,58 @@ function avatarColor(drepId: string): string {
 interface AvatarProps {
   drepId: string;
   name?: string;
-  imageUrl?: string;
+  /** Sprint 5 — sha256-hex of the self-hosted avatar bytes living at
+   *  `/api/avatar/<hash>`. When set, we serve the validated, S3-stored
+   *  bytes (immutable, CloudFront-cached). When absent, we render a
+   *  deterministic cardenticon identicon keyed by drepId. */
+  imageContentHash?: string | null;
   size?: number;
 }
 
-function DRepAvatar({ drepId, name, imageUrl, size = 48 }: AvatarProps): React.ReactElement {
+function DRepAvatar({
+  drepId,
+  name,
+  imageContentHash,
+  size = 48,
+}: AvatarProps): React.ReactElement {
   const [errored, setErrored] = useState(false);
-  // Per the punt protocol — flaky CIP-119 image URLs (404s, mixed-content,
-  // CORS) are a known headache. We attempt the image but transparently
-  // fall back to the initial-letter avatar on any error.
-  const initial = useMemo(() => {
-    const source = name?.trim() ?? '';
-    if (source.length > 0) return source[0]!.toUpperCase();
-    // Fall back to the first non-prefix character of the DRep ID so each
-    // anchor-less DRep gets a stable letter rather than all 'd'.
-    return drepId.startsWith('drep1') ? drepId[5]?.toUpperCase() ?? 'D' : 'D';
-  }, [name, drepId]);
-  const showImage =
-    !errored &&
-    typeof imageUrl === 'string' &&
-    /^https?:\/\//i.test(imageUrl); // skip ipfs/data: in v1 — flaky
+  // Identicon fallback covers two paths: (a) no self-hosted avatar yet
+  // (`imageContentHash` is null/undefined), and (b) the `/api/avatar/<hash>`
+  // request failed for any reason (404, network blip). Both surface the
+  // same deterministic identicon, which is by-design indistinguishable
+  // from the "never had an avatar" case from the user's perspective.
+  const src = useMemo(
+    () => resolveDrepAvatarUrl({ drepId, imageContentHash, size }),
+    [drepId, imageContentHash, size],
+  );
+  // Use the resolved src for the first attempt; on failure fall back to a
+  // pure identicon (regardless of what the initial hash said). The
+  // identicon path can't fail — it's a data: URL synthesized in the
+  // browser, no network.
+  const finalSrc = useMemo(
+    () => (errored ? resolveDrepAvatarUrl({ drepId, size }) : src),
+    [errored, drepId, size, src],
+  );
+  void name;
   return (
     <div
-      className="flex-shrink-0 inline-flex items-center justify-center font-semibold rounded-token-full overflow-hidden"
+      className="flex-shrink-0 inline-flex items-center justify-center rounded-token-full overflow-hidden"
       style={{
         width: size,
         height: size,
-        background: showImage ? 'transparent' : avatarColor(drepId),
-        color: '#0d1b1f',
-        fontSize: Math.round(size * 0.42),
+        background: avatarColor(drepId),
       }}
       aria-hidden="true"
     >
-      {showImage ? (
-        <img
-          src={imageUrl}
-          alt=""
-          width={size}
-          height={size}
-          loading="lazy"
-          onError={() => setErrored(true)}
-          className="w-full h-full object-cover"
-        />
-      ) : (
-        <span>{initial}</span>
-      )}
+      <img
+        src={finalSrc}
+        alt=""
+        width={size}
+        height={size}
+        loading="lazy"
+        onError={() => setErrored(true)}
+        className="w-full h-full object-cover"
+      />
     </div>
   );
 }
@@ -239,7 +249,7 @@ function DRepCard({ drep }: DRepCardProps): React.ReactElement {
         <DRepAvatar
           drepId={drep.drepId}
           name={drep.givenName}
-          imageUrl={drep.image}
+          imageContentHash={drep.imageContentHash}
           size={52}
         />
         <div className="min-w-0 flex-1">
@@ -469,6 +479,13 @@ export function DRepDirectoryPage(): React.ReactElement {
   const dreps = data?.items ?? [];
   const total = data?.total ?? 0;
   const totalPages = data?.totalPages ?? 1;
+
+  // Voting-power concentration donut data (Sprint 5). Fetched independently
+  // of the directory list — the donut surfaces global concentration math
+  // (smallest coalition to cross 60/67/75% thresholds) that doesn't depend
+  // on the current page/sort/search, so it doesn't refetch on toolbar
+  // changes. Failures are silent — the donut just doesn't render.
+  const concentrationQuery = useDrepConcentration();
   // Server clamps page to valid range; mirror that here so the UI
   // doesn't render stale highlights.
   const effectivePage = data?.page ?? page;
@@ -534,6 +551,21 @@ export function DRepDirectoryPage(): React.ReactElement {
           {' '}{t('drepDirectory.syncedNote')}
         </p>
       </header>
+
+      {/* Sprint 5 — voting-power concentration donut. Hidden until the
+          backend response lands; failures are silent (the donut is
+          informational, not load-bearing). */}
+      {concentrationQuery.data && concentrationQuery.data.concentration.drepCount > 0 && (
+        <DrepConcentration
+          topK={concentrationQuery.data.concentration.topK}
+          byPercent={concentrationQuery.data.concentration.byPercent}
+          drepCount={concentrationQuery.data.concentration.drepCount}
+          totalLabel={concentrationQuery.data.concentration.totalLabel}
+          markers={concentrationQuery.data.markers}
+          defaultThresholdPct={concentrationQuery.data.defaultThresholdPct}
+          thresholdsAsOf={concentrationQuery.data.thresholdsAsOf}
+        />
+      )}
 
       {/* Toolbar — search + sort + page-size */}
       <div className="flex flex-col sm:flex-row sm:items-center gap-3">

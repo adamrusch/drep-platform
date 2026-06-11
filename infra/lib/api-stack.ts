@@ -11,6 +11,7 @@ import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as route53Targets from 'aws-cdk-lib/aws-route53-targets';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as cloudfrontOrigins from 'aws-cdk-lib/aws-cloudfront-origins';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as budgets from 'aws-cdk-lib/aws-budgets';
@@ -155,6 +156,42 @@ export class ApiStack extends cdk.Stack {
     jwtSecret.grantRead(lambdaRole);
     blockfrostSecret.grantRead(lambdaRole);
 
+    // ---- Sprint 5: content-addressed DRep avatar bucket ----
+    //
+    // **Why a separate S3 bucket:** the avatar pipeline downloads each
+    // DRep's CIP-119 image URL once, hashes it, and stores the bytes by
+    // sha256 (`avatars/<hash>`). The directory sync (avatar-store pass)
+    // writes; the `/api/avatar/{hash}` Lambda reads. Bytes are immutable
+    // (content-addressed) so we serve them with a 1-year cache header
+    // via CloudFront — the bucket itself stays private, block-public-
+    // access on. Versioning OFF because the keys ARE the version (a
+    // content hash never changes meaning); a separate version history
+    // would just double storage.
+    //
+    // **Lifecycle:** none built in. The avatar-store sync's GC pass
+    // (`gcDrepAvatars`) deletes objects that no PROFILE row references
+    // after a 24h grace window. A blunt S3 lifecycle rule (e.g. "delete
+    // after 30 days unused") would either be too conservative (storing
+    // stale orphans for ages) or too aggressive (deleting live avatars
+    // the sweep just stamped). The application-driven GC has the right
+    // information (the DDB referenced set) so it stays the owner.
+    const avatarBucket = new s3.Bucket(this, 'DRepAvatarBucket', {
+      bucketName: `drep-platform-${stage}-avatars`,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      versioned: false,
+      removalPolicy: isPersistent(stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: !isPersistent(stage),
+    });
+    // RW for sync (avatar-store) + Read for the serve handler. Granting at
+    // the role level rather than per-Lambda keeps the IAM surface small;
+    // both Lambdas already share `lambdaRole`. The serve handler only
+    // calls GetObject, but a single role grant for both eliminates a
+    // future "we forgot to add the read grant" footgun.
+    avatarBucket.grantReadWrite(lambdaRole);
+    sharedEnv.AVATAR_S3_BUCKET = avatarBucket.bucketName;
+
     // Per-DRep IPFS keys (opt-in, encrypted). Handlers create/read/update
     // secrets under drep-platform/{stage}/drep-ipfs/*. Scoped to that prefix.
     lambdaRole.addToPolicy(
@@ -273,6 +310,16 @@ export class ApiStack extends cdk.Stack {
     // while this is a chain-state read of every registered DRep.
     const drepDirectoryListFn = fn('DRepDirectoryListFn', 'handlers/directory/list.ts');
     const drepDirectoryGetFn = fn('DRepDirectoryGetFn', 'handlers/directory/get.ts');
+    // Sprint 5 — voting-power concentration donut data + content-addressed
+    // avatar serve (S3-backed; bucket above).
+    const drepDirectoryConcentrationFn = fn(
+      'DRepDirectoryConcentrationFn',
+      'handlers/directory/concentration.ts',
+    );
+    const drepDirectoryAvatarFn = fn(
+      'DRepDirectoryAvatarFn',
+      'handlers/directory/avatar.ts',
+    );
 
     // ---- Comments handlers ----
     const commentsListFn = fn('CommentsListFn', 'handlers/comments/list.ts');
@@ -524,7 +571,30 @@ export class ApiStack extends cdk.Stack {
 
     // ---- DRep directory routes (chain-state) ----
     addRoute(apigwv2.HttpMethod.GET, '/dreps', drepDirectoryListFn, 'DRepDirectoryList');
+    // Sprint 5 — voting-power concentration. Register BEFORE the `{drepId}`
+    // capture below so the literal segment wins; HTTP API v2 prefers static
+    // segments over path parameters regardless of declaration order, but
+    // listing the literal route first also matches the local conventions.
+    addRoute(
+      apigwv2.HttpMethod.GET,
+      '/dreps/concentration',
+      drepDirectoryConcentrationFn,
+      'DRepDirectoryConcentration',
+    );
     addRoute(apigwv2.HttpMethod.GET, '/dreps/{drepId}', drepDirectoryGetFn, 'DRepDirectoryGet');
+    // Sprint 5 — content-addressed avatar serve. The URL is
+    // `/api/avatar/{hash}` rather than `/dreps/avatar/...` so the
+    // CloudFront cache behavior can match a top-level prefix without
+    // colliding with the cached `/dreps/*` behavior (which is GET-only
+    // already — the avatar route would fit there fine, but the explicit
+    // `/api/*` prefix matches the URL the avatar-store sync embeds in
+    // the DRep row and matches the DRep Talk shape we're porting from).
+    addRoute(
+      apigwv2.HttpMethod.GET,
+      '/api/avatar/{hash}',
+      drepDirectoryAvatarFn,
+      'DRepDirectoryAvatar',
+    );
 
     // ---- Comments routes ----
     addRoute(apigwv2.HttpMethod.GET, '/comments/{actionId}', commentsListFn, 'CommentsList');
@@ -757,6 +827,28 @@ export class ApiStack extends cdk.Stack {
         enableAcceptEncodingGzip: true,
         enableAcceptEncodingBrotli: true,
       });
+      // Sprint 5 — immutable cache policy for `/api/avatar/*`. The bytes
+      // are content-addressed (sha256 in URL), so they can never change
+      // — 1-year TTL matches the Lambda's `cache-control` header. We use
+      // a separate policy from `cachedKeyPolicy` rather than relying on
+      // the origin Cache-Control because CloudFront's `maxTtl` caps how
+      // long the edge will keep an object regardless of what the origin
+      // header says; this policy raises that cap to one year.
+      const avatarCachePolicy = new cloudfront.CachePolicy(this, 'ApiAvatarCachePolicy', {
+        cachePolicyName: `drep-platform-${stage}-api-avatar`,
+        comment: 'Long-TTL cache for content-addressed DRep avatars.',
+        defaultTtl: cdk.Duration.days(365),
+        minTtl: cdk.Duration.days(1),
+        maxTtl: cdk.Duration.days(365),
+        cookieBehavior: cloudfront.CacheCookieBehavior.none(),
+        headerBehavior: cloudfront.CacheHeaderBehavior.none(),
+        queryStringBehavior: cloudfront.CacheQueryStringBehavior.none(),
+        // Image bytes are already compressed in their native codec; no
+        // benefit from gzip/brotli on top, and skipping the negotiation
+        // saves cycles.
+        enableAcceptEncodingGzip: false,
+        enableAcceptEncodingBrotli: false,
+      });
       const cachedOriginPolicy = new cloudfront.OriginRequestPolicy(
         this,
         'ApiCachedOriginPolicy',
@@ -985,6 +1077,23 @@ export class ApiStack extends cdk.Stack {
             cachePolicy: cachedKeyPolicy,
             originRequestPolicy: cachedOriginPolicy,
             compress: true,
+          },
+          // Sprint 5 — content-addressed DRep avatars. The bytes are
+          // immutable (URL contains the sha256), so we get a much longer
+          // TTL than the 30s default the rest of the cached behaviors
+          // use: a year, matching the Lambda's `cache-control` header.
+          // The avatar Lambda is the only handler under this prefix; no
+          // mutations share the path so we don't need a no-cache
+          // sibling. Origin policy is the standard cached one (no
+          // cookies in the cache key) since avatars are public-read.
+          '/api/avatar/*': {
+            origin,
+            viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+            allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
+            cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
+            cachePolicy: avatarCachePolicy,
+            originRequestPolicy: cachedOriginPolicy,
+            compress: false, // bytes are already in an efficient image codec
           },
         },
         priceClass: cloudfront.PriceClass.PRICE_CLASS_100,

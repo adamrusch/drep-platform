@@ -66,6 +66,8 @@ import {
   fetchDRepMetadata,
   fetchPredefinedDRepDelegatorCount,
   listAllVotes,
+  getCurrentEpoch,
+  getEpochParams,
   KoiosError,
   type KoiosDRepInfo,
   type KoiosDRepListEntry,
@@ -77,13 +79,29 @@ export const PREDEFINED_DREP_DISPLAY_NAMES: Record<string, string> = {
   drep_always_no_confidence: 'Always No-Confidence',
 };
 import { putItem, batchGetItems, queryItems, tableNames } from '../lib/dynamodb';
+import { storeDrepAvatars, s3AvatarBucket } from '../lib/dreps/avatarStore';
 import { fanoutAutoPosts } from './clubhouseAutoPosts';
 import type {
   DRepDirectoryItem,
   DRepReference,
   DRepReferenceKind,
   GovernanceActionItem,
+  PlatformDrepDvtThresholdsItem,
 } from '../lib/types';
+
+/** PK on the platform_state table for the persisted DVT thresholds snapshot.
+ *  See `PlatformDrepDvtThresholdsItem` for the schema and the consumer
+ *  (concentration handler). */
+export const DREP_DVT_THRESHOLDS_STATE_KEY = 'DREP_DVT_THRESHOLDS' as const;
+
+// Sprint 5 — avatar pipeline. The store pass walks at most this many
+// rows per cycle; the rest land on the next 30-min sync cycle. The cap
+// keeps the directory-sync wall-clock predictable: each row is one
+// validated download + one S3 upload (~1-2s in the warm path), so 25
+// rows = ~30-50s worst case. Combined with the existing directory-sync
+// steps, that fits inside the 5-minute Lambda budget the scheduler
+// gives this function.
+const AVATAR_RUN_LIMIT = 25;
 
 export interface DirectorySyncResult {
   total: number;
@@ -109,6 +127,22 @@ export interface DirectorySyncResult {
     postsSkipped: number;
     postsErrored: number;
   };
+  /** Sprint 5 — DVT thresholds snapshot result. `'written'` when the
+   *  /epoch_params row was upserted into platform_state this cycle,
+   *  `'skipped'` when the existing row matched and no Put was needed,
+   *  `'unavailable'` when Koios couldn't be reached (we keep the prior
+   *  row so the concentration donut keeps rendering with stale-but-
+   *  usable thresholds). Optional so existing callers don't break. */
+  dvtThresholds?: 'written' | 'skipped' | 'unavailable';
+  /** Sprint 5 — avatar-store pass result. Per-cycle counters: how many
+   *  DReps were scanned, how many bytes were stored, how many rows were
+   *  cleared (upstream image disappeared), how many failed (timeout,
+   *  non-https, oversize, wrong type). The pass is bounded so a single
+   *  cycle drains at most `AVATAR_RUN_LIMIT` rows; the rest land on the
+   *  next cycle. Optional because the pass is best-effort and the field
+   *  is unset when the AVATAR_S3_BUCKET env var is missing (the avatar
+   *  pipeline is then silently disabled, but the rest of the sync runs). */
+  avatarStore?: { scanned: number; stored: number; cleared: number; failed: number };
 }
 
 /** 1 hour. The sync is idempotent and writes are cheap; we just don't
@@ -798,6 +832,44 @@ export async function runDirectorySync(): Promise<DirectorySyncResult> {
     }
   }
 
+  // Step 7b: snapshot the live DRep voting thresholds from Koios's
+  // `/epoch_params` into the platform_state table. Read by the
+  // concentration handler so the donut renders the 60/67/75 markers
+  // (etc.) without doing a per-request Koios round-trip.
+  //
+  // Best-effort: any failure leaves the prior row in place so the donut
+  // keeps rendering with the most recently captured thresholds. The
+  // thresholds only change on a protocol-param vote (very rare), so a
+  // stale row is operationally fine; the row records its `epochNo` so
+  // operators can spot a stale snapshot at a glance.
+  try {
+    result.dvtThresholds = await syncDrepDvtThresholds(now);
+  } catch (err) {
+    console.warn('Directory sync: dvt-thresholds upsert threw (non-fatal):', err);
+    result.dvtThresholds = 'unavailable';
+  }
+
+  // Step 7c: Sprint 5 avatar-store pass. Walks PROFILE rows whose
+  // upstream `image` URL differs from the last-stored one, downloads
+  // and validates the image (https-only, size cap, content-type
+  // allowlist, hard timeout), hashes the bytes, and uploads to S3 under
+  // `avatars/<sha256>`. Bounded by `AVATAR_RUN_LIMIT` per cycle so a
+  // single sync invocation can't monopolise the Lambda budget; the
+  // backlog drains over successive cycles. Silently disabled when the
+  // `AVATAR_S3_BUCKET` env var is missing.
+  try {
+    const bucketName = process.env['AVATAR_S3_BUCKET'];
+    if (bucketName) {
+      const bucket = s3AvatarBucket(bucketName);
+      result.avatarStore = await storeDrepAvatars({
+        bucket,
+        limit: AVATAR_RUN_LIMIT,
+      });
+    }
+  } catch (err) {
+    console.warn('Directory sync: avatar-store pass threw (non-fatal):', err);
+  }
+
   // Step 8: newly-active DRep auto-post backfill. For each DRep that
   // transitioned to active this cycle, fan out auto_ga posts for every
   // currently-active GA into that DRep's clubhouse.
@@ -829,6 +901,71 @@ export async function runDirectorySync(): Promise<DirectorySyncResult> {
         : ''),
   );
   return result;
+}
+
+/**
+ * Sprint 5: snapshot DRep voting thresholds from Koios `/epoch_params` into
+ * the platform_state table. Returns `'written'` when a Put fired, `'skipped'`
+ * when the persisted row already matched, `'unavailable'` when Koios was
+ * unreachable (the prior row is kept untouched so the donut keeps rendering
+ * with stale thresholds rather than blanking).
+ */
+async function syncDrepDvtThresholds(
+  nowIso: string,
+): Promise<'written' | 'skipped' | 'unavailable'> {
+  let epochNo: number;
+  try {
+    epochNo = await getCurrentEpoch();
+  } catch (err) {
+    console.warn('Directory sync: getCurrentEpoch failed for dvt-thresholds:', err);
+    return 'unavailable';
+  }
+  const fresh = await getEpochParams(epochNo);
+  if (!fresh) {
+    return 'unavailable';
+  }
+  // Read existing row (if any) so we can compare-then-write — same idempotency
+  // pattern the directory uses for PROFILE rows.
+  const existing = await batchGetItems<PlatformDrepDvtThresholdsItem>(
+    tableNames.platformState,
+    [{ stateKey: DREP_DVT_THRESHOLDS_STATE_KEY }],
+  );
+  const prior = existing[0];
+  const candidate: PlatformDrepDvtThresholdsItem = {
+    stateKey: DREP_DVT_THRESHOLDS_STATE_KEY,
+    epochNo,
+    capturedAt: nowIso,
+    ...fresh,
+  };
+  if (prior && dvtThresholdsEqualIgnoringCaptured(prior, candidate)) {
+    return 'skipped';
+  }
+  await putItem(tableNames.platformState, candidate);
+  return 'written';
+}
+
+/** Equality on the persisted DVT thresholds row, ignoring `capturedAt`.
+ *  Returns true when a Put would be a no-op data-wise — the same pattern
+ *  `itemsEqualIgnoringSync` follows for PROFILE rows. */
+function dvtThresholdsEqualIgnoringCaptured(
+  a: PlatformDrepDvtThresholdsItem,
+  b: PlatformDrepDvtThresholdsItem,
+): boolean {
+  return canonicalizeDvt(a) === canonicalizeDvt(b);
+}
+
+function canonicalizeDvt(item: PlatformDrepDvtThresholdsItem): string {
+  return JSON.stringify(item, (key, value) => {
+    if (key === 'capturedAt') return undefined;
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const sorted: Record<string, unknown> = {};
+      for (const k of Object.keys(value).sort()) {
+        sorted[k] = (value as Record<string, unknown>)[k];
+      }
+      return sorted;
+    }
+    return value;
+  });
 }
 
 /**

@@ -27,6 +27,11 @@ vi.mock('../lib/koios', () => ({
   fetchDRepMetadata: vi.fn(),
   fetchPredefinedDRepDelegatorCount: vi.fn(),
   listAllVotes: vi.fn(),
+  // Sprint 5 — DVT thresholds snapshot reads /tip + /epoch_params.
+  // Default to "Koios unavailable" so the threshold step short-circuits
+  // (the existing tests don't exercise that path and shouldn't care).
+  getCurrentEpoch: vi.fn().mockResolvedValue(500),
+  getEpochParams: vi.fn().mockResolvedValue(null),
   KoiosError: class KoiosError extends Error {
     public readonly status: number | undefined;
     public readonly endpoint: string;
@@ -37,6 +42,20 @@ vi.mock('../lib/koios', () => ({
       this.status = status;
     }
   },
+}));
+
+// Sprint 5 — the avatar-store sync only runs when AVATAR_S3_BUCKET is set;
+// the directory-sync wrapper try/catches the constructor when it isn't.
+// Mock the module so the import doesn't trigger an S3 client init at test
+// load time (the @aws-sdk/client-s3 import is otherwise pulled in).
+vi.mock('../lib/dreps/avatarStore', () => ({
+  storeDrepAvatars: vi.fn().mockResolvedValue({ scanned: 0, stored: 0, cleared: 0, failed: 0 }),
+  s3AvatarBucket: vi.fn(() => ({
+    put: vi.fn(),
+    get: vi.fn(),
+    delete: vi.fn(),
+    list: vi.fn().mockResolvedValue([]),
+  })),
 }));
 
 vi.mock('../lib/dynamodb', () => ({
