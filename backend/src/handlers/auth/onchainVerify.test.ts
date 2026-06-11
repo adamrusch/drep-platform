@@ -35,50 +35,87 @@ vi.mock('../../lib/dynamodb', () => ({
     authNonces: 'test-auth_nonces',
     users: 'test-users',
     identitySessions: 'test-identity_sessions',
+    // Decision #3 — the on-chain person + identity-link tables.
+    // The mock store is composite-keyed by `<table>::<pk>` so the
+    // person and link rows don't collide with the nonce / session
+    // rows above.
+    onchainUsers: 'test-onchain_users',
+    identityLinks: 'test-identity_links',
   },
   putItem: vi.fn(
     async (
-      _table: string,
+      table: string,
       item: Record<string, unknown>,
       condition?: string,
     ) => {
-      // The shared store keys both nonce rows and session rows. Take
-      // the partition-key field that's present on the item.
-      const key = (item['nonce'] as string | undefined) ?? (item['sessionKey'] as string);
-      if (condition && condition.includes('attribute_not_exists') && ddbStore.has(key)) {
-        // Mimic the production DDB ConditionalCheckFailedException semantics
-        // so the nonce store's "append-only" invariant holds. Random ULIDs/
-        // nonces in practice never collide, so this branch only fires when
-        // a test deliberately re-puts the same key.
+      // Multi-table mock — the partition key varies by row shape.
+      // The composite `<table>::<pk>` namespace avoids collisions
+      // between the legacy Sprint-1 stores (auth_nonces /
+      // identity_sessions) and the Decision #3 stores (onchain_users
+      // / identity_links).
+      const pk =
+        (item['nonce'] as string | undefined) ??
+        (item['sessionKey'] as string | undefined) ??
+        (item['personId'] as string | undefined) ??
+        (item['identityKey'] as string | undefined);
+      if (!pk) throw new Error('mock putItem: no recognised PK');
+      const compositeKey = `${table}::${pk}`;
+      if (condition && condition.includes('attribute_not_exists') && ddbStore.has(compositeKey)) {
         const err = new Error('ConditionalCheckFailedException');
         err.name = 'ConditionalCheckFailedException';
         throw err;
       }
-      ddbStore.set(key, { ...item });
+      ddbStore.set(compositeKey, { ...item });
     },
   ),
-  getItem: vi.fn(async (_table: string, key: Record<string, unknown>) => {
-    const k = (key['nonce'] as string | undefined) ?? (key['sessionKey'] as string);
-    return ddbStore.get(k) ?? null;
+  putItemIfAbsent: vi.fn(
+    async (
+      table: string,
+      item: Record<string, unknown>,
+      keyAttrs: { partitionKey: string; sortKey?: string },
+    ) => {
+      const pk = item[keyAttrs.partitionKey] as string;
+      const compositeKey = `${table}::${pk}`;
+      if (ddbStore.has(compositeKey)) {
+        return { outcome: 'skipped' as const };
+      }
+      ddbStore.set(compositeKey, { ...item });
+      return { outcome: 'written' as const };
+    },
+  ),
+  getItem: vi.fn(async (table: string, key: Record<string, unknown>) => {
+    const pk =
+      (key['nonce'] as string | undefined) ??
+      (key['sessionKey'] as string | undefined) ??
+      (key['personId'] as string | undefined) ??
+      (key['identityKey'] as string | undefined);
+    if (!pk) return null;
+    return ddbStore.get(`${table}::${pk}`) ?? null;
   }),
   deleteItem: vi.fn(
     async (
-      _table: string,
+      table: string,
       key: Record<string, unknown>,
       condition?: string,
     ) => {
-      const k = (key['nonce'] as string | undefined) ?? (key['sessionKey'] as string);
-      if (condition && condition.includes('attribute_exists') && !ddbStore.has(k)) {
+      const pk =
+        (key['nonce'] as string | undefined) ??
+        (key['sessionKey'] as string | undefined) ??
+        (key['personId'] as string | undefined) ??
+        (key['identityKey'] as string | undefined);
+      if (!pk) return;
+      const compositeKey = `${table}::${pk}`;
+      if (condition && condition.includes('attribute_exists') && !ddbStore.has(compositeKey)) {
         const err = new Error('ConditionalCheckFailedException');
         err.name = 'ConditionalCheckFailedException';
         throw err;
       }
-      ddbStore.delete(k);
+      ddbStore.delete(compositeKey);
     },
   ),
   updateItem: vi.fn(
     async (
-      _table: string,
+      table: string,
       key: Record<string, unknown>,
       _updateExpr: string,
       _names: Record<string, string>,
@@ -88,12 +125,12 @@ vi.mock('../../lib/dynamodb', () => ({
       // PK=`sessionKey` to flip `revoked:true`. The fake needs to
       // actually mutate the in-memory row so a subsequent
       // `isSessionRevoked` sees the new state.
-      const k = (key['sessionKey'] as string | undefined) ?? (key['nonce'] as string);
-      const existing = ddbStore.get(k);
+      const pk =
+        (key['sessionKey'] as string | undefined) ?? (key['nonce'] as string | undefined);
+      if (!pk) throw new Error('mock updateItem: no recognised PK');
+      const compositeKey = `${table}::${pk}`;
+      const existing = ddbStore.get(compositeKey);
       if (!existing) {
-        // Mirror the production failure-mode that drives
-        // `revokeSessionByJti`'s catch-branch (writes a fresh
-        // revoked-by-default row directly).
         const err = new Error('row not found');
         err.name = 'ConditionalCheckFailedException';
         throw err;
@@ -101,18 +138,27 @@ vi.mock('../../lib/dynamodb', () => ({
       const updated: Record<string, unknown> = { ...existing };
       if (':true' in values) updated['revoked'] = values[':true'];
       if (':exp' in values) updated['expiresAt'] = values[':exp'];
-      ddbStore.set(k, updated);
+      ddbStore.set(compositeKey, updated);
     },
   ),
   queryItems: vi.fn(
     async (
-      _table: string,
+      table: string,
       opts: { expressionAttributeValues?: Record<string, unknown> },
     ) => {
-      const wanted = opts.expressionAttributeValues?.[':identityId'];
-      const items = Array.from(ddbStore.values()).filter(
-        (row) => row['identityId'] === wanted,
-      );
+      // The identity_sessions revoke-all path queries by `:identityId`;
+      // the identity_links GSI Query (Decision #3) uses `:personId`.
+      // Filter by the relevant attribute AND scope to the requested
+      // table so cross-store collisions can't bleed.
+      const prefix = `${table}::`;
+      const idIdentity = opts.expressionAttributeValues?.[':identityId'];
+      const idPerson = opts.expressionAttributeValues?.[':personId'];
+      const items: Record<string, unknown>[] = [];
+      for (const [k, row] of ddbStore.entries()) {
+        if (!k.startsWith(prefix)) continue;
+        if (idIdentity !== undefined && row['identityId'] === idIdentity) items.push(row);
+        else if (idPerson !== undefined && row['personId'] === idPerson) items.push(row);
+      }
       return { items, lastEvaluatedKey: undefined, count: items.length };
     },
   ),
@@ -219,7 +265,10 @@ function makeNoncePayload(): { payload: string; nonce: string } {
   const nonce = randomBytes(16).toString('base64url');
   const issuedAt = Math.floor(Date.now() / 1000);
   const payload = `dreptalk:${STAGE}:drep.tools:${nonce}:${issuedAt}`;
-  ddbStore.set(nonce, {
+  // Composite-keyed insert to match the production mock above —
+  // `<table>::<pk>`. The nonce store reads from `test-auth_nonces`
+  // by PK=`nonce`, so the composite is `test-auth_nonces::<nonce>`.
+  ddbStore.set(`test-auth_nonces::${nonce}`, {
     nonce,
     kind: 'identity',
     payload,
@@ -288,6 +337,74 @@ describe('on-chain verify — SPO paste flow (wallet-less)', () => {
     expect(verified.sub).toBe(POOL_ID);
     expect(verified.onChainRoles).toEqual(['spo']);
     expect(verified.jti).toBe(json.data.jti);
+  });
+
+  // ---- Decision #3 — login auto-provisions a person + link ----
+  it('auto-provisions a person + link on a fresh login, returns the same personId on re-login (Decision #3)', async () => {
+    const POOL_ID = 'pool1test_decision3_person';
+
+    // First login — fresh credential. The handler should auto-
+    // provision a new person + identity_links row and ride the new
+    // `personId` on the JWT.
+    const first = makeNoncePayload();
+    const firstSign = rawSign(first.payload);
+    fakeKoios.poolCalidusKey.mockResolvedValueOnce({
+      pool_id_bech32: POOL_ID,
+      calidus_pub_key: firstSign.publicKeyHex,
+      calidus_id_bech32: 'calidus1d3_first',
+      registered: true,
+      pool_status: 'registered',
+    });
+    const r1 = (await onChainVerify(
+      buildEvent({
+        payload: first.payload,
+        signatureHex: firstSign.signatureHex,
+        publicKeyHex: firstSign.publicKeyHex,
+        role: 'spo',
+      }),
+    )) as { statusCode: number; body: string };
+    expect(r1.statusCode).toBe(200);
+    const json1 = JSON.parse(r1.body) as {
+      data: { identity: string; personId?: string };
+    };
+    expect(typeof json1.data.personId).toBe('string');
+    expect((json1.data.personId ?? '').length).toBeGreaterThan(0);
+    const firstPersonId = json1.data.personId!;
+
+    // The identity_links row exists at `pool:<POOL_ID>` and the
+    // person row exists at `<personId>`.
+    expect(
+      ddbStore.has(`test-identity_links::pool:${POOL_ID}`),
+    ).toBe(true);
+    expect(
+      ddbStore.has(`test-onchain_users::${firstPersonId}`),
+    ).toBe(true);
+
+    // Second login on the SAME credential (fresh signature, fresh
+    // nonce, fresh key — but the credential resolves to the same
+    // POOL_ID). The handler must return the SAME personId.
+    const second = makeNoncePayload();
+    const secondSign = rawSign(second.payload);
+    fakeKoios.poolCalidusKey.mockResolvedValueOnce({
+      pool_id_bech32: POOL_ID,
+      calidus_pub_key: secondSign.publicKeyHex,
+      calidus_id_bech32: 'calidus1d3_second',
+      registered: true,
+      pool_status: 'registered',
+    });
+    const r2 = (await onChainVerify(
+      buildEvent({
+        payload: second.payload,
+        signatureHex: secondSign.signatureHex,
+        publicKeyHex: secondSign.publicKeyHex,
+        role: 'spo',
+      }),
+    )) as { statusCode: number; body: string };
+    expect(r2.statusCode).toBe(200);
+    const json2 = JSON.parse(r2.body) as {
+      data: { personId?: string };
+    };
+    expect(json2.data.personId).toBe(firstPersonId);
   });
 
   it('returns 401 when the Calidus key is not registered to any pool', async () => {
