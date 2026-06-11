@@ -1,4 +1,5 @@
-import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
+import type React from 'react';
+import { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Home,
@@ -183,6 +184,7 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
 
   // Auto-close mobile drawer on route change so a tap on a nav item
   // navigates *and* clears the overlay.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `location.pathname` is intentionally tracked to fire the close on every route change
   useEffect(() => {
     closeMobileMenu();
   }, [location.pathname, closeMobileMenu]);

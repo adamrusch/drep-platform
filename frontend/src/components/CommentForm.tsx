@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import type React from 'react';
+import { useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { useIsAuthenticated, useAuthStore } from '@/stores/authStore';
 import { useCreateComment } from '@/hooks/useComments';
-import { useMutationSign } from '@/hooks/useMutationSign';
+import { useMutationSign, type SignedMutation } from '@/hooks/useMutationSign';
 import { useUiStore } from '@/stores/uiStore';
 import { Button } from '@/components/ui/Button';
 import { cn } from '@/lib/utils';
@@ -47,7 +48,7 @@ export function CommentForm({
     // network mutation state so the user sees "Signing…" while their wallet
     // shows the prompt, then "Posting…" while the request is in flight.
     setSigning(true);
-    let signed;
+    let signed: SignedMutation;
     try {
       signed = await signMutation();
     } catch (err) {
@@ -144,6 +145,7 @@ export function CommentForm({
         rows={isReply ? 3 : 4}
         maxLength={10_000}
         disabled={isBusy}
+        // biome-ignore lint/a11y/noAutofocus: intentional UX — focus the reply textarea when the user opens a reply box
         autoFocus={isReply}
         className={cn(
           'w-full rounded-token-md border border-[var(--border-default)]',

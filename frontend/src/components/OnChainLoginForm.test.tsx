@@ -166,7 +166,7 @@ describe('OnChainLoginForm — DRep/Proposer wallet flow', () => {
       throw new Error(`unexpected ${url}`);
     });
 
-    const onWalletSign = vi.fn(async (payload: string) => ({
+    const onWalletSign = vi.fn(async (_payload: string) => ({
       signatureHex: 'deadbeef',
       keyHex: 'cafe',
     }));

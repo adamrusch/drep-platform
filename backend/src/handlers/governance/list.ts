@@ -1,5 +1,5 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
-import { queryItems, tableNames } from '../../lib/dynamodb';
+import { queryItems, tableNames, type QueryResult } from '../../lib/dynamodb';
 import type { GovernanceActionItem } from '../../lib/types';
 import { ok, badRequest, internalError } from '../_response';
 
@@ -16,7 +16,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     }
 
     const limit = limitParam ? Math.min(parseInt(limitParam, 10), 100) : 20;
-    if (isNaN(limit) || limit < 1) {
+    if (Number.isNaN(limit) || limit < 1) {
       return badRequest('limit must be a positive integer');
     }
 
@@ -34,7 +34,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
       }
     }
 
-    let result;
+    let result: QueryResult<GovernanceActionItem>;
     try {
       result = await queryItems<GovernanceActionItem>(tableNames.governanceActions, {
         indexName: 'status-submittedAt-index',

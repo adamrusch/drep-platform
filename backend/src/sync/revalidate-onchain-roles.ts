@@ -130,8 +130,7 @@ import type { OnChainRole } from '../lib/types';
 // ---------------------------------------------------------------------------
 // STRICT KoiosClient — propagates errors instead of swallowing.
 // ---------------------------------------------------------------------------
-//
-// biome-ignore lint/complexity/useLiteralKeys: brackets match codebase env-var convention
+
 const KOIOS_BASE = process.env['KOIOS_BASE_URL'] ?? 'https://api.koios.rest/api/v1';
 /** Aggressive timeout for the SPO Calidus-by-pool lookup — small POST,
  *  shouldn't hang the cron pass under brownouts. Matches the verify-path

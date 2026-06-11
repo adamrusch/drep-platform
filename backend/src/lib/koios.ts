@@ -1662,7 +1662,7 @@ export async function fetchDRepDelegators(
     let parsed: unknown;
     try {
       parsed = await readJsonCapped(res, '/drep_delegators');
-    } catch (err) {
+    } catch {
       if (page === 0) return null;
       return all;
     }

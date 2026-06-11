@@ -71,7 +71,7 @@ const apiStack = new ApiStack(app, `DRepPlatform-Api-${stage}`, {
 });
 apiStack.addDependency(databaseStack);
 
-const frontendStack = new FrontendStack(app, `DRepPlatform-Frontend-${stage}`, {
+const _frontendStack = new FrontendStack(app, `DRepPlatform-Frontend-${stage}`, {
   stage,
   customDomain,
   env,

@@ -82,6 +82,7 @@ import {
   queryItems,
   scanItems,
   tableNames,
+  type QueryResult,
 } from './dynamodb';
 import type { OnChainRole } from './types';
 
@@ -380,7 +381,7 @@ export async function revokeAllSessionsForUser(
 
   let cursor: Record<string, unknown> | undefined;
   do {
-    let page;
+    let page: QueryResult<SessionRow>;
     try {
       page = await queryItems<SessionRow>(tableNames.identitySessions, {
         indexName: 'identityId-issuedAt-index',

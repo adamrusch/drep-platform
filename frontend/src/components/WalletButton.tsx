@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import type React from 'react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { MeshProvider, useWallet, useWalletList } from '@meshsdk/react';
 import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
@@ -148,6 +149,7 @@ function WalletButtonInner({ className }: WalletButtonProps): React.ReactElement
             walletList.map((w) => (
               <button
                 key={w.name}
+                type="button"
                 onClick={() => void handleConnectWallet(w.name)}
                 className="flex w-full items-center gap-2 px-3 py-2 text-sm hover:bg-[var(--bg-muted)] transition-colors text-[var(--text-primary)]"
               >

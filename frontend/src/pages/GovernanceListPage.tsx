@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import type React from 'react';
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useGovernanceActions } from '@/hooks/useGovernanceActions';
@@ -46,6 +47,7 @@ export function GovernanceListPage(): React.ReactElement {
         {STATUS_TAB_IDS.map((tabId) => (
           <button
             key={tabId}
+            type="button"
             role="tab"
             aria-selected={status === tabId}
             onClick={() => setStatus(tabId)}

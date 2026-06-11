@@ -72,7 +72,6 @@ vi.mock('../../lib/dynamodb', () => ({
 
 import { handler as onchainMe } from './onchainMe';
 import {
-  identityKeyFor,
   linkCredentialToPerson,
   resolveOrProvisionPerson,
   updatePersonProfile,

@@ -53,7 +53,7 @@ vi.mock('../../lib/dynamodb', () => ({
         (item['nonce'] as string | undefined) ??
         (item['sessionKey'] as string | undefined);
       if (!pk) throw new Error('mock putItem: no recognised PK');
-      if (condition && condition.includes('attribute_not_exists') && store.has(k(table, pk))) {
+      if (condition?.includes('attribute_not_exists') && store.has(k(table, pk))) {
         const err = new Error('ConditionalCheckFailedException');
         err.name = 'ConditionalCheckFailedException';
         throw err;

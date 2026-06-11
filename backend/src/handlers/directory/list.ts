@@ -200,6 +200,7 @@ function makeComparator(sort: SortKey): (a: DRepDirectoryItem, b: DRepDirectoryI
         return a.drepId < b.drepId ? -1 : a.drepId > b.drepId ? 1 : 0;
       };
     }
+    // biome-ignore lint/complexity/noUselessSwitchCase: keep explicit case 'power' for readability — 'power' is the documented default sort
     case 'power':
     default: {
       // Voting power desc — compare BigInt to avoid Number precision loss

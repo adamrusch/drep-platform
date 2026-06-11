@@ -10,7 +10,8 @@
  * Hidden when there are zero pending invitations. The bell badge in the
  * topbar (Layout.tsx) shows the count when > 0.
  */
-import React, { useState } from 'react';
+import type React from 'react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Mail } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
