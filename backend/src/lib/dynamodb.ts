@@ -140,6 +140,28 @@ export const tableNames = {
   ccMembers: `${TABLE_PREFIX}cc_members`,
   auditLog: `${TABLE_PREFIX}audit_log`,
   authNonces: `${TABLE_PREFIX}auth_nonces`,
+  /** Decision #1 (2026-06-10) — per-session revocation store for the
+   *  on-chain login JWTs.
+   *
+   *  PK = `sessionKey` = SHA-256(jti) hex. One row per session: stores
+   *  the active state (`revoked:false`) at login time and is flipped
+   *  to `revoked:true` on logout / "log out everywhere" / cron-driven
+   *  role revalidation. TTL on `expiresAt` removes the row when the
+   *  underlying JWT can no longer be presented (~30 days).
+   *
+   *  GSI `identityId-issuedAt-index` (PK=`identityId`, SK=`issuedAt`,
+   *  projection ALL) — used by `revokeAllSessionsForUser` to fan out
+   *  per-identity revokes without a Scan, and by the daily role-
+   *  revalidation cron to enumerate active identities.
+   *
+   *  Replaces the prior Sprint-1 reuse of `authNonces` with
+   *  `kind='session' | 'session_index'` discriminators. The legacy
+   *  CIP-30 login path (`backend/src/lib/auth.ts`) does NOT use this
+   *  table — its session revocation is the `tokenVersion` row counter
+   *  on the `users` table. See `backend/src/lib/sessionRevocation.ts`
+   *  for the full design + the public surface every caller (authorizer,
+   *  logout, on-chain verify, cron) reads. */
+  identitySessions: `${TABLE_PREFIX}identity_sessions`,
   /** Phase 2 committee voting. PK=`voteScope` (`${drepId}#${actionId}`),
    *  SK=`itemKey` ('PROPOSAL' | 'CAST#<wallet>' | 'RATIONALE#DRAFT|LOCK|FINAL'
    *  | 'SUBMISSION' | 'COSIGN#<wallet>'). Sparse GSI `open-epochDeadline-index`

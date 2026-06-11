@@ -202,23 +202,34 @@ async function verifyWalletCip8(
     keyHex: body.keyHex,
     expectedPayload: body.payload,
   });
-  if (!verifyResult.ok || !verifyResult.pubKey || !verifyResult.addressBytes) {
+  if (!verifyResult.ok || !verifyResult.pubKey) {
     return { status: 401, json: { ok: false, error: 'signature verification failed' } };
   }
 
-  const { pubKey, addressBytes } = verifyResult;
+  const { pubKey, addressBytes, addressBound } = verifyResult;
 
-  if (addressBytes.length === 0) {
-    return { status: 401, json: { ok: false, error: 'invalid address in signature' } };
-  }
-
-  if (role === 'proposer') {
-    const expectedHeader = network === 'mainnet' ? REWARD_ADDR_MAINNET : REWARD_ADDR_PREPROD;
-    if (addressBytes[0] !== expectedHeader) {
+  // Decision #4 (2026-06-10) — relaxed COSE address-header.
+  //
+  // When the wallet's CIP-8 protected header carried an `address` field,
+  // `cose.ts` bound it to the pubkey hash and we still run the
+  // address-type-for-role pre-filter as before. When the field was absent,
+  // `cose.ts` returned `addressBound: false` and we skip the
+  // address-type-for-role gate; the Koios role resolution downstream is
+  // the authoritative role check (a wallet whose header omits the address
+  // but isn't a registered DRep / proposer still fails at the Koios
+  // gate). The pubkey-derived identity stays the same regardless.
+  if (addressBound !== false) {
+    if (!addressBytes || addressBytes.length === 0) {
+      return { status: 401, json: { ok: false, error: 'invalid address in signature' } };
+    }
+    if (role === 'proposer') {
+      const expectedHeader = network === 'mainnet' ? REWARD_ADDR_MAINNET : REWARD_ADDR_PREPROD;
+      if (addressBytes[0] !== expectedHeader) {
+        return { status: 401, json: { ok: false, error: 'address type mismatch for role' } };
+      }
+    } else if (!isDrepCredentialAddress(addressBytes)) {
       return { status: 401, json: { ok: false, error: 'address type mismatch for role' } };
     }
-  } else if (!isDrepCredentialAddress(addressBytes)) {
-    return { status: 401, json: { ok: false, error: 'address type mismatch for role' } };
   }
 
   const grantedRoles: AuthRole[] = [];

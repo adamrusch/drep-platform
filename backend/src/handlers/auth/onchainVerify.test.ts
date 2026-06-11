@@ -23,15 +23,18 @@ import {
   createHash,
 } from 'node:crypto';
 
-// In-memory backing store for the mocked dynamodb module — keyed by `nonce`
-// (the PK on `authNonces`). Tests preload challenge nonces here and the
-// revocation tombstones land here on revoke.
+// In-memory backing store for the mocked dynamodb module — keys are
+// EITHER `nonce` (the PK on `authNonces`) OR `sessionKey` (the PK on
+// `identity_sessions`, the Decision #1 dedicated sessions table). Tests
+// preload challenge nonces here and Decision #1 session rows land here
+// on `recordSessionForUser` / get flipped on `revokeSessionByJti`.
 const ddbStore = new Map<string, Record<string, unknown>>();
 
 vi.mock('../../lib/dynamodb', () => ({
   tableNames: {
     authNonces: 'test-auth_nonces',
     users: 'test-users',
+    identitySessions: 'test-identity_sessions',
   },
   putItem: vi.fn(
     async (
@@ -39,7 +42,9 @@ vi.mock('../../lib/dynamodb', () => ({
       item: Record<string, unknown>,
       condition?: string,
     ) => {
-      const key = item['nonce'] as string;
+      // The shared store keys both nonce rows and session rows. Take
+      // the partition-key field that's present on the item.
+      const key = (item['nonce'] as string | undefined) ?? (item['sessionKey'] as string);
       if (condition && condition.includes('attribute_not_exists') && ddbStore.has(key)) {
         // Mimic the production DDB ConditionalCheckFailedException semantics
         // so the nonce store's "append-only" invariant holds. Random ULIDs/
@@ -53,7 +58,8 @@ vi.mock('../../lib/dynamodb', () => ({
     },
   ),
   getItem: vi.fn(async (_table: string, key: Record<string, unknown>) => {
-    return ddbStore.get(key['nonce'] as string) ?? null;
+    const k = (key['nonce'] as string | undefined) ?? (key['sessionKey'] as string);
+    return ddbStore.get(k) ?? null;
   }),
   deleteItem: vi.fn(
     async (
@@ -61,7 +67,7 @@ vi.mock('../../lib/dynamodb', () => ({
       key: Record<string, unknown>,
       condition?: string,
     ) => {
-      const k = key['nonce'] as string;
+      const k = (key['nonce'] as string | undefined) ?? (key['sessionKey'] as string);
       if (condition && condition.includes('attribute_exists') && !ddbStore.has(k)) {
         const err = new Error('ConditionalCheckFailedException');
         err.name = 'ConditionalCheckFailedException';
@@ -70,7 +76,47 @@ vi.mock('../../lib/dynamodb', () => ({
       ddbStore.delete(k);
     },
   ),
-  updateItem: vi.fn(async () => undefined),
+  updateItem: vi.fn(
+    async (
+      _table: string,
+      key: Record<string, unknown>,
+      _updateExpr: string,
+      _names: Record<string, string>,
+      values: Record<string, unknown>,
+    ) => {
+      // Decision #1 — `revokeSessionByJti` updates the session row at
+      // PK=`sessionKey` to flip `revoked:true`. The fake needs to
+      // actually mutate the in-memory row so a subsequent
+      // `isSessionRevoked` sees the new state.
+      const k = (key['sessionKey'] as string | undefined) ?? (key['nonce'] as string);
+      const existing = ddbStore.get(k);
+      if (!existing) {
+        // Mirror the production failure-mode that drives
+        // `revokeSessionByJti`'s catch-branch (writes a fresh
+        // revoked-by-default row directly).
+        const err = new Error('row not found');
+        err.name = 'ConditionalCheckFailedException';
+        throw err;
+      }
+      const updated: Record<string, unknown> = { ...existing };
+      if (':true' in values) updated['revoked'] = values[':true'];
+      if (':exp' in values) updated['expiresAt'] = values[':exp'];
+      ddbStore.set(k, updated);
+    },
+  ),
+  queryItems: vi.fn(
+    async (
+      _table: string,
+      opts: { expressionAttributeValues?: Record<string, unknown> },
+    ) => {
+      const wanted = opts.expressionAttributeValues?.[':identityId'];
+      const items = Array.from(ddbStore.values()).filter(
+        (row) => row['identityId'] === wanted,
+      );
+      return { items, lastEvaluatedKey: undefined, count: items.length };
+    },
+  ),
+  scanItems: vi.fn(async () => ({ items: [], lastEvaluatedKey: undefined, count: 0 })),
   docClient: {},
 }));
 
@@ -105,7 +151,7 @@ vi.mock('../../lib/recognition', () => ({
 import { handler as onChainVerify } from './onchainVerify';
 import { verifyJWT, extractOnChainTokenFromCookie } from '../../lib/auth';
 import { isSessionRevoked, revokeSessionByJti } from '../../lib/sessionRevocation';
-import { ccHotKeyHashHex } from '../../lib/identity/cardano/identity';
+import { ccHotKeyHashHex, drepIdFromPubKey } from '../../lib/identity/cardano/identity';
 import { bytesToHex } from '../../lib/identity/crypto/hex';
 import { makeCoseSignature, type6Address } from '../../lib/identity/__fixtures__/makeCose';
 import { Encoder } from 'cbor-x';
@@ -471,16 +517,24 @@ describe('on-chain verify — per-session revocation surface', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Sprint 3 — strict address-header rejection telemetry
+// Decision #4 (2026-06-10) — relaxed address-header SUCCESS telemetry
 // ---------------------------------------------------------------------------
 //
-// `lib/identity/auth/cose.ts` rejects (returns `{ok:false, reason:"protected
-// header missing or invalid \"address\" field"}`) when a wallet's CIP-8
-// COSE_Sign1 protected header lacks an `address` field. Oracle flagged that
-// some older wallets omit it. We stay strict (reject) but emit a CloudWatch
-// EMF metric on every rejection so Adam can quantify the affected wallet
-// population BEFORE any future decision to relax. The wire response stays
-// generic — internal reasons MUST NOT leak.
+// `lib/identity/auth/cose.ts` previously REJECTED (returned `{ok:false}`)
+// when a wallet's CIP-8 COSE_Sign1 protected header lacked an `address`
+// field. Decision #4 relaxed that to a graceful fallback that mirrors
+// `lib/auth.ts` `verifyWalletSignature`: signature still verified
+// unconditionally, but address-binding is skipped when the field is
+// absent and `cose.ts` returns `{ok:true, addressBound:false,
+// addressBytes:undefined}`. The handler now derives identity directly
+// from the verified pubkey (the on-chain identity IS the credential
+// hash of the pubkey: drep id / stake address / pool id / cc cred).
+//
+// The `IdentityCoseMissingAddressHeader` metric STILL FIRES — but on the
+// now-successful address-absent path, not a rejection path. Net
+// affected-wallet population in CloudWatch is unchanged. The wire
+// response is also unchanged: a successful address-absent login returns
+// 200 with the same identity / onChainRoles shape as the bound path.
 
 /**
  * Test-internal CIP-8 builder that DELIBERATELY omits the `address` field
@@ -544,11 +598,26 @@ function makeCoseSignatureNoAddress(opts: { seed: Uint8Array; payload: string })
   };
 }
 
-describe('on-chain verify — strict address-header metric (Sprint 3)', () => {
-  it('emits IdentityCoseMissingAddressHeader on a CIP-8 verify with no protected-header address', async () => {
+describe('on-chain verify — Decision #4 relaxed address-header (success path)', () => {
+  it('SUCCEEDS (200) with no protected-header address, still emits IdentityCoseMissingAddressHeader, identity derived from pubkey', async () => {
     const { payload } = makeNoncePayload();
     const seed = new Uint8Array(randomBytes(32));
-    const { signatureHex, keyHex } = makeCoseSignatureNoAddress({ seed, payload });
+    const { signatureHex, keyHex, pubKey } = makeCoseSignatureNoAddress({ seed, payload });
+
+    // The handler derives the identity from the verified pubkey when no
+    // address header is supplied — for the drep role, that's
+    // `drepIdFromPubKey(pubKey)`. Build the same id the handler will
+    // resolve so the Koios mock can ack "registered" with that exact id.
+    const expectedDrepId = drepIdFromPubKey(pubKey);
+    fakeKoios.drepInfo.mockResolvedValueOnce({
+      drep_id: expectedDrepId,
+      hex: null,
+      has_script: false,
+      drep_status: 'registered',
+      deposit: null,
+      active: true,
+      expires_epoch_no: null,
+    });
 
     // Capture stdout to inspect the EMF envelope. The metric path
     // writes a single-line JSON object via `console.log`.
@@ -558,11 +627,19 @@ describe('on-chain verify — strict address-header metric (Sprint 3)', () => {
       const result = (await onChainVerify(
         buildEvent({ payload, signatureHex, keyHex, role: 'drep' }),
       )) as { statusCode: number; body: string };
-      // The wire response is generic — internal reason MUST NOT leak.
-      expect(result.statusCode).toBe(401);
-      const json = JSON.parse(result.body) as { error?: string };
-      expect(json.error ?? '').not.toContain('address');
-      // Look for the EMF envelope among the captured log calls.
+      // The relaxed path returns 200 — identity is derived from the
+      // verified pubkey, Koios confirms registration, JWT is minted.
+      expect(result.statusCode).toBe(200);
+      const json = JSON.parse(result.body) as {
+        data: { identity: string; onChainRoles: string[] };
+      };
+      // Identity MUST be the pubkey-derived drep id (the on-chain
+      // credential), not a placeholder. Address bytes were never read.
+      expect(json.data.identity).toBe(expectedDrepId);
+      expect(json.data.onChainRoles).toEqual(['drep']);
+
+      // The metric STILL fires on the relaxed-success path so the
+      // affected-wallet population stays quantifiable in CloudWatch.
       const emitted = logSpy.mock.calls
         .map((args) => (typeof args[0] === 'string' ? args[0] : ''))
         .filter((s) => s.includes('IdentityCoseMissingAddressHeader'));
@@ -587,6 +664,29 @@ describe('on-chain verify — strict address-header metric (Sprint 3)', () => {
     } finally {
       logSpy.mockRestore();
     }
+  });
+
+  it('address absent + BAD signature → still REJECTED (signature verification is non-negotiable)', async () => {
+    // The defining security invariant of Decision #4: relaxing the
+    // address-header bind step MUST NOT relax signature verification.
+    // A wallet that ships a corrupted-signature COSE with no address
+    // header must still fail-closed.
+    const { payload } = makeNoncePayload();
+    const seed = new Uint8Array(randomBytes(32));
+    const { signatureHex, keyHex } = makeCoseSignatureNoAddress({ seed, payload });
+    // Corrupt the last byte of the COSE bytes — the signature bstr's
+    // last byte is the tail of the Ed25519 signature.
+    const corruptedSigHex =
+      signatureHex.slice(0, -2) +
+      ((parseInt(signatureHex.slice(-2), 16) ^ 0xff) & 0xff).toString(16).padStart(2, '0');
+
+    const result = (await onChainVerify(
+      buildEvent({ payload, signatureHex: corruptedSigHex, keyHex, role: 'drep' }),
+    )) as { statusCode: number; body: string };
+    // 401 — Ed25519 verify failed. Koios MUST NOT have been consulted
+    // (the verify failure happens before any role lookup).
+    expect(result.statusCode).toBe(401);
+    expect(fakeKoios.drepInfo).not.toHaveBeenCalled();
   });
 
   it('does NOT emit the metric for a valid signature (clean DRep login)', async () => {
