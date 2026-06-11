@@ -174,6 +174,18 @@ describe('isDrepCredentialAddress', () => {
   it('rejects an empty address', () => {
     expect(isDrepCredentialAddress(new Uint8Array(0))).toBe(false);
   });
+
+  // S4 hardening (2026-06-10 security review) — the prior implementation
+  // accepted ANY byte with high nibble `0b0110` (0x60..0x6F). Spec only
+  // assigns 0x60 (testnet) and 0x61 (mainnet); the remaining codepoints
+  // are unallocated. We reject everything outside the explicit two.
+  it('S4: rejects header 0x62 (high nibble 0x6 but unallocated low nibble)', () => {
+    expect(isDrepCredentialAddress(withHeader(0x62))).toBe(false);
+  });
+
+  it('S4: rejects header 0x6F (high nibble 0x6 but unallocated low nibble)', () => {
+    expect(isDrepCredentialAddress(withHeader(0x6f))).toBe(false);
+  });
 });
 
 describe('drepCredentialAddress', () => {

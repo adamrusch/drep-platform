@@ -107,4 +107,21 @@ export interface KoiosClient {
    * close the previously-no-op SPO branch.
    */
   poolStatus(poolIdBech32: string): Promise<PoolStatusRow | null>;
+  /**
+   * Look up one pool's CURRENT Calidus key by bech32 pool id (M5 fix,
+   * 2026-06-10 security review).
+   *
+   * Returns the registered Calidus key row when present (so the cron's
+   * SPO branch can compare it against the session's stored Calidus
+   * pubkey and revoke on rotation), or `null` when the pool has no
+   * registered Calidus key OR the pool is absent from the roster. The
+   * row's `registered` field carries the CIP-151 lifecycle bucket —
+   * `false` means the previous key was revoked and no new one
+   * registered yet.
+   *
+   * Strict adapters propagate Koios errors so the cron can distinguish
+   * "Koios brownout" from "pool deregistered Calidus key" — never
+   * revoke on the former.
+   */
+  poolCalidusKeyByPool(poolIdBech32: string): Promise<PoolCalidusKeyRow | null>;
 }

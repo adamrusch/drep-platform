@@ -295,13 +295,31 @@ export async function batchGetItems<T extends Record<string, unknown>>(
   return out;
 }
 
+export interface GetItemOptions {
+  /**
+   * When true, the read uses DynamoDB's strongly-consistent semantics
+   * (`ConsistentRead: true`). The default is eventually-consistent
+   * (cheaper, faster, but stale up to seconds after a write).
+   *
+   * Use for reads where staleness is a correctness/security issue —
+   * e.g. `isSessionRevoked` (M3 fix, 2026-06-10 security review).
+   * Otherwise leave unset; the eventual-consistency default is fine for
+   * the vast majority of read paths.
+   *
+   * Costs 1 RCU vs 0.5 RCU per call.
+   */
+  consistentRead?: boolean;
+}
+
 export async function getItem<T extends Record<string, unknown>>(
   tableName: string,
   key: Record<string, unknown>,
+  options: GetItemOptions = {},
 ): Promise<T | undefined> {
   const params: GetCommandInput = {
     TableName: tableName,
     Key: key,
+    ...(options.consistentRead ? { ConsistentRead: true } : {}),
   };
   const result = await docClient.send(new GetCommand(params));
   return result.Item as T | undefined;

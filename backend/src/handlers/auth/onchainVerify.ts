@@ -76,6 +76,7 @@ import { recordSessionForUser } from '../../lib/sessionRevocation';
 import {
   emitIdentityMetric,
   METRIC_IDENTITY_COSE_MISSING_ADDRESS_HEADER,
+  METRIC_IDENTITY_PROPOSER_ADDRESS_UNBOUND,
 } from '../../lib/metrics';
 import type { OnChainRole, SessionType, UserRole } from '../../lib/types';
 import {
@@ -145,6 +146,11 @@ export const handler = async (
 
     let credentialId: string | undefined;
     let onChainRole: OnChainRole | undefined;
+    // M5 fix (2026-06-10 security review) — capture the SPO's verified
+    // Calidus pubkey at login so we can persist it on the session row
+    // and the daily cron can detect rotation. Empty for every other
+    // role; the cron's SPO branch keys off the presence of this field.
+    let spoCalidusPubKeyHex: string | undefined;
 
     if (role === 'drep' || role === 'proposer') {
       // ---- CIP-8 wallet flow ----
@@ -213,6 +219,13 @@ export const handler = async (
           if (addressBytes[0] !== expectedHeader) {
             return unauthorized('Address type mismatch for proposer role');
           }
+        } else {
+          // S4 hardening (2026-06-10 security review) — emit a metric
+          // on the proposer-unbound-address path so operations can
+          // monitor for anomalies. The login proceeds normally; the
+          // Koios resolution downstream is the authoritative
+          // proposer check.
+          emitIdentityMetric(METRIC_IDENTITY_PROPOSER_ADDRESS_UNBOUND, 1);
         }
         const stakeAddr = stakeAddressFromPubKey(pubKey, network);
         const resolution = await resolveProposer(koios, stakeAddr);
@@ -275,6 +288,11 @@ export const handler = async (
         }
         credentialId = resolution.poolId;
         onChainRole = 'spo';
+        // M5 — record the verified Calidus pubkey so the cron's SPO
+        // branch can detect rotation. Stored lowercase to match how
+        // Koios returns it on the per-pool lookup path; case-folding
+        // here keeps the eventual equality check trivial.
+        spoCalidusPubKeyHex = body.publicKeyHex.toLowerCase();
       } else {
         const hotKeyHash = ccHotKeyHashHex(pubKey);
         const resolution = await resolveCc(koios, hotKeyHash);
@@ -359,8 +377,20 @@ export const handler = async (
     // blocks the response. Sprint 3 — pass the on-chain role through so
     // the daily role-revalidation cron knows which `resolveRole` variant
     // to re-run for this identity on its 24h cadence.
+    //
+    // M5 (2026-06-10 security review) — pass the verified Calidus pubkey
+    // for SPO sessions so the cron can compare against the pool's
+    // CURRENT registered key and revoke on rotation. The extras param
+    // is optional; non-SPO roles pass an empty object and the field
+    // stays unset on the persisted row.
     try {
-      await recordSessionForUser(credentialId, jti, onChainRole);
+      await recordSessionForUser(
+        credentialId,
+        jti,
+        onChainRole,
+        undefined,
+        spoCalidusPubKeyHex ? { spoCalidusPubKeyHex } : {},
+      );
     } catch (err) {
       console.warn('onchainVerify: recordSessionForUser failed (non-fatal):', err);
     }

@@ -59,10 +59,11 @@ export const handler = async (
   event: APIGatewayRequestAuthorizerEventV2,
 ): Promise<APIGatewaySimpleAuthorizerResult> => {
   try {
-    const token = extractToken(event);
-    if (!token) {
+    const extracted = extractToken(event);
+    if (!extracted) {
       return { isAuthorized: false };
     }
+    const { token, source } = extracted;
 
     const payload = await verifyJWT(token);
 
@@ -97,7 +98,7 @@ export const handler = async (
       return { isAuthorized: false };
     }
 
-    return buildAuthorizedResponse(payload, liveVersion ?? payload.tokenVersion ?? 0);
+    return buildAuthorizedResponse(payload, liveVersion ?? payload.tokenVersion ?? 0, source);
   } catch (err) {
     console.warn('JWT authorizer rejected request:', err instanceof Error ? err.message : err);
     return { isAuthorized: false };
@@ -118,11 +119,28 @@ async function currentTokenVersion(walletAddress: string): Promise<number | null
   }
 }
 
-function extractToken(event: APIGatewayRequestAuthorizerEventV2): string | null {
-  // 1. Try Authorization header (Bearer token)
+/**
+ * Token-source signal forwarded to handlers (S1 fix, 2026-06-10
+ * security review). A `legacy` token came from the CIP-30 cookie or
+ * a Bearer header; an `onchain` token came from the `access_token_onchain`
+ * cookie. Handlers under `/auth/onchain/*` must reject `legacy` tokens
+ * (per S1) so a legacy session cannot bind credentials in the on-chain
+ * personId model.
+ *
+ * Bearer tokens are mapped to `legacy` because the legacy CIP-30
+ * surface is the only one that issues callers a bearer-compatible
+ * surface today; the on-chain flow is cookie-only.
+ */
+export type TokenSource = 'legacy' | 'onchain';
+
+function extractToken(
+  event: APIGatewayRequestAuthorizerEventV2,
+): { token: string; source: TokenSource } | null {
+  // 1. Try Authorization header (Bearer token) — treated as `legacy`
+  //    since today's bearer-flow consumers come from the legacy surface.
   const authHeader = event.headers?.['authorization'] ?? event.headers?.['Authorization'];
   if (authHeader?.startsWith('Bearer ')) {
-    return authHeader.slice(7);
+    return { token: authHeader.slice(7), source: 'legacy' };
   }
 
   // 2. Try httpOnly cookies — legacy CIP-30 session first, then the new
@@ -130,14 +148,24 @@ function extractToken(event: APIGatewayRequestAuthorizerEventV2): string | null 
   //    legacy one because it carries the canonical `roles` claim every
   //    existing role-gated handler expects. On-chain-only sessions (no
   //    legacy login this device) fall through to the second branch.
+  //
+  // S1 fix — the source label rides through with the token so the
+  // downstream handler knows which cookie's JWT it's holding. An
+  // /auth/onchain/* endpoint that the SPA hit while the user still
+  // has a legacy cookie present would pre-fix have authenticated via
+  // the legacy cookie and proceeded into the on-chain logic with a
+  // stake-`sub` JWT — potentially binding a legacy stake credential
+  // to a personId derived from a missing on-chain context. Post-fix
+  // the handler can read `tokenSource === 'legacy'` and reject the
+  // request before any binding work.
   const cookieHeader = event.cookies?.join('; ');
   const fromLegacy = extractTokenFromCookie(cookieHeader);
   if (fromLegacy) {
-    return fromLegacy;
+    return { token: fromLegacy, source: 'legacy' };
   }
   const fromOnChain = extractOnChainTokenFromCookie(cookieHeader);
   if (fromOnChain) {
-    return fromOnChain;
+    return { token: fromOnChain, source: 'onchain' };
   }
 
   return null;
@@ -146,6 +174,7 @@ function extractToken(event: APIGatewayRequestAuthorizerEventV2): string | null 
 function buildAuthorizedResponse(
   payload: JWTPayload,
   tokenVersion: number,
+  tokenSource: TokenSource,
 ): APIGatewaySimpleAuthorizerResult & {
   context: Record<string, string>;
 } {
@@ -170,6 +199,11 @@ function buildAuthorizedResponse(
       // `identity_links` so a pre-Decision-3 on-chain token keeps
       // working through a rolling upgrade.
       ...(payload.personId ? { personId: payload.personId } : {}),
+      // S1 fix (2026-06-10 security review) — surface which cookie /
+      // header the token came from so handlers under
+      // `/auth/onchain/*` can reject a legacy CIP-30 session before
+      // proceeding into on-chain binding logic.
+      tokenSource,
     },
   };
 }

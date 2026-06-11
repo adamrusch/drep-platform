@@ -25,9 +25,21 @@ export interface NonceStore {
   /** Look up a payload by nonce. Returns null if absent OR if the record's
    *  recorded expiry is in the past (KV→DDB TTL-lag defense). */
   get(nonce: string): Promise<string | null>;
-  /** Atomic delete. Production impl uses a conditional delete so two concurrent
-   *  consume calls cannot both succeed; the in-memory impl mimics this. */
-  delete(nonce: string): Promise<void>;
+  /**
+   * Atomic delete (M2 fix, 2026-06-10 security review).
+   *
+   * Returns `true` iff THIS caller actually removed the row, `false`
+   * when the row was already gone (e.g. a concurrent consumer won the
+   * race). The DDB impl wraps the conditional delete and maps
+   * `ConditionalCheckFailedException` to `false`; the in-memory impl
+   * uses a check-and-delete that returns whether it removed an entry.
+   *
+   * Callers use this signal to ensure single-use semantics under
+   * concurrency: `consumeNonce` returns the boolean from `delete`, so
+   * two concurrent consumers see exactly one `true` and one `false`
+   * rather than both seeing a swallowed-success `void`.
+   */
+  delete(nonce: string): Promise<boolean>;
 }
 
 /** A clock injected for tests. Epoch seconds. */
@@ -75,8 +87,15 @@ export class InMemoryNonceStore implements NonceStore {
     return record.payload;
   }
 
-  async delete(nonce: string): Promise<void> {
-    this.records.delete(nonce);
+  async delete(nonce: string): Promise<boolean> {
+    // M2 fix — atomic check-and-delete. The synchronous `Map` ops are
+    // already serialised on the V8 event loop, so `has` then `delete`
+    // is race-free within a single Lambda instance. The boolean return
+    // mirrors the DDB impl's `ConditionalCheckFailedException` →
+    // `false` branch: a second concurrent consumer (which would have
+    // got `false` from `Map.delete` because the key is gone) sees the
+    // same `false` here.
+    return this.records.delete(nonce);
   }
 
   /** Test helper — clear all records. */

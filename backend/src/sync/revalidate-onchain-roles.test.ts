@@ -47,6 +47,11 @@ vi.mock('../lib/koios', async () => {
     listProposals: vi.fn(async () => []),
     getCommitteeMembers: vi.fn(async () => []),
     listAllPools: vi.fn(async () => []),
+    // S4 hardening — the strict adapter invalidates the committee
+    // cache before each `committeeInfo` call so the cron always sees
+    // a fresh roster. The mock is a no-op here; we just need the
+    // symbol to exist so the strict adapter can import it.
+    invalidateCommitteeCache: vi.fn(),
     // KoiosError is also exported by the live module; preserve the
     // throwable shape for any test that throws it explicitly.
     KoiosError: class KoiosError extends Error {
@@ -74,6 +79,7 @@ function fakeKoios(overrides: Partial<KoiosClient> = {}): KoiosClient {
     poolCalidusKey: async () => null,
     committeeInfo: async () => [],
     poolStatus: async () => null,
+    poolCalidusKeyByPool: async () => null,
     ...overrides,
   };
 }
@@ -313,6 +319,172 @@ describe('decideForIdentity — pure decision logic', () => {
     };
     const decision = await decideForIdentity(idx, koios);
     expect(decision.action).toBe('upstream-failure');
+  });
+
+  // ----- M5 (2026-06-10 security review) — Calidus-key rotation check -----
+
+  it('M5: SPO whose stored Calidus key MATCHES the current pool key → still-valid', async () => {
+    const STORED = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    const koios = fakeKoios({
+      poolStatus: async (poolId: string) => ({
+        pool_id_bech32: poolId,
+        pool_status: 'registered',
+        retiring_epoch: null,
+      }),
+      poolCalidusKeyByPool: async (poolId: string) => ({
+        pool_id_bech32: poolId,
+        calidus_pub_key: STORED, // matches!
+        calidus_id_bech32: 'calidus1aaa',
+        registered: true,
+        pool_status: 'registered',
+      }),
+    });
+    const idx: ActiveSessionIndex = {
+      walletAddress: 'pool1aligned',
+      onChainRole: 'spo',
+      jtiHashes: ['hash1'],
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      spoCalidusPubKeyHex: STORED,
+    };
+    const decision = await decideForIdentity(idx, koios);
+    expect(decision.action).toBe('still-valid');
+  });
+
+  it('M5: SPO whose stored Calidus key DIFFERS from the current key → revoke (rotation)', async () => {
+    const STORED = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    const CURRENT = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
+    const koios = fakeKoios({
+      poolStatus: async (poolId: string) => ({
+        pool_id_bech32: poolId,
+        pool_status: 'registered',
+        retiring_epoch: null,
+      }),
+      poolCalidusKeyByPool: async (poolId: string) => ({
+        pool_id_bech32: poolId,
+        calidus_pub_key: CURRENT, // rotated!
+        calidus_id_bech32: 'calidus1current',
+        registered: true,
+        pool_status: 'registered',
+      }),
+    });
+    const idx: ActiveSessionIndex = {
+      walletAddress: 'pool1rotated',
+      onChainRole: 'spo',
+      jtiHashes: ['hash1'],
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      spoCalidusPubKeyHex: STORED,
+    };
+    const decision = await decideForIdentity(idx, koios);
+    expect(decision.action).toBe('revoke');
+    if (decision.action === 'revoke') {
+      expect(decision.reason).toContain('Calidus key rotated');
+    }
+  });
+
+  it('M5: SPO whose stored Calidus key is present but the pool has NO current registered key → revoke', async () => {
+    // Pool dropped Calidus registration entirely (CIP-151 unregister).
+    const STORED = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    const koios = fakeKoios({
+      poolStatus: async (poolId: string) => ({
+        pool_id_bech32: poolId,
+        pool_status: 'registered',
+        retiring_epoch: null,
+      }),
+      poolCalidusKeyByPool: async () => null,
+    });
+    const idx: ActiveSessionIndex = {
+      walletAddress: 'pool1unregistered_calidus',
+      onChainRole: 'spo',
+      jtiHashes: ['hash1'],
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      spoCalidusPubKeyHex: STORED,
+    };
+    const decision = await decideForIdentity(idx, koios);
+    expect(decision.action).toBe('revoke');
+    if (decision.action === 'revoke') {
+      expect(decision.reason).toContain('Calidus');
+    }
+  });
+
+  it('M5: SPO whose koios.poolCalidusKeyByPool() throws → upstream-failure (sessions kept, fail-safe)', async () => {
+    // Critical fail-safe: a brownout on the Calidus-key lookup must
+    // NOT revoke the SPO session. The strict adapter propagates the
+    // throw; the surrounding try/catch maps to upstream-failure.
+    const STORED = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    const koios = fakeKoios({
+      poolStatus: async (poolId: string) => ({
+        pool_id_bech32: poolId,
+        pool_status: 'registered',
+        retiring_epoch: null,
+      }),
+      poolCalidusKeyByPool: async () => {
+        throw new Error('Koios 502 on /pool_calidus_keys');
+      },
+    });
+    const idx: ActiveSessionIndex = {
+      walletAddress: 'pool1calidus_brownout',
+      onChainRole: 'spo',
+      jtiHashes: ['hash1'],
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      spoCalidusPubKeyHex: STORED,
+    };
+    const decision = await decideForIdentity(idx, koios);
+    expect(decision.action).toBe('upstream-failure');
+  });
+
+  it('M5: pre-M5 SPO row (no stored Calidus key) → still-valid (no retroactive rotation check)', async () => {
+    // Pre-M5 SPO sessions don't capture the originating Calidus key.
+    // The cron MUST NOT revoke them — they age out via the 30-day JWT
+    // TTL and the next login post-M5 will start capturing the key.
+    const koios = fakeKoios({
+      poolStatus: async (poolId: string) => ({
+        pool_id_bech32: poolId,
+        pool_status: 'registered',
+        retiring_epoch: null,
+      }),
+      // Even if a current key exists, we have nothing to compare it
+      // against, so we don't make the call (and the test verifies
+      // that by leaving poolCalidusKeyByPool returning null).
+      poolCalidusKeyByPool: async () => null,
+    });
+    const idx: ActiveSessionIndex = {
+      walletAddress: 'pool1pre_m5',
+      onChainRole: 'spo',
+      jtiHashes: ['hash1'],
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      // Notice: NO spoCalidusPubKeyHex.
+    };
+    const decision = await decideForIdentity(idx, koios);
+    expect(decision.action).toBe('still-valid');
+  });
+
+  it('M5: pool retired short-circuits the Calidus check (revoke for retirement, not rotation)', async () => {
+    // Even with a stored Calidus key, a retired pool should revoke
+    // for pool retirement — the Calidus check is downstream.
+    const STORED = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    const koios = fakeKoios({
+      poolStatus: async (poolId: string) => ({
+        pool_id_bech32: poolId,
+        pool_status: 'retired',
+        retiring_epoch: 500,
+      }),
+      // Should NOT be called when the pool is retired.
+      poolCalidusKeyByPool: async () => {
+        throw new Error('poolCalidusKeyByPool should not be called for a retired pool');
+      },
+    });
+    const idx: ActiveSessionIndex = {
+      walletAddress: 'pool1retired_with_stored_key',
+      onChainRole: 'spo',
+      jtiHashes: ['hash1'],
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      spoCalidusPubKeyHex: STORED,
+    };
+    const decision = await decideForIdentity(idx, koios);
+    expect(decision.action).toBe('revoke');
+    if (decision.action === 'revoke') {
+      expect(decision.reason).toContain('retired');
+    }
   });
 
   it('record with no onChainRole → skip-no-role (pre-Sprint-3 backfill)', async () => {
