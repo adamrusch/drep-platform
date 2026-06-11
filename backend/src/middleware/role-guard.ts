@@ -25,6 +25,14 @@ export interface AuthContext {
    *  issued after the per-session revocation path landed. Used by the
    *  logout handler to revoke just the current session. */
   jti?: string;
+  /** Decision #3 (2026-06-10) — the caller's canonical `personId` for
+   *  the on-chain identity subsystem. Present only on on-chain login
+   *  tokens minted AFTER Decision #3 lands. Pre-Decision-3 on-chain
+   *  tokens omit it; downstream handlers fall back to resolving via
+   *  `identityKey` → `identity_links` (the credential the JWT `sub`
+   *  carries). Legacy CIP-30 tokens omit it entirely — they're not
+   *  participating in the on-chain person model. */
+  personId?: string;
 }
 
 /**
@@ -51,6 +59,9 @@ interface LambdaAuthorizerContext {
   /** ULID session id forwarded from the authorizer for tokens issued
    *  after the per-session revocation path landed. */
   jti?: string;
+  /** Decision #3 — canonical personId for the on-chain identity
+   *  subsystem. Forwarded by the authorizer when present on the JWT. */
+  personId?: string;
 }
 
 /**
@@ -124,6 +135,7 @@ export function extractAuthContext(
     ...(Number.isFinite(tokenVersion) ? { tokenVersion } : {}),
     onChainRoles,
     ...(ctx.jti ? { jti: ctx.jti } : {}),
+    ...(ctx.personId ? { personId: ctx.personId } : {}),
   };
 }
 
