@@ -19,7 +19,7 @@ site.
 Please report security issues privately, not in a public GitHub issue, so
 they can be fixed before they are widely known.
 
-- Email: [claude@rusch.me](mailto:claude@rusch.me).
+- Email: [bugreport@rusch.me](mailto:bugreport@rusch.me).
 - Alternative: open a private advisory through GitHub's
   [Report a vulnerability](https://github.com/adamrusch/drep-platform/security/advisories/new)
   feature for this repository.
