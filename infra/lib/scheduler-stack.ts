@@ -698,11 +698,20 @@ export class SchedulerStack extends cdk.Stack {
         ],
       },
     );
-    // The Lambda reads `kind='session_index'` rows + writes
-    // `kind='session'` tombstones + deletes per-user index rows after
-    // a revoke-all. All three operations target the existing
-    // `authNonces` table.
-    databaseStack.authNoncesTable.grantReadWriteData(revalidateOnChainRolesRole);
+    // The Lambda reads + writes per-session rows on the dedicated
+    // `identity_sessions` table — enumerates active identities via the
+    // `identityId-issuedAt-index` GSI, and flips `revoked:true` on
+    // sessions whose role no longer holds on-chain (the role-
+    // revalidation invariant).
+    //
+    // Decision #1 (2026-06-10) — the prior implementation granted RW
+    // on `authNonces` (sessions previously rode that table with a
+    // `kind='session' | 'session_index'` discriminator). With sessions
+    // now living on their own table, the `authNonces` grant on this
+    // role would be dead weight — granted but never reached by this
+    // Lambda. Dropping it tightens the IAM surface to exactly what the
+    // sync touches.
+    databaseStack.identitySessionsTable.grantReadWriteData(revalidateOnChainRolesRole);
 
     this.revalidateOnChainRolesFn = new lambdaNodejs.NodejsFunction(
       this,

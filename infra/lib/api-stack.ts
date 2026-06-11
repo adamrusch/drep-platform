@@ -137,6 +137,16 @@ export class ApiStack extends cdk.Stack {
       databaseStack.ccMembersTable,
       databaseStack.auditLogTable,
       databaseStack.authNoncesTable,
+      // Decision #1 (2026-06-10) — dedicated per-session revocation
+      // store for the on-chain login JWTs. Read by the JWT authorizer
+      // (per-request `isSessionRevoked`), written by `onchainVerify`
+      // (`recordSessionForUser`) + `logout` (`revokeSessionByJti` /
+      // `revokeAllSessionsForUser`). Granted RW across the shared
+      // `lambdaRole` because every authenticated Lambda — including
+      // the authorizer — shares it; the authorizer is the read hot
+      // path (one GetItem per request), the verify/logout handlers
+      // own the writes.
+      databaseStack.identitySessionsTable,
       // Phase 2 committee voting.
       databaseStack.committeeVotesTable,
       databaseStack.committeeMembershipTable,
