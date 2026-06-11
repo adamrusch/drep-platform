@@ -68,6 +68,21 @@ export interface CommitteeMember {
 }
 
 /**
+ * Subset of a Koios `/pool_info` (or `/pool_list`) row needed by the daily
+ * SPO role re-validation. `pool_status` is the lifecycle bucket — a pool is
+ * considered registered/active when present AND its status isn't `retired`.
+ * `retiring_epoch` is informational and not used for the live decision (a
+ * pool that has FILED a retirement cert but isn't past the epoch yet still
+ * has `pool_status='registered'`); we leave the field optional so future
+ * callers can read it without re-shaping the type.
+ */
+export interface PoolStatusRow {
+  pool_id_bech32: string;
+  pool_status: string;
+  retiring_epoch: number | null;
+}
+
+/**
  * Minimal structural interface satisfied by a production Koios adapter and
  * by test fakes. Keeping this lean (only the methods the resolvers call)
  * keeps the test surface small and the dependency on Koios scoped.
@@ -77,4 +92,19 @@ export interface KoiosClient {
   proposalsByReturnAddress(stakeAddress: string): Promise<Proposal[]>;
   poolCalidusKey(calidusPubKeyHex: string): Promise<PoolCalidusKeyRow | null>;
   committeeInfo(): Promise<CommitteeMember[]>;
+  /**
+   * Look up one pool's current registration status by bech32 pool id.
+   *
+   * Returns `null` when the pool is DEFINITIVELY absent from the chain
+   * roster — that's the "retired or never-existed" signal the daily SPO
+   * revalidation cron treats as a revoke trigger. Production adapters
+   * MAY swallow upstream errors and also return `null` (verify-path
+   * semantics) OR MAY propagate the error (strict-adapter semantics used
+   * by the cron). Callers that need to distinguish the two MUST use a
+   * strict adapter.
+   *
+   * Sprint 3 follow-up — added so `revalidate-onchain-roles.ts` can
+   * close the previously-no-op SPO branch.
+   */
+  poolStatus(poolIdBech32: string): Promise<PoolStatusRow | null>;
 }

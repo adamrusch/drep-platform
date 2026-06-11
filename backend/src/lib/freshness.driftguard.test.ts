@@ -53,8 +53,8 @@ describe('freshness (drift guard — shared/infra/frontend must be byte-identica
     expect(shared).toContain("FRESHNESS_SCHEMA_VERSION = 'v1'");
   });
 
-  it('contains all 9 documented schedule ids (sanity)', () => {
-    // The infra SchedulerStack today builds 9 EventBridge rules. Asserting
+  it('contains all 10 documented schedule ids (sanity)', () => {
+    // The infra SchedulerStack today builds 10 EventBridge rules. Asserting
     // each id appears in the canonical freshness file pins the two together
     // — a removed schedule must remove the freshness row too, and a new
     // schedule must add one. Mirrors the rule-name suffix used in
@@ -70,6 +70,7 @@ describe('freshness (drift guard — shared/infra/frontend must be byte-identica
       'revalidate-comment-stake',
       'committee-epoch-sweep',
       'revalidate-onchain-roles',
+      'gc-avatars',
     ];
     for (const id of required) {
       expect(shared).toContain(`id: '${id}'`);

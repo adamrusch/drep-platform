@@ -46,6 +46,7 @@ vi.mock('../lib/koios', async () => {
     fetchDRepInfoBatch: vi.fn(async () => []),
     listProposals: vi.fn(async () => []),
     getCommitteeMembers: vi.fn(async () => []),
+    listAllPools: vi.fn(async () => []),
     // KoiosError is also exported by the live module; preserve the
     // throwable shape for any test that throws it explicitly.
     KoiosError: class KoiosError extends Error {
@@ -72,6 +73,7 @@ function fakeKoios(overrides: Partial<KoiosClient> = {}): KoiosClient {
     proposalsByReturnAddress: async () => [],
     poolCalidusKey: async () => null,
     committeeInfo: async () => [],
+    poolStatus: async () => null,
     ...overrides,
   };
 }
@@ -232,25 +234,85 @@ describe('decideForIdentity — pure decision logic', () => {
     expect(decision.action).toBe('revoke');
   });
 
-  it('SPO identity → still-valid (documented Sprint 3 gap; no resolver path)', async () => {
-    const koios = fakeKoios();
+  // ----- SPO branch (Sprint 3 follow-up — closes the previously-no-op gap) -----
+
+  it('SPO with still-registered pool → still-valid', async () => {
+    const koios = fakeKoios({
+      poolStatus: async (poolId: string) => ({
+        pool_id_bech32: poolId,
+        pool_status: 'registered',
+        retiring_epoch: null,
+      }),
+    });
     const idx: ActiveSessionIndex = {
-      walletAddress: 'pool1aaaa',
+      walletAddress: 'pool1aaaa_active',
       onChainRole: 'spo',
       jtiHashes: ['hash1'],
       expiresAt: Math.floor(Date.now() / 1000) + 3600,
     };
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    try {
-      const decision = await decideForIdentity(idx, koios);
-      // The Sprint-3 implementation surfaces SPO as a documented gap:
-      // no `poolStatus(poolId)` adapter method exists, so we can't
-      // re-check pool retirement here. Sessions are preserved.
-      expect(decision.action).toBe('still-valid');
-      expect(warn).toHaveBeenCalled();
-    } finally {
-      warn.mockRestore();
+    const decision = await decideForIdentity(idx, koios);
+    expect(decision.action).toBe('still-valid');
+  });
+
+  it('SPO whose pool is absent from pool_list → revoke (definitive deregistration)', async () => {
+    const koios = fakeKoios({
+      // Adapter returns null when the strict `/pool_list` walk
+      // succeeded but no row for this pool id is present. That's the
+      // retired-or-never-registered signature.
+      poolStatus: async () => null,
+    });
+    const idx: ActiveSessionIndex = {
+      walletAddress: 'pool1zzz_gone',
+      onChainRole: 'spo',
+      jtiHashes: ['hash1'],
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+    };
+    const decision = await decideForIdentity(idx, koios);
+    expect(decision.action).toBe('revoke');
+    if (decision.action === 'revoke') {
+      expect(decision.reason).toContain('pool absent');
     }
+  });
+
+  it('SPO whose pool_status is retired → revoke', async () => {
+    const koios = fakeKoios({
+      poolStatus: async (poolId: string) => ({
+        pool_id_bech32: poolId,
+        pool_status: 'retired',
+        retiring_epoch: 500,
+      }),
+    });
+    const idx: ActiveSessionIndex = {
+      walletAddress: 'pool1retired',
+      onChainRole: 'spo',
+      jtiHashes: ['hash1'],
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+    };
+    const decision = await decideForIdentity(idx, koios);
+    expect(decision.action).toBe('revoke');
+    if (decision.action === 'revoke') {
+      expect(decision.reason).toContain('retired');
+    }
+  });
+
+  it('SPO whose koios.poolStatus() throws → upstream-failure (sessions kept)', async () => {
+    // Critical fail-safe: a Koios brownout on the SPO branch must NOT
+    // strip the session. The cron uses a strict adapter for SPO so
+    // upstream errors propagate up here, the surrounding try/catch in
+    // `decideForIdentity` maps them to upstream-failure.
+    const koios = fakeKoios({
+      poolStatus: async () => {
+        throw new Error('Koios 503 on /pool_list');
+      },
+    });
+    const idx: ActiveSessionIndex = {
+      walletAddress: 'pool1survives_brownout',
+      onChainRole: 'spo',
+      jtiHashes: ['hash1'],
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+    };
+    const decision = await decideForIdentity(idx, koios);
+    expect(decision.action).toBe('upstream-failure');
   });
 
   it('record with no onChainRole → skip-no-role (pre-Sprint-3 backfill)', async () => {
@@ -480,6 +542,79 @@ describe('runRevalidateOnChainRoles — wired pass', () => {
     }
   });
 
+  it('SPO wired pass: still-registered pool keeps its sessions (no revoke call)', async () => {
+    const koios = fakeKoios({
+      poolStatus: async (poolId: string) => ({
+        pool_id_bech32: poolId,
+        pool_status: 'registered',
+        retiring_epoch: null,
+      }),
+    });
+    const enumerator = async (): Promise<ActiveSessionIndex[]> => [
+      {
+        walletAddress: 'pool1aaaa_active',
+        onChainRole: 'spo',
+        jtiHashes: ['h1', 'h2'],
+        expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      },
+    ];
+    const revoke = vi.fn(async () => 0);
+    const result = await runRevalidateOnChainRoles(koios, enumerator, revoke);
+    expect(result.identitiesStillValid).toBe(1);
+    expect(result.identitiesRevoked).toBe(0);
+    expect(revoke).not.toHaveBeenCalled();
+  });
+
+  it('SPO wired pass: retired pool is revoked (revoke called exactly once)', async () => {
+    const koios = fakeKoios({
+      poolStatus: async () => null,
+    });
+    const enumerator = async (): Promise<ActiveSessionIndex[]> => [
+      {
+        walletAddress: 'pool1zzz_gone',
+        onChainRole: 'spo',
+        jtiHashes: ['h1'],
+        expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      },
+    ];
+    const revoke = vi.fn(async () => 1);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      const result = await runRevalidateOnChainRoles(koios, enumerator, revoke);
+      expect(result.identitiesRevoked).toBe(1);
+      expect(revoke).toHaveBeenCalledTimes(1);
+      expect(revoke).toHaveBeenCalledWith('pool1zzz_gone');
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it('SPO wired pass: Koios error leaves the SPO session intact', async () => {
+    const koios = fakeKoios({
+      poolStatus: async () => {
+        throw new Error('Koios 502 on /pool_list');
+      },
+    });
+    const enumerator = async (): Promise<ActiveSessionIndex[]> => [
+      {
+        walletAddress: 'pool1brownout',
+        onChainRole: 'spo',
+        jtiHashes: ['h1'],
+        expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      },
+    ];
+    const revoke = vi.fn(async () => 0);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const result = await runRevalidateOnChainRoles(koios, enumerator, revoke);
+      expect(result.identitiesUpstreamFailures).toBe(1);
+      expect(result.identitiesRevoked).toBe(0);
+      expect(revoke).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('revoke throw is counted under revokeErrors, does not abort the pass', async () => {
     const koios = fakeKoios({
       drepInfo: async () => null,
@@ -565,6 +700,59 @@ describe('runRevalidateOnChainRoles — default (strict-adapter) path', () => {
     } finally {
       log.mockRestore();
       warn.mockRestore();
+    }
+  });
+
+  it('uses STRICT semantics: thrown listAllPools surfaces as upstream-failure on SPO branch', async () => {
+    // The SPO branch's load-bearing invariant: a thrown `/pool_list`
+    // must propagate so the cron does not mass-revoke every SPO
+    // session on a brownout.
+    vi.mocked(koiosHelpers.listAllPools).mockRejectedValueOnce(
+      new Error('Koios 503 on /pool_list'),
+    );
+    const enumerator = async (): Promise<ActiveSessionIndex[]> => [
+      {
+        walletAddress: 'pool1strict_brownout',
+        onChainRole: 'spo',
+        jtiHashes: ['h1'],
+        expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      },
+    ];
+    const revoke = vi.fn(async () => 0);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const result = await runRevalidateOnChainRoles(undefined, enumerator, revoke);
+      expect(result.identitiesUpstreamFailures).toBe(1);
+      expect(result.identitiesRevoked).toBe(0);
+      expect(revoke).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it('uses STRICT semantics: empty listAllPools result for an SPO id = definitive deregistration → revoke', async () => {
+    // The successful-but-empty case is the deregistration signal for the
+    // strict SPO adapter: `/pool_list` resolved, but no row for this
+    // pool id is present. Treat as revoke.
+    vi.mocked(koiosHelpers.listAllPools).mockResolvedValueOnce([]);
+    const enumerator = async (): Promise<ActiveSessionIndex[]> => [
+      {
+        walletAddress: 'pool1strict_retired',
+        onChainRole: 'spo',
+        jtiHashes: ['h1'],
+        expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      },
+    ];
+    const revoke = vi.fn(async () => 1);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      const result = await runRevalidateOnChainRoles(undefined, enumerator, revoke);
+      expect(result.identitiesRevoked).toBe(1);
+      expect(revoke).toHaveBeenCalledWith('pool1strict_retired');
+    } finally {
+      log.mockRestore();
     }
   });
 

@@ -19,16 +19,19 @@
 import {
   fetchDRepInfoBatch,
   getCommitteeMembers,
+  listAllPools,
   listProposals,
   type KoiosDRepInfo,
   type KoiosProposal,
   type KoiosCommitteeMember,
+  type KoiosPool,
 } from '../../koios';
 import type {
   KoiosClient,
   DrepInfo,
   Proposal,
   PoolCalidusKeyRow,
+  PoolStatusRow,
   CommitteeMember,
 } from './koios';
 
@@ -69,6 +72,14 @@ function mapCommitteeMember(row: KoiosCommitteeMember): CommitteeMember {
     expiration_epoch: row.expiration_epoch ?? null,
     cc_hot_has_script: row.cc_hot_has_script,
     cc_cold_has_script: row.cc_cold_has_script,
+  };
+}
+
+function mapPoolStatus(row: KoiosPool): PoolStatusRow {
+  return {
+    pool_id_bech32: row.pool_id_bech32,
+    pool_status: row.pool_status,
+    retiring_epoch: row.retiring_epoch ?? null,
   };
 }
 
@@ -197,6 +208,40 @@ export function buildKoiosAdapter(): KoiosClient {
           err instanceof Error ? err.message : err,
         );
         return [];
+      }
+    },
+
+    async poolStatus(poolIdBech32: string): Promise<PoolStatusRow | null> {
+      // The legacy Koios client doesn't wrap a single-pool `/pool_info`
+      // lookup, but it DOES wrap `/pool_list` (paginated full roster) via
+      // `listAllPools` — used by the pool-metadata sync to enumerate every
+      // pool ID. We piggyback on that here: one paginated walk, then
+      // filter to the requested pool. The verify-path adapter is
+      // expected to fail-CLOSED on errors (return null), matching the
+      // other methods on this file.
+      //
+      // # Why `/pool_list` and not a per-pool `/pool_info`
+      //
+      // The cron's batch enumeration path will issue ONE poolStatus
+      // call per active SPO identity per day. At today's scale (handful
+      // of identities) the per-call cost of pulling the full pool list
+      // is acceptable, and the legacy client already module-caches the
+      // result (30 min TTL via `listActivePools`'s `_poolCache`).
+      //
+      // The strict adapter under `revalidate-onchain-roles.ts` will
+      // override this method to propagate errors instead of swallowing,
+      // so the cron can distinguish a definitive "pool absent" from a
+      // brownout.
+      try {
+        const rows = await listAllPools();
+        const match = rows.find((r) => r.pool_id_bech32 === poolIdBech32);
+        return match ? mapPoolStatus(match) : null;
+      } catch (err) {
+        console.warn(
+          'koiosAdapter.poolStatus: lookup failed:',
+          err instanceof Error ? err.message : err,
+        );
+        return null;
       }
     },
   };

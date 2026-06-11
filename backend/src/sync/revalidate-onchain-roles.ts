@@ -98,11 +98,19 @@ import {
 import {
   fetchDRepInfoBatch,
   getCommitteeMembers,
+  listAllPools,
   listProposals,
   type KoiosDRepInfo,
   type KoiosCommitteeMember,
+  type KoiosPool,
 } from '../lib/koios';
-import type { KoiosClient, DrepInfo, Proposal, CommitteeMember } from '../lib/identity/auth/koios';
+import type {
+  KoiosClient,
+  DrepInfo,
+  Proposal,
+  PoolStatusRow,
+  CommitteeMember,
+} from '../lib/identity/auth/koios';
 import {
   resolveDRep,
   resolveProposer,
@@ -129,9 +137,10 @@ import type { OnChainRole } from '../lib/types';
 // propagates up to `decideForIdentity`'s try/catch where it correctly
 // maps to `upstream-failure` (skip the identity).
 //
-// We omit the SPO `poolCalidusKey` method — the cron doesn't have the
-// originating Calidus key on the session index, so the SPO branch is a
-// no-op (see the documented gap in `decideForIdentity`).
+// The cron does NOT use the SPO Calidus-key resolver (the session index
+// stores the pool bech32 id, not the originating Calidus key), so the
+// strict adapter's `poolCalidusKey` is a defensive no-op. SPO revalidation
+// instead goes through `poolStatus` which strictly propagates errors.
 function buildStrictKoiosAdapter(): KoiosClient {
   function mapDrepInfo(row: KoiosDRepInfo): DrepInfo {
     return {
@@ -154,6 +163,13 @@ function buildStrictKoiosAdapter(): KoiosClient {
       expiration_epoch: row.expiration_epoch ?? null,
       cc_hot_has_script: row.cc_hot_has_script,
       cc_cold_has_script: row.cc_cold_has_script,
+    };
+  }
+  function mapPoolStatus(row: KoiosPool): PoolStatusRow {
+    return {
+      pool_id_bech32: row.pool_id_bech32,
+      pool_status: row.pool_status,
+      retiring_epoch: row.retiring_epoch ?? null,
     };
   }
   return {
@@ -189,6 +205,18 @@ function buildStrictKoiosAdapter(): KoiosClient {
     async committeeInfo(): Promise<CommitteeMember[]> {
       const rows = await getCommitteeMembers();
       return rows.map(mapCommitteeMember);
+    },
+    // PROPAGATES errors (strict semantics). The verify-path adapter
+    // catches + returns null, making a brownout indistinguishable from a
+    // definitive deregistration; the cron needs the opposite contract so
+    // a thrown `/pool_list` maps cleanly to upstream-failure (skip).
+    // An empty match — the call succeeded and the response was
+    // well-formed, but no row for this pool id is present — IS the
+    // definitive "pool retired or never existed" signal.
+    async poolStatus(poolIdBech32: string): Promise<PoolStatusRow | null> {
+      const rows = await listAllPools();
+      const match = rows.find((r) => r.pool_id_bech32 === poolIdBech32);
+      return match ? mapPoolStatus(match) : null;
     },
   };
 }
@@ -286,44 +314,40 @@ export async function decideForIdentity(
             };
       }
       case 'spo': {
-        // For SPO, the index's `walletAddress` is the pool's bech32
-        // `pool1...` id, not a Calidus pub key. We don't have a
-        // pool-id→role check in the resolver suite (only Calidus-key
-        // based via `resolveSpo`). The cron consequently checks "is
-        // this pool still registered" via the adapter — adapter-level
-        // null/error means we skip. The straightforward fall-through
-        // is to call `resolveSpo` with the original Calidus key — but
-        // we don't have it stored. So the pragmatic path: re-check the
-        // pool's current status via a direct adapter probe.
+        // SPO revalidation (Sprint 3 follow-up — closes the previously-
+        // no-op gap).
         //
-        // We DELIBERATELY don't add a new resolver here. Instead we
-        // use a single `committee_info`-style lookup pattern: a probe
-        // through `proposalsByReturnAddress` is wrong (different
-        // domain). The cleanest available path: call `poolCalidusKey`
-        // with a placeholder — that's pointless because we don't have
-        // the key.
+        // The session index stores the SPO's bech32 `pool1...` id (NOT
+        // the originating Calidus pub key), so we re-check via the
+        // adapter's `poolStatus(poolId)` method, added at the same time
+        // as this branch. Decision table:
         //
-        // # Practical compromise (Sprint 3)
-        //
-        // At today's scale the SPO role's drop-out signal we have to
-        // work with is: the pool RETIRED. There is no batched
-        // pool-status endpoint on the live `koiosAdapter`. Rather
-        // than introduce one in Sprint 3 (which adds infra surface),
-        // we fall through to a `still-valid` decision for SPO and
-        // surface this as a documented gap in the security review.
-        //
-        // The other three roles (drep / cc / proposer) DO have
-        // checkable resolvers and gain the daily revalidation
-        // immediately. SPO re-revalidation lands in a follow-up
-        // sprint that adds the missing `poolStatus(poolId)` adapter
-        // method.
-        //
-        // To be explicit (and to keep the test surface honest), we
-        // emit a one-line warning per SPO identity per pass so the
-        // gap shows up in CloudWatch.
-        console.warn(
-          `revalidate-onchain-roles: SPO ${index.walletAddress} role-check not yet implemented; sessions preserved`,
-        );
+        //   - `poolStatus()` THREW → adapter contract says strict
+        //     propagation; caught by the surrounding try/catch and
+        //     mapped to upstream-failure (skip).
+        //   - returned `null` (DEFINITIVE absence — the `/pool_list`
+        //     walk succeeded, pool not present) → revoke.
+        //   - returned a row whose `pool_status === 'retired'` → revoke.
+        //   - returned a row whose `pool_status === 'registered'` (or
+        //     any other non-`retired` lifecycle bucket) → still-valid.
+        //     A pool that has FILED a retirement cert but isn't past
+        //     the epoch yet still has `pool_status='registered'` and
+        //     CAN still vote, so we don't treat the `retiring_epoch`
+        //     field as a revoke signal here. The next pass will revoke
+        //     once the retirement actually lands.
+        const r = await koios.poolStatus(index.walletAddress);
+        if (r === null) {
+          return {
+            action: 'revoke',
+            reason: 'pool absent from pool_list (retired or never registered)',
+          };
+        }
+        if (r.pool_status === 'retired') {
+          return {
+            action: 'revoke',
+            reason: `pool_status='retired'`,
+          };
+        }
         return { action: 'still-valid' };
       }
       case 'cc': {
