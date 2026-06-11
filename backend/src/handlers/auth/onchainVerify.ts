@@ -78,6 +78,10 @@ import {
   METRIC_IDENTITY_COSE_MISSING_ADDRESS_HEADER,
 } from '../../lib/metrics';
 import type { OnChainRole, SessionType, UserRole } from '../../lib/types';
+import {
+  credentialTypeForRole,
+  resolveOrProvisionPerson,
+} from '../../lib/identityPerson';
 import { ok, badRequest, unauthorized, internalError } from '../_response';
 
 interface VerifyRequestBody {
@@ -291,6 +295,39 @@ export const handler = async (
       return internalError('Verification produced no identity');
     }
 
+    // ---- Decision #3 — reconcile to a canonical personId ----
+    //
+    // We now have a verified on-chain credential (drepId / poolId /
+    // ccCred / stakeAddr). Decision #3 introduces the `personId` layer
+    // so the same individual is recognised across MULTIPLE on-chain
+    // credentials. The reconciliation:
+    //   - If this credential is already mapped (in `identity_links`) →
+    //     load that personId (returning user).
+    //   - Otherwise → auto-provision a fresh person + link with
+    //     `verifiedVia='login'`.
+    //
+    // Best-effort: a hard failure here logs + falls back to "no
+    // personId on this token." That keeps login WORKING while the
+    // person layer matures — the legacy on-chain login surface (JWT
+    // carries credential identity directly) still works without a
+    // personId claim, and the `me`/link handlers fall back to a
+    // credential→person re-resolve.
+    let personId: string | undefined;
+    try {
+      const credentialType = credentialTypeForRole(onChainRole);
+      const reconciled = await resolveOrProvisionPerson(
+        credentialType,
+        credentialId,
+        'login',
+      );
+      personId = reconciled.personId;
+    } catch (err) {
+      console.warn(
+        'onchainVerify: person reconciliation failed (non-fatal):',
+        err instanceof Error ? err.message : err,
+      );
+    }
+
     // ---- Mint JWT ----
     //
     // On-chain login does NOT touch the legacy `users` table — the wallet
@@ -300,6 +337,11 @@ export const handler = async (
     // role-gate machinery doesn't trip on an empty array. Handlers that
     // care about on-chain identity inspect `onChainRoles` via the
     // authorizer context.
+    //
+    // Decision #3 — when reconciliation produced a personId, ride it as
+    // a parallel JWT claim. Pre-Decision-3 tokens omit it; downstream
+    // handlers (me/link/profile) fall back to a credential→person
+    // re-resolve in that case.
     const sessionType: SessionType = body.rememberMe ? 'remember_me' : 'normal';
     const jti = ulid();
     const baseRoles: UserRole[] = ['guest'];
@@ -310,7 +352,7 @@ export const handler = async (
       sessionType,
       undefined, // registeredDrepId — N/A for on-chain login
       0,
-      { onChainRoles: [onChainRole], jti },
+      { onChainRoles: [onChainRole], jti, ...(personId ? { personId } : {}) },
     );
 
     // Index the session for revoke-all-for-user. Best-effort — never
@@ -332,6 +374,11 @@ export const handler = async (
         sessionType,
         expiresAt,
         jti,
+        // Decision #3 — surface the personId when reconciliation
+        // succeeded so the SPA can route to the on-chain profile UI
+        // immediately. Absent on the rare reconciliation-failure path
+        // (best-effort — login still succeeded).
+        ...(personId ? { personId } : {}),
       },
       [cookieHeader],
     );

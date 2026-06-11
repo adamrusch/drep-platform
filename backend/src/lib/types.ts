@@ -462,6 +462,17 @@ export interface JWTPayload {
    *  the authorizer treats absence as "not granularly revocable" and
    *  falls back to the coarse `tokenVersion` check. */
   jti?: string;
+  /** Decision #3 (2026-06-10) — canonical person id (ULID) for the
+   *  on-chain identity subsystem. Present only on tokens minted by the
+   *  on-chain login (`/auth/onchain/verify`) AFTER Decision #3 lands.
+   *
+   *  When set, identifies the same individual across multiple on-chain
+   *  credentials (DRep / SPO / CC / Proposer / wallet-stake). Optional
+   *  so legacy CIP-30 tokens AND pre-Decision-3 on-chain tokens both
+   *  verify unchanged (the `me`/link handlers fall back to a re-resolve
+   *  via `identityKey` → `identity_links` when absent — a rolling
+   *  upgrade path). */
+  personId?: string;
   iat: number;
   exp: number;
 }
@@ -470,6 +481,81 @@ export interface AuthChallenge {
   nonce: string;
   message: string;
   expiresAt: string;
+}
+
+// ============================================================
+// Decision #3 (2026-06-10) — canonical person + identity-link model.
+//
+// Adds a "person" layer so one individual is recognised as the same
+// person whether they log in via a CIP-30 wallet (stake credential) or
+// a raw-key (SPO Calidus / CC hot key) on-chain login. The legacy
+// `users` table (CIP-30 wallet sessions) is UNTOUCHED — these types
+// describe the new on-chain person model only.
+//
+// **Credential type**: the four `OnChainRole` values map almost 1:1 to
+// credential types, except `proposer` doesn't have its own credential
+// — a proposer proves control of a stake address, so its credential
+// type is `stake`. We expose `'stake'` as a fifth credential type to
+// keep that distinction explicit (a stake-credential link can come
+// from either a proposer login OR a future wallet-stake link).
+// ============================================================
+
+/** Credential type used to namespace an `identityKey`. The PK on
+ *  `identity_links` is `${credentialType}:${credentialId}`. */
+export type IdentityCredentialType = 'drep' | 'pool' | 'cc' | 'stake';
+
+/** Where this identity_links row was created.
+ *   - `'login'` — auto-provisioned on first on-chain login for an
+ *     unmapped credential (the onchainVerify reconciliation path).
+ *   - `'link'`  — added via an explicit `/auth/onchain/link/verify`
+ *     call where the caller, already signed in with one credential,
+ *     proved control of a SECOND credential. */
+export type IdentityLinkOrigin = 'login' | 'link';
+
+/** PK=`personId`. One row per recognised individual. The on-chain
+ *  credentials that map to this person live in `identity_links`. */
+export interface OnchainUserItem {
+  /** ULID. Opaque; never reused. */
+  personId: string;
+  /** Optional display name shown across on-chain surfaces. */
+  displayName?: string;
+  /** Free-form short bio. */
+  bio?: string;
+  /** Same shape as the legacy `SocialLinks` — keep the type identical
+   *  so a future client can reuse the same Zod schema across both
+   *  legacy + on-chain profile flows. */
+  socialLinks?: SocialLinks;
+  /** ISO-8601. */
+  createdAt: string;
+  /** ISO-8601. */
+  updatedAt: string;
+  [key: string]: unknown;
+}
+
+/** PK=`identityKey` (= `${credentialType}:${credentialId}`). Maps one
+ *  on-chain credential to a canonical `personId`. */
+export interface IdentityLinkItem {
+  /** Namespaced credential string. Format MUST match the writer
+   *  (`identityKeyFor`) so reads + writes agree byte-for-byte. */
+  identityKey: string;
+  /** FK into `onchain_users.personId`. */
+  personId: string;
+  /** Credential type — same as the namespace prefix in `identityKey`.
+   *  Denormalised so callers don't have to re-parse the PK. */
+  credentialType: IdentityCredentialType;
+  /** ISO-8601 — when the link was minted. GSI sort key on
+   *  `personId-verifiedAt-index`. */
+  verifiedAt: string;
+  /** Audit breadcrumb — was this link auto-provisioned on a fresh
+   *  login (`'login'`) or added via the explicit link flow
+   *  (`'link'`)? */
+  verifiedVia: IdentityLinkOrigin;
+  /** Optional — for `'link'` rows, the on-chain role the caller's
+   *  CURRENT session was authenticated under at the time the link was
+   *  created. Informational; the load-bearing security check is the
+   *  signature verification on the link/verify call. */
+  linkedFromRole?: OnChainRole;
+  [key: string]: unknown;
 }
 
 export interface AuthToken {

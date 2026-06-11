@@ -24,6 +24,9 @@ export class DatabaseStack extends cdk.Stack {
   public readonly authNoncesTable: dynamodb.Table;
   // ---- Decision #1 (2026-06-10): dedicated per-session revocation store ----
   public readonly identitySessionsTable: dynamodb.Table;
+  // ---- Decision #3 (2026-06-10): canonical person + identity-link model ----
+  public readonly onchainUsersTable: dynamodb.Table;
+  public readonly identityLinksTable: dynamodb.Table;
   // ---- Phase 2: committee voting ----
   public readonly committeeVotesTable: dynamodb.Table;
   public readonly committeeMembershipTable: dynamodb.Table;
@@ -663,6 +666,137 @@ export class DatabaseStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
+    // ---- onchain_users (Decision #3, 2026-06-10) ----
+    //
+    // The canonical "person" table for the on-chain identity subsystem.
+    // One row per recognised individual, keyed by an opaque `personId`
+    // (ULID). Holds the editable profile (displayName, bio, links) plus
+    // bookkeeping (createdAt / updatedAt). The on-chain credentials
+    // (drep:<drepId>, pool:<poolId>, cc:<ccCred>, stake:<stakeAddr>)
+    // that map to this person live in the sibling `identity_links`
+    // table — Decision #3's "one individual is recognised whether they
+    // log in via wallet (stake) or raw-key (SPO/CC) on-chain."
+    //
+    // **Why a separate table from the legacy `users` table:**
+    //   - The legacy `users` table is keyed by `walletAddress` (stake
+    //     address). On-chain-only identities (e.g. an SPO that signs
+    //     with a raw Calidus key and has never connected a CIP-30
+    //     wallet) have NO row there. The on-chain login flow today
+    //     identifies a caller by the credential (drepId / poolId /
+    //     ccCred / stake) without touching `users` at all — see the
+    //     onchainVerify handler docblock and `lib/auth.ts`. To recognise
+    //     "this is the same person across multiple on-chain credentials"
+    //     we need a separate canonical-person layer.
+    //   - The legacy `users` row carries platform-role bookkeeping
+    //     (`tokenVersion`, legacy `roles[]`) that's bound to the CIP-30
+    //     wallet session. Folding the on-chain person there would
+    //     collide on the PK (stake address) for the wallet-stake case
+    //     and break every existing read site. Decision #3 explicitly
+    //     scopes the new model to a NEW table so the legacy CIP-30
+    //     surface is unchanged.
+    //
+    // **Shape:**
+    //   PK = `personId` (STRING) — ULID, opaque, never reused.
+    //   Attributes:
+    //     `displayName?`  — short string, optional.
+    //     `bio?`          — longer string, optional.
+    //     `socialLinks?`  — embedded {twitter?, github?, website?, discord?}.
+    //     `createdAt`     — ISO-8601.
+    //     `updatedAt`     — ISO-8601.
+    //   No SK, no GSIs — every access pattern is `GetItem(personId)` or
+    //   `PutItem(personId)`. Listing every recognised person would be a
+    //   future Scan but isn't called for by Decision #3.
+    //
+    // **Capacity:** modest. One row per recognised individual; on-chain
+    // login flow auto-provisions on first login for an unmapped
+    // credential. Mainnet today: a few hundred to low-thousands of
+    // unique on-chain identities.
+    //
+    // PITR ON + RETAIN on persistent stages — these rows are user-
+    // editable profile content; an accidental table truncation should
+    // be recoverable.
+    //
+    // **Deploy order:** create the table FIRST (CDK DatabaseStack
+    // deploy), THEN ship the backend code that reads from it. The new
+    // login reconciliation code in onchainVerify will not be deployed
+    // until the API stack rolls — the same brief window as the
+    // identity_sessions table.
+    this.onchainUsersTable = new dynamodb.Table(this, 'OnchainUsersTable', {
+      tableName: `${this.tablePrefix}onchain_users`,
+      partitionKey: { name: 'personId', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: isPersistent(props.stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
+    // ---- identity_links (Decision #3, 2026-06-10) ----
+    //
+    // Maps each on-chain credential to a canonical `personId` in the
+    // sibling `onchain_users` table. This is the "one person, many
+    // credentials" join — the reconciliation layer Decision #3 exists
+    // to build.
+    //
+    // **Shape:**
+    //   PK = `identityKey` (STRING) — namespaced credential string:
+    //     `drep:<drepId>` | `pool:<poolId>` | `cc:<ccCred>` |
+    //     `stake:<stakeAddr>`. The namespace prefix is load-bearing —
+    //     it prevents collision between a DRep id and a CC cold id that
+    //     happen to share a bech32 prefix style, and makes the credential
+    //     type self-describing on read.
+    //   Attributes:
+    //     `personId`         — ULID FK into `onchain_users`.
+    //     `credentialType`   — 'drep' | 'pool' | 'cc' | 'stake'.
+    //                          Denormalised from the PK prefix for cheap
+    //                          read-side filtering.
+    //     `verifiedAt`       — ISO-8601 timestamp the link was minted.
+    //                          On a fresh login that auto-provisioned a
+    //                          new person + link this is the login time;
+    //                          on an explicit `link/verify` call it's
+    //                          the moment the new credential signed the
+    //                          stage-bound nonce.
+    //     `verifiedVia`      — 'login' | 'link'. Audit breadcrumb: did
+    //                          this link come from the login auto-
+    //                          provision path, or from an explicit
+    //                          `/auth/onchain/link/verify` call?
+    //
+    // **GSI `personId-verifiedAt-index`:**
+    //   PK = `personId`, SK = `verifiedAt` (STRING — ISO-8601 sorts
+    //   lexicographically as chronological). Projection ALL so the
+    //   `/auth/onchain/me` aggregation handler can resolve the full
+    //   credential set for a person in one Query without a follow-up
+    //   batchGet. Sortable by `verifiedAt` so a UI can show "this
+    //   credential was added on …".
+    //
+    // **Capacity:** ~1-5 credentials per person typical. Mainnet today
+    // sits in the low-thousands of links total even with full adoption.
+    // PAY_PER_REQUEST handles the burst on a busy login hour comfortably;
+    // the GSI is single-personId-partition so PPR's adaptive-capacity
+    // behaviour is well-suited.
+    //
+    // **Safety contract (critical, Decision #3):** the link/verify flow
+    // does NOT silently merge two persons. If a credential is presented
+    // for linking but is already mapped to a DIFFERENT personId than
+    // the caller's session person, the link is REJECTED with a clear
+    // "credential already linked to another account" error. Account-
+    // merge is a future product decision; do not infer it from a
+    // signature. See `handlers/auth/linkVerify.ts` for the gate.
+    //
+    // PITR ON + RETAIN on persistent stages — links are evidence of
+    // verified cryptographic proofs and would be expensive to rebuild.
+    this.identityLinksTable = new dynamodb.Table(this, 'IdentityLinksTable', {
+      tableName: `${this.tablePrefix}identity_links`,
+      partitionKey: { name: 'identityKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: isPersistent(props.stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+    this.identityLinksTable.addGlobalSecondaryIndex({
+      indexName: 'personId-verifiedAt-index',
+      partitionKey: { name: 'personId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'verifiedAt', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
     // ---- committee_votes (Phase 2) ----
     // One partition per (committee, governance action): PK=`${drepId}#${actionId}`.
     // Co-locates the single proposal, every member's latest cast, the rationale
@@ -868,6 +1002,8 @@ export class DatabaseStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'AuditLogTableName', { value: this.auditLogTable.tableName, exportName: `${props.stage}-AuditLogTableName` });
     new cdk.CfnOutput(this, 'AuthNoncesTableName', { value: this.authNoncesTable.tableName, exportName: `${props.stage}-AuthNoncesTableName` });
     new cdk.CfnOutput(this, 'IdentitySessionsTableName', { value: this.identitySessionsTable.tableName, exportName: `${props.stage}-IdentitySessionsTableName` });
+    new cdk.CfnOutput(this, 'OnchainUsersTableName', { value: this.onchainUsersTable.tableName, exportName: `${props.stage}-OnchainUsersTableName` });
+    new cdk.CfnOutput(this, 'IdentityLinksTableName', { value: this.identityLinksTable.tableName, exportName: `${props.stage}-IdentityLinksTableName` });
     new cdk.CfnOutput(this, 'CommitteeVotesTableName', { value: this.committeeVotesTable.tableName, exportName: `${props.stage}-CommitteeVotesTableName` });
     new cdk.CfnOutput(this, 'CommitteeMembershipTableName', { value: this.committeeMembershipTable.tableName, exportName: `${props.stage}-CommitteeMembershipTableName` });
     new cdk.CfnOutput(this, 'PlatformStateTableName', { value: this.platformStateTable.tableName, exportName: `${props.stage}-PlatformStateTableName` });

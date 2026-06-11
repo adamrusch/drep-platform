@@ -164,6 +164,12 @@ function buildAuthorizedResponse(
       // strings — API Gateway v2 only carries string context values.
       onChainRoles: JSON.stringify(payload.onChainRoles ?? []),
       ...(payload.jti ? { jti: payload.jti } : {}),
+      // Decision #3 — surface `personId` to downstream handlers when
+      // the token carries it. Absence is fine — the on-chain `me` and
+      // link handlers fall back to a credential→person re-resolve via
+      // `identity_links` so a pre-Decision-3 on-chain token keeps
+      // working through a rolling upgrade.
+      ...(payload.personId ? { personId: payload.personId } : {}),
     },
   };
 }

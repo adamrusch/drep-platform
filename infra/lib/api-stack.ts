@@ -147,6 +147,18 @@ export class ApiStack extends cdk.Stack {
       // path (one GetItem per request), the verify/logout handlers
       // own the writes.
       databaseStack.identitySessionsTable,
+      // Decision #3 (2026-06-10) — canonical person + identity-link
+      // model. `onchain_users` is the editable profile (person row);
+      // `identity_links` maps each on-chain credential
+      // (`drep:<drepId>` / `pool:<poolId>` / `cc:<ccCred>` /
+      // `stake:<stakeAddr>`) to a `personId`. Read by `onchainVerify`
+      // (login reconciliation), the `/auth/onchain/link/*` flow
+      // (explicit credential link with cryptographic proof), the
+      // `/auth/onchain/me` aggregation handler, and the on-chain
+      // profile get/update handlers. RW across the shared role so
+      // login + link + profile writes all go through one IAM grant.
+      databaseStack.onchainUsersTable,
+      databaseStack.identityLinksTable,
       // Phase 2 committee voting.
       databaseStack.committeeVotesTable,
       databaseStack.committeeMembershipTable,
@@ -269,6 +281,24 @@ export class ApiStack extends cdk.Stack {
     // may hold both cookies simultaneously.
     const onchainChallengeFn = fn('AuthOnchainChallengeFn', 'handlers/auth/onchainChallenge.ts');
     const onchainVerifyFn = fn('AuthOnchainVerifyFn', 'handlers/auth/onchainVerify.ts');
+    // Decision #3 (2026-06-10) — explicit credential-linking flow.
+    // `linkChallenge` mints a stage-bound nonce; `linkVerify` consumes
+    // it AFTER verifying the new credential's signature with the SAME
+    // verifier the login path uses (CIP-8 for drep/proposer/stake, raw
+    // Ed25519 for spo/cc). On success the new credential is mapped to
+    // the caller's existing `personId`. Safety: if the credential is
+    // already mapped to a different person the link is REJECTED, never
+    // silently merged. The `/auth/onchain/me` handler aggregates the
+    // person + every linked credential + their union of on-chain roles.
+    const onchainLinkChallengeFn = fn('AuthOnchainLinkChallengeFn', 'handlers/auth/linkChallenge.ts');
+    const onchainLinkVerifyFn = fn('AuthOnchainLinkVerifyFn', 'handlers/auth/linkVerify.ts');
+    const onchainMeFn = fn('AuthOnchainMeFn', 'handlers/auth/onchainMe.ts');
+    // On-chain profile (person row) get + update. Minimal — these
+    // mirror the legacy `profile/*` conventions but key off the
+    // session's `personId` instead of the wallet address. The full
+    // profile UI is out of scope.
+    const onchainProfileGetFn = fn('AuthOnchainProfileGetFn', 'handlers/auth/onchainProfileGet.ts');
+    const onchainProfileUpdateFn = fn('AuthOnchainProfileUpdateFn', 'handlers/auth/onchainProfileUpdate.ts');
 
     // ---- Governance handlers ----
     const govListFn = fn('GovListFn', 'handlers/governance/list.ts');
@@ -535,6 +565,55 @@ export class ApiStack extends cdk.Stack {
       '/auth/onchain/verify',
       onchainVerifyFn,
       'AuthOnchainVerify',
+    );
+    // Decision #3 — credential-linking flow (authenticated). The
+    // caller MUST be signed in via on-chain login (carries a
+    // `personId` claim). The challenge issues a stage-bound nonce; the
+    // verify call accepts the new credential's signature, verifies
+    // with the SAME rigor as the login path, and maps the new
+    // credential to the caller's existing `personId`. Safety: a
+    // credential already mapped to a DIFFERENT personId is rejected
+    // (no silent merge). See `handlers/auth/linkVerify.ts`.
+    addRoute(
+      apigwv2.HttpMethod.POST,
+      '/auth/onchain/link/challenge',
+      onchainLinkChallengeFn,
+      'AuthOnchainLinkChallenge',
+      true,
+    );
+    addRoute(
+      apigwv2.HttpMethod.POST,
+      '/auth/onchain/link/verify',
+      onchainLinkVerifyFn,
+      'AuthOnchainLinkVerify',
+      true,
+    );
+    // Decision #3 — `/auth/onchain/me` aggregation. Returns the
+    // person's profile + every linked credential + the union of their
+    // on-chain roles. Distinct from the legacy `/auth/me` (which is
+    // wallet-keyed and UNTOUCHED by Decision #3).
+    addRoute(
+      apigwv2.HttpMethod.GET,
+      '/auth/onchain/me',
+      onchainMeFn,
+      'AuthOnchainMe',
+      true,
+    );
+    // Decision #3 — on-chain profile (person row) get + update.
+    // Minimal surface; the full profile UI is out of scope.
+    addRoute(
+      apigwv2.HttpMethod.GET,
+      '/auth/onchain/profile',
+      onchainProfileGetFn,
+      'AuthOnchainProfileGet',
+      true,
+    );
+    addRoute(
+      apigwv2.HttpMethod.PUT,
+      '/auth/onchain/profile',
+      onchainProfileUpdateFn,
+      'AuthOnchainProfileUpdate',
+      true,
     );
 
     // ---- Governance routes ----

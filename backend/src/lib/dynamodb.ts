@@ -162,6 +162,42 @@ export const tableNames = {
    *  for the full design + the public surface every caller (authorizer,
    *  logout, on-chain verify, cron) reads. */
   identitySessions: `${TABLE_PREFIX}identity_sessions`,
+  /** Decision #3 (2026-06-10) — canonical "person" table for the
+   *  on-chain identity subsystem.
+   *
+   *  PK = `personId` (ULID). One row per recognised individual; holds
+   *  the editable profile (`displayName`, `bio`, `socialLinks`) +
+   *  bookkeeping (`createdAt`, `updatedAt`). The on-chain credentials
+   *  that map to this person (drep / pool / cc / stake) live in
+   *  `identity_links` — read the two together via the
+   *  `personId-verifiedAt-index` GSI on `identity_links` to enumerate
+   *  every credential one person controls.
+   *
+   *  Distinct from the legacy `users` table — that's keyed by stake
+   *  address and bound to the CIP-30 wallet session. Decision #3
+   *  scopes the new model to this dedicated table so the legacy
+   *  surface (auth.ts, /auth/verify, /auth/me) is untouched.
+   *
+   *  See `lib/identityPerson.ts` for the helpers every caller uses. */
+  onchainUsers: `${TABLE_PREFIX}onchain_users`,
+  /** Decision #3 (2026-06-10) — maps each on-chain credential to a
+   *  canonical `personId`.
+   *
+   *  PK = `identityKey` — namespaced credential string:
+   *    `drep:<drepId>` | `pool:<poolId>` | `cc:<ccCred>` |
+   *    `stake:<stakeAddr>`. The namespace prefix is load-bearing — it
+   *    prevents collision between different credential types that
+   *    happen to share a bech32 prefix and makes the credential type
+   *    self-describing on read.
+   *
+   *  Attributes: `personId` (FK), `credentialType`, `verifiedAt`,
+   *    `verifiedVia` (`'login' | 'link'`).
+   *
+   *  GSI `personId-verifiedAt-index` — PK=`personId`, SK=`verifiedAt`
+   *  (ISO-8601 sorts chronologically); projection ALL so the
+   *  `/auth/onchain/me` aggregation handler can resolve the full
+   *  credential set for a person in one single-partition Query. */
+  identityLinks: `${TABLE_PREFIX}identity_links`,
   /** Phase 2 committee voting. PK=`voteScope` (`${drepId}#${actionId}`),
    *  SK=`itemKey` ('PROPOSAL' | 'CAST#<wallet>' | 'RATIONALE#DRAFT|LOCK|FINAL'
    *  | 'SUBMISSION' | 'COSIGN#<wallet>'). Sparse GSI `open-epochDeadline-index`

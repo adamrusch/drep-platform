@@ -579,7 +579,7 @@ export async function issueJWT(
   sessionType: SessionType,
   registeredDrepId?: string,
   tokenVersion = 0,
-  extra?: { onChainRoles?: OnChainRole[]; jti?: string },
+  extra?: { onChainRoles?: OnChainRole[]; jti?: string; personId?: string },
 ): Promise<{ token: string; expiresAt: string }> {
   const secret = await getJwtSecret();
   const durationSecs = SESSION_DURATIONS[sessionType];
@@ -591,12 +591,20 @@ export async function issueJWT(
   const onChainRoles = extra?.onChainRoles;
   const hasOnChainRoles = Array.isArray(onChainRoles) && onChainRoles.length > 0;
 
+  // Decision #3 — `personId` is a parallel claim like `onChainRoles`. Omit
+  // when absent so legacy + pre-Decision-3 tokens stay byte-identical.
+  const personId =
+    typeof extra?.personId === 'string' && extra.personId.length > 0
+      ? extra.personId
+      : undefined;
+
   const payload: Record<string, unknown> = {
     roles,
     sessionType,
     tokenVersion,
     ...(registeredDrepId ? { registeredDrepId } : {}),
     ...(hasOnChainRoles ? { onChainRoles } : {}),
+    ...(personId ? { personId } : {}),
   };
 
   let builder = new SignJWT(payload)
@@ -635,6 +643,7 @@ export async function verifyJWT(token: string): Promise<JWTPayload> {
     tokenVersion?: number;
     drepId?: string; // legacy — remove after 2026-06-03
     onChainRoles?: OnChainRole[];
+    personId?: string;
   };
 
   if (!josePayload.sub) {
@@ -669,6 +678,12 @@ export async function verifyJWT(token: string): Promise<JWTPayload> {
     onChainRoles,
     ...(typeof josePayload.jti === 'string' && josePayload.jti.length > 0
       ? { jti: josePayload.jti }
+      : {}),
+    // Decision #3 — `personId` is optional on read. Pre-Decision-3
+    // tokens omit it; downstream handlers fall back to resolving via
+    // the on-chain credential (`identityKey` → `identity_links`).
+    ...(typeof josePayload.personId === 'string' && josePayload.personId.length > 0
+      ? { personId: josePayload.personId }
       : {}),
     iat: josePayload.iat ?? 0,
     exp: josePayload.exp ?? 0,
