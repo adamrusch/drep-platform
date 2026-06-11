@@ -348,6 +348,25 @@ export class ApiStack extends cdk.Stack {
     const adminClearSafetyModeFn = fn('AdminClearSafetyModeFn', 'handlers/admin/clearSafetyMode.ts');
     const adminSetRoleFn = fn('AdminSetRoleFn', 'handlers/admin/setRole.ts');
 
+    // ---- Moderation handlers (feat/moderation-panel) ----
+    // platform_admin-gated read + override of the three flag surfaces
+    // (`comments`, `clubhouse_posts`, `clubhouse_comments`). DDB grants
+    // for these Lambdas are inherited from the shared `lambdaRole` —
+    // every parent + flag table is already in the RW loop above. The
+    // handlers audit-log every mutation via `lib/audit.ts`.
+    const moderationListFlaggedFn = fn(
+      'ModerationListFlaggedFn',
+      'handlers/moderation/listFlagged.ts',
+    );
+    const moderationGetFlaggersFn = fn(
+      'ModerationGetFlaggersFn',
+      'handlers/moderation/getFlaggers.ts',
+    );
+    const moderationSetHiddenFn = fn(
+      'ModerationSetHiddenFn',
+      'handlers/moderation/setHidden.ts',
+    );
+
     // ---- DRep directory handlers (chain-state read; /dreps routes) ----
     // The directory is the global registry of mainnet DReps with their
     // CIP-119 anchor metadata. It's separate from /drep (committees) on
@@ -669,6 +688,32 @@ export class ApiStack extends cdk.Stack {
     addRoute(apigwv2.HttpMethod.POST, '/admin/safety-mode/clear', adminClearSafetyModeFn, 'AdminClearSafetyMode', true);
     addRoute(apigwv2.HttpMethod.POST, '/admin/roles/{walletAddress}', adminSetRoleFn, 'AdminGrantRole', true);
     addRoute(apigwv2.HttpMethod.DELETE, '/admin/roles/{walletAddress}', adminSetRoleFn, 'AdminRevokeRole', true);
+
+    // ---- Moderation routes (feat/moderation-panel) ----
+    // All gated to platform_admin in the handler (not by route), so the
+    // standard authenticated authorizer is sufficient. The handlers
+    // re-check the role and audit every mutation.
+    addRoute(
+      apigwv2.HttpMethod.GET,
+      '/admin/moderation/flagged',
+      moderationListFlaggedFn,
+      'AdminModerationListFlagged',
+      true,
+    );
+    addRoute(
+      apigwv2.HttpMethod.GET,
+      '/admin/moderation/flaggers',
+      moderationGetFlaggersFn,
+      'AdminModerationGetFlaggers',
+      true,
+    );
+    addRoute(
+      apigwv2.HttpMethod.PUT,
+      '/admin/moderation/hidden',
+      moderationSetHiddenFn,
+      'AdminModerationSetHidden',
+      true,
+    );
 
     // ---- DRep directory routes (chain-state) ----
     addRoute(apigwv2.HttpMethod.GET, '/dreps', drepDirectoryListFn, 'DRepDirectoryList');
