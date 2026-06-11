@@ -97,11 +97,11 @@ export const DREP_DVT_THRESHOLDS_STATE_KEY = 'DREP_DVT_THRESHOLDS' as const;
 // Sprint 5 — avatar pipeline. The store pass walks at most this many
 // rows per cycle; the rest land on the next 30-min sync cycle. The cap
 // keeps the directory-sync wall-clock predictable: each row is one
-// validated download + one S3 upload (~1-2s in the warm path), so 25
-// rows = ~30-50s worst case. Combined with the existing directory-sync
+// validated download + one S3 upload (~1-2s in the warm path), so 50
+// rows = ~60-100s worst case. Combined with the existing directory-sync
 // steps, that fits inside the 5-minute Lambda budget the scheduler
 // gives this function.
-const AVATAR_RUN_LIMIT = 25;
+const AVATAR_RUN_LIMIT = 50;
 
 export interface DirectorySyncResult {
   total: number;
