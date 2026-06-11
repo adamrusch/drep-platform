@@ -26,15 +26,36 @@ import { ClubhouseCommentRow } from './DelegatorClubhouse';
 import type { ClubhouseComment } from '@/types';
 
 vi.mock('@/hooks/useClubhouse', () => ({
-  // The component only USES this hook to handle submission; the actual
-  // mutation surface isn't exercised by depth-rendering tests. Returning
-  // a minimal shape keeps the depth checks isolated.
+  // The component only USES these hooks to handle submission; the
+  // actual mutation surfaces aren't exercised by depth-rendering tests.
+  // Returning minimal shapes keeps the depth checks isolated.
   useCreateClubhouseComment: (): {
     mutateAsync: ReturnType<typeof vi.fn>;
     isPending: boolean;
   } => ({
     mutateAsync: vi.fn().mockResolvedValue(undefined),
     isPending: false,
+  }),
+  useFlagClubhouseComment: (): {
+    mutateAsync: ReturnType<typeof vi.fn>;
+    isPending: boolean;
+  } => ({
+    mutateAsync: vi.fn().mockResolvedValue(undefined),
+    isPending: false,
+  }),
+}));
+
+// `useOnChainRoles` lives on the auth store; `useUiStore.addToast` is
+// only used in the flag-error path. Stub both so the depth-rendering
+// tests don't have to spin up real stores. Tests that exercise the
+// flag affordance below override `useOnChainRoles` per-test.
+const authStubState: { onChainRoles: string[] } = { onChainRoles: [] };
+vi.mock('@/stores/authStore', () => ({
+  useOnChainRoles: (): string[] => authStubState.onChainRoles,
+}));
+vi.mock('@/stores/uiStore', () => ({
+  useUiStore: (): { addToast: ReturnType<typeof vi.fn> } => ({
+    addToast: vi.fn(),
   }),
 }));
 
@@ -192,5 +213,137 @@ describe('ClubhouseCommentRow — delegation-active badge', () => {
       </MemoryRouter>,
     );
     expect(queryByTestId('clubhouse-comment-undelegated-badge')).toBeNull();
+  });
+});
+
+/**
+ * Sprint 4 follow-up — clubhouse comment community flagging.
+ *
+ * Closes the last leg of the Sprint 4 flagging trio (the
+ * governance-action comment + clubhouse-post flag affordances already
+ * exist). The contract on the FE matches both siblings:
+ *
+ *   - Flag button visible ONLY when the caller is on-chain-verified
+ *     AND NOT the comment author. The backend enforces both gates
+ *     independently — this is a usability gate to avoid surfacing a
+ *     button that would always 403/400.
+ *   - `hidden === true` rows render the moderation banner BEFORE the
+ *     body (and the body stays visible — admins decide whether to
+ *     reverse the community decision).
+ */
+describe('ClubhouseCommentRow — Sprint 4 follow-up flag affordance', () => {
+  const repliesByParent = new Map<string, ClubhouseComment[]>();
+  const currentWallet = 'addr1q9flaggerwallet';
+  const drepId = 'drep1ygqgayvx8yzsaj9hprja3l6jy3v4px9z3u8uvecuvm3f92ce7mckx';
+  const postId = 'auto-ga#abc123';
+
+  it('renders the flag button when the caller is on-chain-verified and not the author', () => {
+    authStubState.onChainRoles = ['drep'];
+    try {
+      const { queryByTestId } = render(
+        <MemoryRouter>
+          <ClubhouseCommentRow
+            comment={makeComment({
+              commentId: 'cmt-target',
+              authorWallet: 'addr1q9someoneelse',
+            })}
+            depth={0}
+            drepId={drepId}
+            postId={postId}
+            currentWallet={currentWallet}
+            repliesByParent={repliesByParent}
+          />
+        </MemoryRouter>,
+      );
+      expect(queryByTestId('clubhouse-comment-flag-button')).toBeInTheDocument();
+    } finally {
+      authStubState.onChainRoles = [];
+    }
+  });
+
+  it('does NOT render the flag button when the caller has no on-chain role', () => {
+    authStubState.onChainRoles = [];
+    const { queryByTestId } = render(
+      <MemoryRouter>
+        <ClubhouseCommentRow
+          comment={makeComment({
+            commentId: 'cmt-target',
+            authorWallet: 'addr1q9someoneelse',
+          })}
+          depth={0}
+          drepId={drepId}
+          postId={postId}
+          currentWallet={currentWallet}
+          repliesByParent={repliesByParent}
+        />
+      </MemoryRouter>,
+    );
+    expect(queryByTestId('clubhouse-comment-flag-button')).toBeNull();
+  });
+
+  it('does NOT render the flag button on the caller\'s own comment (self-flag gate)', () => {
+    authStubState.onChainRoles = ['drep'];
+    try {
+      const { queryByTestId } = render(
+        <MemoryRouter>
+          <ClubhouseCommentRow
+            comment={makeComment({
+              commentId: 'cmt-self',
+              authorWallet: currentWallet,
+            })}
+            depth={0}
+            drepId={drepId}
+            postId={postId}
+            currentWallet={currentWallet}
+            repliesByParent={repliesByParent}
+          />
+        </MemoryRouter>,
+      );
+      expect(queryByTestId('clubhouse-comment-flag-button')).toBeNull();
+    } finally {
+      authStubState.onChainRoles = [];
+    }
+  });
+
+  it('renders the hidden-by-community banner for rows the backend marks hidden', () => {
+    // `platform_admin`s receive `hidden: true` rows on the wire; the
+    // FE renders a moderation banner BEFORE the body and keeps the
+    // body visible so the moderator can reverse the decision.
+    const { queryByTestId, queryByText } = render(
+      <MemoryRouter>
+        <ClubhouseCommentRow
+          comment={makeComment({
+            commentId: 'cmt-hidden',
+            authorWallet: 'addr1q9someoneelse',
+            hidden: true,
+            flagCount: 3,
+          })}
+          depth={0}
+          drepId={drepId}
+          postId={postId}
+          currentWallet={currentWallet}
+          repliesByParent={repliesByParent}
+        />
+      </MemoryRouter>,
+    );
+    expect(queryByTestId('clubhouse-comment-hidden-banner')).toBeInTheDocument();
+    // Body still rendered — flag, not hide.
+    expect(queryByText('Hello clubhouse.')).toBeInTheDocument();
+  });
+
+  it('does NOT render the hidden banner on non-hidden rows', () => {
+    const { queryByTestId } = render(
+      <MemoryRouter>
+        <ClubhouseCommentRow
+          comment={makeComment({ commentId: 'cmt-visible' })}
+          depth={0}
+          drepId={drepId}
+          postId={postId}
+          currentWallet={currentWallet}
+          repliesByParent={repliesByParent}
+        />
+      </MemoryRouter>,
+    );
+    expect(queryByTestId('clubhouse-comment-hidden-banner')).toBeNull();
   });
 });

@@ -168,6 +168,52 @@ export function useFlagClubhousePost() {
   });
 }
 
+interface FlagClubhouseCommentParams {
+  drepId: string;
+  postId: string;
+  commentId: string;
+}
+
+/** Backend response from
+ *  `POST /clubhouse/{drepId}/post/{postId}/comment/{commentId}/flag`. */
+export interface FlagClubhouseCommentResponse {
+  outcome: 'flagged' | 'already_flagged';
+  commentId: string;
+  flagCount?: number;
+  hidden?: boolean;
+}
+
+/**
+ * Sprint 4 follow-up — community flag a clubhouse COMMENT.
+ *
+ * Closes the last leg of the Sprint 4 flagging trio (governance-action
+ * comments + clubhouse posts already had affordances; clubhouse
+ * comments were the missing one). Same identity contract as the two
+ * sibling hooks — auth + on-chain role required, the FE gates the
+ * affordance on `onChainRoles.length > 0`. On success we invalidate
+ * BOTH the per-post comments cache (so the row's `flagCount` /
+ * `hidden` re-render in place) AND the post list (so the
+ * `commentCount` and any future derived badges stay consistent).
+ */
+export function useFlagClubhouseComment() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ drepId, postId, commentId }: FlagClubhouseCommentParams) =>
+      post<FlagClubhouseCommentResponse>(
+        `/clubhouse/${encodeURIComponent(drepId)}/post/${encodeURIComponent(postId)}/comment/${encodeURIComponent(commentId)}/flag`,
+        {},
+      ),
+    onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({
+        queryKey: QUERY_KEYS.comments(variables.drepId, variables.postId),
+      });
+      void queryClient.invalidateQueries({
+        queryKey: QUERY_KEYS.posts(variables.drepId),
+      });
+    },
+  });
+}
+
 interface VotePollParams {
   drepId: string;
   postId: string;

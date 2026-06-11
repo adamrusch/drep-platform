@@ -1505,6 +1505,58 @@ export interface ClubhousePostFlagItem {
   [key: string]: unknown;
 }
 
+/**
+ * One row of `clubhouse_comment_flags` (Sprint 4 follow-up) —
+ * PK=`postKey`, SK=`commentFlagKey`.
+ *
+ * Closes the previously-missing leg of the Sprint 4 flagging trio
+ * (`comment_flags` + `clubhouse_post_flags` already exist; this is the
+ * clubhouse-comments primitive).
+ *
+ * `postKey` shares the partition shape with `clubhouse_comments` +
+ * `clubhouse_post_flags` — `${drepId}#${postId}`. The SK composes the
+ * comment id with the flagger id so a single partition `Query` returns
+ * every flag for every comment under one post in one round-trip; that's
+ * useful for a future moderation surface that wants to enumerate the
+ * flagged comments for a post without an extra cross-table walk. The
+ * per-(comment, flagger) tuple is the uniqueness constraint that
+ * `putItemIfAbsent` exploits to make duplicate flags idempotent.
+ */
+export interface ClubhouseCommentFlagItem {
+  /** PK — `${drepId}#${postId}`, composed via
+   *  `clubhouseCommentPostKey(drepId, postId)`. */
+  postKey: string;
+  /** SK — `${commentId}#${flaggerId}`, composed via
+   *  `clubhouseCommentFlagKey(commentId, flaggerId)`. The tuple keeps
+   *  one row per (comment, flagger) even across a `Query(postKey)`
+   *  that returns every flag on every comment under the post. */
+  commentFlagKey: string;
+  /** Denormalised — the comment id this flag targets. Same value
+   *  embedded in `commentFlagKey`; carried as a top-level field for
+   *  trivial server-side filtering after a partition Query. */
+  commentId: string;
+  /** Denormalised — the drep id (the post's owning clubhouse). */
+  drepId: string;
+  /** Denormalised — the post id. */
+  postId: string;
+  /** The flagger's bech32 stake address. */
+  flaggerId: string;
+  /** The on-chain role the flagger had proved at the time of the flag. */
+  role: OnChainRole;
+  /** ISO-8601 timestamp the flag was raised. */
+  createdAt: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Compose the SK used by the `clubhouse_comment_flags` table.
+ * `${commentId}#${flaggerId}` — keeps one row per (comment, flagger)
+ * even when several different commenters share a `postKey` partition.
+ */
+export function clubhouseCommentFlagKey(commentId: string, flaggerId: string): string {
+  return `${commentId}#${flaggerId}`;
+}
+
 /** A clubhouse comment can be top-level OR a reply to a top-level
  *  comment OR a reply to a reply (Clubhouse rules: 2 levels deep — one
  *  deeper than the Public Comments surface, which is 1-level). The
@@ -1586,6 +1638,18 @@ export interface ClubhouseCommentRowItem {
    *  on first-write avoids a migration; the sweep populates the
    *  attribute only when it flips. */
   authorDelegationActive?: boolean;
+  /** Sprint 4 follow-up — community-flagging counter for clubhouse
+   *  comments. Atomically `ADD`ed when a fresh per-flagger row is
+   *  inserted in `clubhouse_comment_flags`. Optional for backwards
+   *  compat with rows written before this field landed — treat absence
+   *  as zero. */
+  flagCount?: number;
+  /** Sprint 4 follow-up — true when `flagCount` reached the hide
+   *  threshold. Set via a conditional `SET hidden = :true` after the
+   *  atomic ADD; hidden comments are excluded from list responses for
+   *  normal users while `platform_admin`s see them with a `hidden:
+   *  true` marker so they can moderate. */
+  hidden?: boolean;
   [key: string]: unknown;
 }
 

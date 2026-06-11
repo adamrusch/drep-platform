@@ -17,6 +17,7 @@ function makeKoios(overrides: Partial<FakeKoios> = {}): FakeKoios {
     proposalsByReturnAddress: () => Promise.resolve([]),
     poolCalidusKey: () => Promise.resolve(null),
     committeeInfo: () => Promise.resolve([]),
+    poolStatus: () => Promise.resolve(null),
     ...overrides,
   };
 }

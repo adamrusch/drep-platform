@@ -53,7 +53,7 @@ describe('HelpDataFreshness', () => {
     }
   });
 
-  it('renders all 9 schedule rows (sanity)', () => {
+  it('renders all 10 schedule rows (sanity)', () => {
     const { container } = render(
       <MemoryRouter>
         <HelpDataFreshness />
@@ -61,9 +61,10 @@ describe('HelpDataFreshness', () => {
     );
     const rows = container.querySelectorAll('tbody tr');
     expect(rows.length).toBe(FRESHNESS.length);
-    // FRESHNESS.length is asserted equal to 9 explicitly so a regression
+    // FRESHNESS.length is asserted equal to 10 explicitly so a regression
     // that drops or duplicates a row is caught here even if the source
-    // table is also wrong in the same direction.
-    expect(FRESHNESS.length).toBe(9);
+    // table is also wrong in the same direction. (Was 9 prior to Sprint 5
+    // follow-up which added the daily `gc-avatars` sweep.)
+    expect(FRESHNESS.length).toBe(10);
   });
 });

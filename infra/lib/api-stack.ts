@@ -148,6 +148,11 @@ export class ApiStack extends cdk.Stack {
       // this loop — read paths today are scoped by handler.
       databaseStack.commentFlagsTable,
       databaseStack.clubhousePostFlagsTable,
+      // Sprint 4 follow-up — clubhouse-comment flagging primitive.
+      // Same broad RW pattern as the sibling flag tables; the read
+      // path is the comment list handler (filters hidden for normal
+      // users, surfaces for `platform_admin`).
+      databaseStack.clubhouseCommentFlagsTable,
     ]) {
       table.grantReadWriteData(lambdaRole);
     }
@@ -347,6 +352,13 @@ export class ApiStack extends cdk.Stack {
     const clubhouseVotePollFn = fn('ClubhouseVotePollFn', 'handlers/clubhouse/votePoll.ts');
     // Sprint 4 — community flagging for clubhouse posts.
     const clubhouseFlagPostFn = fn('ClubhouseFlagPostFn', 'handlers/clubhouse/flagPost.ts');
+    // Sprint 4 follow-up — community flagging for clubhouse comments.
+    // Closes the missing leg of the Sprint 4 trio (comment / post /
+    // clubhouse-comment). Same threshold + atomic-counter semantics.
+    const clubhouseFlagCommentFn = fn(
+      'ClubhouseFlagCommentFn',
+      'handlers/clubhouse/flagComment.ts',
+    );
     // Right-rail data — public reads, separate Lambdas so their in-memory
     // caches don't fight for warm-container space with the write path.
     // See backend/src/handlers/clubhouse/_rail.ts for the cache + ranking
@@ -696,6 +708,17 @@ export class ApiStack extends cdk.Stack {
       '/clubhouse/{drepId}/post/{postId}/flag',
       clubhouseFlagPostFn,
       'ClubhouseFlagPost',
+      true,
+    );
+    // Sprint 4 follow-up — community flag a clubhouse COMMENT. Same
+    // auth contract (on-chain role required), same hide threshold (3
+    // distinct flaggers), same atomic counter-then-hide semantics as
+    // the post flag. See `handlers/clubhouse/flagComment.ts`.
+    addRoute(
+      apigwv2.HttpMethod.POST,
+      '/clubhouse/{drepId}/post/{postId}/comment/{commentId}/flag',
+      clubhouseFlagCommentFn,
+      'ClubhouseFlagComment',
       true,
     );
     // Right-rail data — public reads, no auth gate. These power the

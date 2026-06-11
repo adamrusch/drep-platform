@@ -692,6 +692,17 @@ export interface ClubhouseComment {
    *  author who re-delegates to this DRep has the flag cleared back
    *  to `true` on the next pass. */
   authorDelegationActive?: boolean;
+  /** Sprint 4 follow-up — community-flagging counter for clubhouse
+   *  comments. Materialised on the comment row by atomic ADD when a
+   *  fresh per-flagger row is inserted in `clubhouse_comment_flags`.
+   *  Absent on rows with zero flags. */
+  flagCount?: number;
+  /** Sprint 4 follow-up — true when `flagCount` reached the hide
+   *  threshold (3). Filtered out by the backend for normal users;
+   *  surfaced to `platform_admin` with the marker intact so the
+   *  moderation UI can decide whether to reverse the community
+   *  decision. */
+  hidden?: boolean;
 }
 
 /**
