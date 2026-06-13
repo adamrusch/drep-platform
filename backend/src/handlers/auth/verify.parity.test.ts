@@ -177,7 +177,7 @@ async function newVerifyPath(
     return { valid: false, reason: cip8.reason ?? 'Invalid signature' };
   }
 
-  let decodedClaimed;
+  let decodedClaimed: ReturnType<typeof decodeCardanoAddress>;
   try {
     decodedClaimed = decodeCardanoAddress(walletAddress);
   } catch {
