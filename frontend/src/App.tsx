@@ -108,6 +108,18 @@ const RationalesPage = lazy(() =>
 const AdminPanel = lazy(() =>
   import('@/pages/AdminPanel').then((m) => ({ default: m.AdminPanel })),
 );
+// Sprint 6 — operational + legal pages. All three are tiny and public; we
+// still lazy-load them so they stay out of the initial entry chunk and
+// only fetch when a user actually clicks the footer link.
+const HelpDataFreshness = lazy(() =>
+  import('@/pages/HelpDataFreshness').then((m) => ({ default: m.HelpDataFreshness })),
+);
+const ImprintPage = lazy(() =>
+  import('@/pages/ImprintPage').then((m) => ({ default: m.ImprintPage })),
+);
+const PrivacyPage = lazy(() =>
+  import('@/pages/PrivacyPage').then((m) => ({ default: m.PrivacyPage })),
+);
 
 /**
  * Suspense fallback rendered while a lazy page chunk is fetching.
@@ -292,6 +304,12 @@ function App(): React.ReactElement {
                     />
                   }
                 />
+
+                {/* Sprint 6 — operational and legal pages. All public; no
+                    auth required. Linked from the global footer. */}
+                <Route path="/help/data-freshness" element={<HelpDataFreshness />} />
+                <Route path="/imprint" element={<ImprintPage />} />
+                <Route path="/privacy" element={<PrivacyPage />} />
 
                 {/* Catch-all redirect */}
                 <Route path="*" element={<Navigate to="/" replace />} />

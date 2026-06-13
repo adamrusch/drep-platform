@@ -34,6 +34,11 @@ vi.mock('@/stores/authStore', () => ({
     roles: [],
   }),
   useIsAuthenticated: (): boolean => false,
+  // Sprint 4 — `useOnChainRoles` gates the community flag affordance.
+  // Empty array = no on-chain role proven = no flag button. The
+  // existing wallet-count tests don't exercise the affordance so an
+  // unconditional empty stub is fine.
+  useOnChainRoles: (): string[] => [],
 }));
 
 vi.mock('@/stores/uiStore', () => ({
@@ -49,6 +54,14 @@ vi.mock('@/hooks/useComments', () => ({
     data: { votes: {} },
   }),
   useVoteComment: (): {
+    mutateAsync: ReturnType<typeof vi.fn>;
+    isPending: boolean;
+  } => ({ mutateAsync: vi.fn().mockResolvedValue(undefined), isPending: false }),
+  // Sprint 4 — community flagging mutation. The existing wallet-count
+  // tests don't exercise the affordance (they leave the user
+  // unauthenticated, so the gate hides the button), so the stub can
+  // be a no-op.
+  useFlagComment: (): {
     mutateAsync: ReturnType<typeof vi.fn>;
     isPending: boolean;
   } => ({ mutateAsync: vi.fn().mockResolvedValue(undefined), isPending: false }),

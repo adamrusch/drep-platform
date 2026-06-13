@@ -25,6 +25,7 @@ import { useEpoch } from '@/hooks/useEpoch';
 import { usePendingInvitations } from '@/hooks/useCommitteeInvitations';
 import { del } from '@/lib/api';
 import { Button } from '@/components/ui/Button';
+import { Footer } from '@/components/Footer';
 import { cn, formatWalletAddress } from '@/lib/utils';
 import type { UserRole } from '@/types';
 
@@ -416,7 +417,13 @@ export function Layout({ children }: LayoutProps): React.ReactElement {
           tree in <PageWithRail rail={...}>. We always render the no-rail
           shell here; the wrapper takes care of the secondary column when
           present. */}
-      <main className="main main--no-rail">{children}</main>
+      <main className="main main--no-rail">
+        {children}
+        {/* The Footer renders INSIDE main so the .app grid layout (topbar
+            + sidebar + main) doesn't need a new grid-area. It's the same
+            band on every page; pages don't opt in or out. */}
+        <Footer />
+      </main>
     </div>
   );
 }

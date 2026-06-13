@@ -97,6 +97,58 @@ describe('extractAuthContext — registeredDrepId rename compat', () => {
   });
 });
 
+// ---- S1 (2026-06-10 security review) — tokenSource forwarding ----
+
+describe('extractAuthContext — tokenSource (S1)', () => {
+  it('parses `legacy` tokenSource', () => {
+    const ctx = extractAuthContext(
+      buildEvent({
+        walletAddress: WALLET,
+        roles: JSON.stringify(['delegator']),
+        sessionType: 'normal',
+        tokenSource: 'legacy',
+      }),
+    );
+    expect(ctx.tokenSource).toBe('legacy');
+  });
+
+  it('parses `onchain` tokenSource', () => {
+    const ctx = extractAuthContext(
+      buildEvent({
+        walletAddress: WALLET,
+        roles: JSON.stringify(['delegator']),
+        sessionType: 'normal',
+        tokenSource: 'onchain',
+        onChainRoles: JSON.stringify(['drep']),
+      }),
+    );
+    expect(ctx.tokenSource).toBe('onchain');
+  });
+
+  it('drops an unknown tokenSource value to undefined (defensive)', () => {
+    const ctx = extractAuthContext(
+      buildEvent({
+        walletAddress: WALLET,
+        roles: JSON.stringify(['delegator']),
+        sessionType: 'normal',
+        tokenSource: 'bogus',
+      }),
+    );
+    expect(ctx.tokenSource).toBeUndefined();
+  });
+
+  it('omits tokenSource when absent (pre-S1 authorizer)', () => {
+    const ctx = extractAuthContext(
+      buildEvent({
+        walletAddress: WALLET,
+        roles: JSON.stringify(['delegator']),
+        sessionType: 'normal',
+      }),
+    );
+    expect(ctx.tokenSource).toBeUndefined();
+  });
+});
+
 // ---- P0-4 (2026-05-28) — committee-scoped authorization helpers ----
 
 describe('requireOwner — author-only check (action comments etc.)', () => {

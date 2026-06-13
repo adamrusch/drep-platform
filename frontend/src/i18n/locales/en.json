@@ -273,7 +273,15 @@
       "notDelegated": "You aren't delegated to a DRep yet. Browse the directory to find one and join their clubhouse.",
       "guest": "Connect a wallet that delegates to a DRep to enter their private clubhouse.",
       "browseDReps": "Browse DReps"
-    }
+    },
+    "flag": "Flag",
+    "flagged": "Flagged",
+    "flagTooltip": "Flag this post for community review",
+    "alreadyFlaggedTooltip": "You have already flagged this post",
+    "flagSubmitted": "Flag submitted",
+    "flagFailed": "Flag failed",
+    "hiddenByCommunity_one": "Hidden by community — {{count}} flag",
+    "hiddenByCommunity_other": "Hidden by community — {{count}} flags"
   },
   "composer": {
     "kind": {
@@ -1026,7 +1034,15 @@
     "error": "Error",
     "replyPosted": "Reply posted",
     "commentPosted": "Comment posted",
-    "signatureNote": "Posting requires a fresh wallet signature. Your wallet will prompt you to sign a one-time message — this does not cost any fees and does not broadcast a transaction."
+    "signatureNote": "Posting requires a fresh wallet signature. Your wallet will prompt you to sign a one-time message — this does not cost any fees and does not broadcast a transaction.",
+    "flag": "Flag",
+    "flagged": "Flagged",
+    "flagTooltip": "Flag this comment for community review",
+    "alreadyFlaggedTooltip": "You have already flagged this comment",
+    "flagSubmitted": "Flag submitted",
+    "flagFailed": "Flag failed",
+    "hiddenByCommunity_one": "Hidden by community — {{count}} flag",
+    "hiddenByCommunity_other": "Hidden by community — {{count}} flags"
   },
   "castVote": {
     "optionSupportLabel": "Support",
@@ -1096,5 +1112,68 @@
     "relatedProposals": "Related proposals",
     "noRelated": "No other active proposals of this type right now.",
     "untitledAction": "Untitled action"
+  },
+  "footer": {
+    "dataFreshness": "Data freshness",
+    "imprint": "Imprint",
+    "privacy": "Privacy",
+    "security": "Security",
+    "contributing": "Contributing"
+  },
+  "help": {
+    "dataFreshness": {
+      "title": "Data freshness",
+      "intro": "drep.tools reads on-chain values on a schedule, not on every page load — that keeps the platform fast and cheap to run. The values shown across the site are cached, not live; the cadences below are the single source of truth that the scheduler runs to, so this page can never drift from what the platform actually does.",
+      "col": {
+        "data": "Data",
+        "refresh": "Refresh",
+        "notes": "Notes"
+      },
+      "footnote": "Source of truth: shared/freshness.ts (mirrored byte-identically into infra/lib/freshness.ts for the scheduler and frontend/src/lib/freshness.ts for this page; a backend drift-guard test pins the three copies)."
+    }
+  },
+  "legal": {
+    "notConfigured": "(not configured)",
+    "configurationNote": "These pages display operator details from build-time VITE_LEGAL_* environment variables. When unset, neutral placeholders appear so the page still renders.",
+    "imprint": {
+      "title": "Imprint",
+      "operatorHeading": "Operator",
+      "contactHeading": "Contact",
+      "vatHeading": "VAT identification number",
+      "responsibleHeading": "Responsible for content",
+      "aboutHeading": "About this site",
+      "aboutBody": "drep.tools is a non-custodial wallet-authenticated platform for Cardano DRep governance. It never receives, requests, or stores private keys; sign-in is done by signing a one-time message with your wallet, and on-chain roles are proven by signature.",
+      "liabilityHeading": "Liability for content and links",
+      "liabilityBody": "User-generated content (comments, clubhouse posts, committee proposals) reflects the opinion of its author. On-chain data shown here is read from the public Cardano blockchain via Koios and Blockfrost and is outside our control. Linked external sites are the responsibility of their respective operators."
+    },
+    "privacy": {
+      "title": "Privacy Policy",
+      "lastUpdated": "Last updated: 10 June 2026",
+      "intro": "drep.tools is a wallet-authenticated platform for Cardano DRep governance built around data minimisation. We use no passwords, no email accounts, and no third-party advertising or cross-site tracking. This policy explains what we process and your rights under the GDPR.",
+      "controllerHeading": "Controller",
+      "controllerIntro": "The controller responsible for data processing on this site is:",
+      "processingHeading": "What we process, and why",
+      "walletHeading": "Wallet sign-in and identity",
+      "walletBody": "Authentication is non-custodial. You prove control of a Cardano wallet by signing a one-time message; we never receive, request, or store private keys, and there is no password. When you sign in, we store your public on-chain identifier (stake address, DRep ID, SPO pool ID, or CC member hot key) and the role it proves so we can authorise the mutations you make. Legal basis: Art. 6(1)(b) and (f) GDPR.",
+      "contentHeading": "Content you publish",
+      "contentBody": "Comments, clubhouse posts, committee proposals, and votes you create are public and stored attributed to your public on-chain identifier. Committee mutations carry a fresh wallet signature so the action is non-repudiable. Legal basis: Art. 6(1)(b) and (f) GDPR.",
+      "sessionHeading": "Session token",
+      "sessionBody": "We issue a short-lived JWT that keeps you signed in. We set no advertising or tracking cookies, so no consent banner is required. Legal basis: Art. 6(1)(f) GDPR.",
+      "logsHeading": "Server logs and security",
+      "logsBody": "Our infrastructure provider (AWS) processes connection metadata such as your IP address to deliver the site, defend against abuse, and rate-limit requests. These are retained only briefly. Legal basis: Art. 6(1)(f) GDPR.",
+      "chainHeading": "Public blockchain data",
+      "chainBody": "To verify on-chain roles and show governance information, we read public data from the Cardano blockchain via Koios and Blockfrost. We do not transmit personal data beyond public on-chain identifiers.",
+      "recipientsHeading": "Recipients and processors",
+      "recipientsBody": "We rely on AWS (hosting + DynamoDB + Secrets Manager), Koios (read-only Cardano data), Blockfrost (read-only Cardano data), and the Cardano IPFS network (for rationale anchors). We do not sell your data and use no third-party advertising.",
+      "retentionHeading": "Retention",
+      "retentionBody": "Account data is kept while your account is active. Public content remains part of the platform record. Data written to the public Cardano blockchain (for example a committee vote you submit) is outside our control and cannot be deleted by us.",
+      "rightsHeading": "Your rights",
+      "rightsBodyPrefix": "Under the GDPR you have the right of access (Art. 15), rectification (Art. 16), erasure (Art. 17), restriction (Art. 18), portability (Art. 20), and objection (Art. 21), and the right to lodge a complaint with a supervisory authority. To exercise these, contact us at ",
+      "rightsBodySuffix": ". We can remove your account and platform content, but we cannot alter or erase data recorded on the public blockchain.",
+      "automatedHeading": "Automated decision-making",
+      "automatedBody": "We do not use automated decision-making or profiling within the meaning of Art. 22 GDPR.",
+      "changesHeading": "Changes to this policy",
+      "changesBody": "We may update this policy; the current version is always available on this page."
+    }
   }
 }

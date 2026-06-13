@@ -140,6 +140,64 @@ export const tableNames = {
   ccMembers: `${TABLE_PREFIX}cc_members`,
   auditLog: `${TABLE_PREFIX}audit_log`,
   authNonces: `${TABLE_PREFIX}auth_nonces`,
+  /** Decision #1 (2026-06-10) — per-session revocation store for the
+   *  on-chain login JWTs.
+   *
+   *  PK = `sessionKey` = SHA-256(jti) hex. One row per session: stores
+   *  the active state (`revoked:false`) at login time and is flipped
+   *  to `revoked:true` on logout / "log out everywhere" / cron-driven
+   *  role revalidation. TTL on `expiresAt` removes the row when the
+   *  underlying JWT can no longer be presented (~30 days).
+   *
+   *  GSI `identityId-issuedAt-index` (PK=`identityId`, SK=`issuedAt`,
+   *  projection ALL) — used by `revokeAllSessionsForUser` to fan out
+   *  per-identity revokes without a Scan, and by the daily role-
+   *  revalidation cron to enumerate active identities.
+   *
+   *  Replaces the prior Sprint-1 reuse of `authNonces` with
+   *  `kind='session' | 'session_index'` discriminators. The legacy
+   *  CIP-30 login path (`backend/src/lib/auth.ts`) does NOT use this
+   *  table — its session revocation is the `tokenVersion` row counter
+   *  on the `users` table. See `backend/src/lib/sessionRevocation.ts`
+   *  for the full design + the public surface every caller (authorizer,
+   *  logout, on-chain verify, cron) reads. */
+  identitySessions: `${TABLE_PREFIX}identity_sessions`,
+  /** Decision #3 (2026-06-10) — canonical "person" table for the
+   *  on-chain identity subsystem.
+   *
+   *  PK = `personId` (ULID). One row per recognised individual; holds
+   *  the editable profile (`displayName`, `bio`, `socialLinks`) +
+   *  bookkeeping (`createdAt`, `updatedAt`). The on-chain credentials
+   *  that map to this person (drep / pool / cc / stake) live in
+   *  `identity_links` — read the two together via the
+   *  `personId-verifiedAt-index` GSI on `identity_links` to enumerate
+   *  every credential one person controls.
+   *
+   *  Distinct from the legacy `users` table — that's keyed by stake
+   *  address and bound to the CIP-30 wallet session. Decision #3
+   *  scopes the new model to this dedicated table so the legacy
+   *  surface (auth.ts, /auth/verify, /auth/me) is untouched.
+   *
+   *  See `lib/identityPerson.ts` for the helpers every caller uses. */
+  onchainUsers: `${TABLE_PREFIX}onchain_users`,
+  /** Decision #3 (2026-06-10) — maps each on-chain credential to a
+   *  canonical `personId`.
+   *
+   *  PK = `identityKey` — namespaced credential string:
+   *    `drep:<drepId>` | `pool:<poolId>` | `cc:<ccCred>` |
+   *    `stake:<stakeAddr>`. The namespace prefix is load-bearing — it
+   *    prevents collision between different credential types that
+   *    happen to share a bech32 prefix and makes the credential type
+   *    self-describing on read.
+   *
+   *  Attributes: `personId` (FK), `credentialType`, `verifiedAt`,
+   *    `verifiedVia` (`'login' | 'link'`).
+   *
+   *  GSI `personId-verifiedAt-index` — PK=`personId`, SK=`verifiedAt`
+   *  (ISO-8601 sorts chronologically); projection ALL so the
+   *  `/auth/onchain/me` aggregation handler can resolve the full
+   *  credential set for a person in one single-partition Query. */
+  identityLinks: `${TABLE_PREFIX}identity_links`,
   /** Phase 2 committee voting. PK=`voteScope` (`${drepId}#${actionId}`),
    *  SK=`itemKey` ('PROPOSAL' | 'CAST#<wallet>' | 'RATIONALE#DRAFT|LOCK|FINAL'
    *  | 'SUBMISSION' | 'COSIGN#<wallet>'). Sparse GSI `open-epochDeadline-index`
@@ -152,6 +210,29 @@ export const tableNames = {
   committeeMembership: `${TABLE_PREFIX}committee_membership`,
   /** Platform-wide flags. PK=`stateKey` (today: 'SAFETY_MODE'). */
   platformState: `${TABLE_PREFIX}platform_state`,
+  /** Sprint 4 — community flagging primitive for governance-action
+   *  comments. PK=`commentId` (ULID), SK=`flaggerId` (the flagger's
+   *  on-chain identity / stake address). One row per (comment, flagger);
+   *  duplicate-flag attempts are idempotent at the schema layer via
+   *  `putItemIfAbsent`. The matching denormalised counter on the
+   *  comment row (`flagCount`) is atomically `ADD`-bumped only on a
+   *  fresh insert. See `handlers/comments/flag.ts`. */
+  commentFlags: `${TABLE_PREFIX}comment_flags`,
+  /** Sprint 4 — community flagging primitive for clubhouse posts.
+   *  PK=`postKey` (= `${drepId}#${postId}`, matching the de-inlined
+   *  `clubhouse_comments` partition format), SK=`flaggerId`. Same
+   *  semantics as `commentFlags` — atomic `ADD` of `flagCount` on the
+   *  parent post row only fires on a fresh insert. See
+   *  `handlers/clubhouse/flagPost.ts`. */
+  clubhousePostFlags: `${TABLE_PREFIX}clubhouse_post_flags`,
+  /** Sprint 4 follow-up — community flagging primitive for clubhouse
+   *  COMMENTS. PK=`postKey` (= `${drepId}#${postId}`, same shape as
+   *  the parent `clubhouse_comments` table), SK=`commentFlagKey`
+   *  (= `${commentId}#${flaggerId}`). One row per (comment, flagger);
+   *  the schema-level uniqueness comes from the SK tuple. Atomic
+   *  `ADD flagCount :one` on the parent `clubhouse_comments` row only
+   *  fires on a fresh insert. See `handlers/clubhouse/flagComment.ts`. */
+  clubhouseCommentFlags: `${TABLE_PREFIX}clubhouse_comment_flags`,
 } as const;
 
 export type TableName = keyof typeof tableNames;
@@ -214,13 +295,31 @@ export async function batchGetItems<T extends Record<string, unknown>>(
   return out;
 }
 
+export interface GetItemOptions {
+  /**
+   * When true, the read uses DynamoDB's strongly-consistent semantics
+   * (`ConsistentRead: true`). The default is eventually-consistent
+   * (cheaper, faster, but stale up to seconds after a write).
+   *
+   * Use for reads where staleness is a correctness/security issue —
+   * e.g. `isSessionRevoked` (M3 fix, 2026-06-10 security review).
+   * Otherwise leave unset; the eventual-consistency default is fine for
+   * the vast majority of read paths.
+   *
+   * Costs 1 RCU vs 0.5 RCU per call.
+   */
+  consistentRead?: boolean;
+}
+
 export async function getItem<T extends Record<string, unknown>>(
   tableName: string,
   key: Record<string, unknown>,
+  options: GetItemOptions = {},
 ): Promise<T | undefined> {
   const params: GetCommandInput = {
     TableName: tableName,
     Key: key,
+    ...(options.consistentRead ? { ConsistentRead: true } : {}),
   };
   const result = await docClient.send(new GetCommand(params));
   return result.Item as T | undefined;

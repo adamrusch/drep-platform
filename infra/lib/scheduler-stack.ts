@@ -6,12 +6,33 @@ import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import { Construct } from 'constructs';
 import * as path from 'path';
 import type { DatabaseStack } from './database-stack';
+import { type FreshnessSchedule, getFreshnessRow } from './freshness';
+
+/**
+ * Map a structured `FreshnessSchedule` (declared in `shared/freshness.ts`,
+ * mirrored into `infra/lib/freshness.ts`) to the CDK `events.Schedule` the
+ * EventBridge rule actually consumes. Single source of truth for cadences:
+ * the help page and this stack both read from the same FRESHNESS table, so
+ * a cadence change touches exactly one place and the documentation can
+ * never drift from the schedule the stack synthesises.
+ *
+ * Exported so a future test (or another stack) can call it without
+ * re-deriving the mapping by hand.
+ */
+export function scheduleFromFreshness(spec: FreshnessSchedule): events.Schedule {
+  if (spec.kind === 'rate') {
+    if ('minutes' in spec) return events.Schedule.rate(cdk.Duration.minutes(spec.minutes));
+    return events.Schedule.rate(cdk.Duration.hours(spec.hours));
+  }
+  return events.Schedule.cron({ minute: spec.minute, hour: spec.hour });
+}
 
 export interface SchedulerStackProps extends cdk.StackProps {
   stage: string;
@@ -27,6 +48,8 @@ export class SchedulerStack extends cdk.Stack {
   public readonly ccMembersSyncFn: lambdaNodejs.NodejsFunction;
   public readonly revalidateCommentStakeFn: lambdaNodejs.NodejsFunction;
   public readonly committeeEpochSweepFn: lambdaNodejs.NodejsFunction;
+  public readonly revalidateOnChainRolesFn: lambdaNodejs.NodejsFunction;
+  public readonly gcAvatarsFn: lambdaNodejs.NodejsFunction;
 
   constructor(scope: Construct, id: string, props: SchedulerStackProps) {
     super(scope, id, props);
@@ -136,7 +159,9 @@ export class SchedulerStack extends cdk.Stack {
     const syncRule = new events.Rule(this, 'GovernanceSyncRule', {
       ruleName: `drep-platform-${stage}-governance-sync`,
       description: 'Triggers governance intake sync (Koios primary, Blockfrost votes) every 1 minute',
-      schedule: events.Schedule.rate(cdk.Duration.minutes(1)),
+      // Cadence comes from `shared/freshness.ts` via the infra mirror so the
+      // help page and the scheduler can never disagree on how fresh a value is.
+      schedule: scheduleFromFreshness(getFreshnessRow('governance-intake').schedule),
       enabled: true,
     });
 
@@ -191,7 +216,7 @@ export class SchedulerStack extends cdk.Stack {
     const directorySyncRule = new events.Rule(this, 'DirectorySyncRule', {
       ruleName: `drep-platform-${stage}-drep-directory-sync`,
       description: 'Triggers DRep directory sync (Koios drep_list/info/metadata) every 30 minutes',
-      schedule: events.Schedule.rate(cdk.Duration.minutes(30)),
+      schedule: scheduleFromFreshness(getFreshnessRow('drep-directory').schedule),
       enabled: true,
     });
 
@@ -257,7 +282,7 @@ export class SchedulerStack extends cdk.Stack {
     const voteRationaleRule = new events.Rule(this, 'VoteRationaleSyncRule', {
       ruleName: `drep-platform-${stage}-vote-rationale-sync`,
       description: 'Caches voter rationale bodies for active governance actions every 30 minutes',
-      schedule: events.Schedule.rate(cdk.Duration.minutes(30)),
+      schedule: scheduleFromFreshness(getFreshnessRow('vote-rationale').schedule),
       enabled: true,
     });
 
@@ -321,7 +346,7 @@ export class SchedulerStack extends cdk.Stack {
       description: 'Triggers DRep voting-power history sync (Koios drep_voting_power_history) daily',
       // 02:00 UTC daily — outside US/EU prime-time so we don't compete
       // with the Koios anonymous-tier rate budget when users are active.
-      schedule: events.Schedule.cron({ minute: '0', hour: '2' }),
+      schedule: scheduleFromFreshness(getFreshnessRow('drep-power-history').schedule),
       enabled: true,
     });
 
@@ -380,7 +405,7 @@ export class SchedulerStack extends cdk.Stack {
       // 03:00 UTC — offset from the power-history sync (02:00) so two
       // anonymous-tier Koios sync passes don't share their RPS budget
       // with each other.
-      schedule: events.Schedule.cron({ minute: '0', hour: '3' }),
+      schedule: scheduleFromFreshness(getFreshnessRow('pool-metadata').schedule),
       enabled: true,
     });
 
@@ -438,7 +463,7 @@ export class SchedulerStack extends cdk.Stack {
     const ccMembersSyncRule = new events.Rule(this, 'CCMembersSyncRule', {
       ruleName: `drep-platform-${stage}-cc-members-sync`,
       description: 'Triggers CC members sync (Koios committee_info) hourly with epoch-skip',
-      schedule: events.Schedule.rate(cdk.Duration.hours(1)),
+      schedule: scheduleFromFreshness(getFreshnessRow('cc-members').schedule),
       enabled: true,
     });
 
@@ -551,7 +576,9 @@ export class SchedulerStack extends cdk.Stack {
         ruleName: `drep-platform-${stage}-revalidate-comment-stake-sync`,
         description:
           'Triggers comment-vote stake re-validation sweep every 3 hours (Sybil defense)',
-        schedule: events.Schedule.rate(cdk.Duration.hours(3)),
+        schedule: scheduleFromFreshness(
+          getFreshnessRow('revalidate-comment-stake').schedule,
+        ),
         enabled: true,
       },
     );
@@ -615,7 +642,7 @@ export class SchedulerStack extends cdk.Stack {
     const committeeEpochSweepRule = new events.Rule(this, 'CommitteeEpochSweepRule', {
       ruleName: `drep-platform-${stage}-committee-epoch-sweep`,
       description: 'Finalizes open committee proposals past their voting deadline (hourly)',
-      schedule: events.Schedule.rate(cdk.Duration.hours(1)),
+      schedule: scheduleFromFreshness(getFreshnessRow('committee-epoch-sweep').schedule),
       enabled: true,
     });
     committeeEpochSweepRule.addTarget(
@@ -628,6 +655,230 @@ export class SchedulerStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'CommitteeEpochSweepFnArn', {
       value: this.committeeEpochSweepFn.functionArn,
       exportName: `${stage}-CommitteeEpochSweepFnArn`,
+    });
+
+    // ---- On-chain role revalidation Lambda (Sprint 3, 2026-06-10) ----
+    //
+    // Daily, re-resolve each active on-chain identity's role via Koios
+    // and revoke any whose role no longer holds. Closes the gap where
+    // a deregistered DRep / retired SPO / revoked CC keeps an unexpired
+    // JWT for up to 30 days post-event. See the long header in
+    // `backend/src/sync/revalidate-onchain-roles.ts` for the full design
+    // + the critical "fail-safe on Koios error" correctness invariant.
+    //
+    // # Role + grants
+    //
+    // The Lambda only needs the `authNonces` table (for enumerating
+    // `kind='session_index'` rows + writing `kind='session'` tombstones).
+    // No Koios secret needed — the adapter uses the public anonymous
+    // tier. Mirrors the IAM posture of the on-chain verify Lambda for
+    // consistency (which the API stack already grants for handler-side
+    // calls into `recordSessionForUser`).
+    //
+    // # Memory + timeout
+    //
+    // 512MB / 5 min. At today's scale (handful of on-chain identities)
+    // the run is sub-second. At steady state — assume the platform
+    // attracts thousands of role-holders — the wall clock is dominated
+    // by per-identity Koios calls. Each `resolveDRep` is one Koios
+    // `/drep_info` call (~50ms); the CC role check uses a single
+    // adapter-cached `/committee_info` for the whole pass. 5 minutes
+    // absorbs ample retry headroom; the cron's correctness does not
+    // depend on completing the pass in one Lambda invocation (an
+    // unfinished pass simply picks up next day).
+    const revalidateOnChainRolesRole = new iam.Role(
+      this,
+      'RevalidateOnChainRolesRole',
+      {
+        assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+        managedPolicies: [
+          iam.ManagedPolicy.fromAwsManagedPolicyName(
+            'service-role/AWSLambdaBasicExecutionRole',
+          ),
+        ],
+      },
+    );
+    // The Lambda reads + writes per-session rows on the dedicated
+    // `identity_sessions` table — enumerates active identities via the
+    // `identityId-issuedAt-index` GSI, and flips `revoked:true` on
+    // sessions whose role no longer holds on-chain (the role-
+    // revalidation invariant).
+    //
+    // Decision #1 (2026-06-10) — the prior implementation granted RW
+    // on `authNonces` (sessions previously rode that table with a
+    // `kind='session' | 'session_index'` discriminator). With sessions
+    // now living on their own table, the `authNonces` grant on this
+    // role would be dead weight — granted but never reached by this
+    // Lambda. Dropping it tightens the IAM surface to exactly what the
+    // sync touches.
+    databaseStack.identitySessionsTable.grantReadWriteData(revalidateOnChainRolesRole);
+
+    this.revalidateOnChainRolesFn = new lambdaNodejs.NodejsFunction(
+      this,
+      'RevalidateOnChainRolesFn',
+      {
+        functionName: `drep-platform-${stage}-revalidate-onchain-roles-sync`,
+        entry: path.join(backendDir, 'src/sync/revalidate-onchain-roles.ts'),
+        handler: 'handler',
+        runtime: lambda.Runtime.NODEJS_20_X,
+        architecture: lambda.Architecture.ARM_64,
+        memorySize: 512,
+        timeout: cdk.Duration.minutes(5),
+        role: revalidateOnChainRolesRole,
+        environment: {
+          DYNAMODB_TABLE_PREFIX: `drep-platform-${stage}-`,
+          CARDANO_NETWORK: stage === 'staging' ? 'preprod' : 'mainnet',
+        },
+        bundling: {
+          minify: true,
+          sourceMap: false,
+          target: 'es2022',
+          externalModules: ['@aws-sdk/*'],
+          // The role re-validation uses `blake2b` indirectly via the
+          // ported identity module's `crypto/blake.ts` (the resolvers
+          // themselves don't hash, but the imported helpers do — keep
+          // the install consistent with the other identity-consuming
+          // Lambdas so the cold-start hot path doesn't surprise an
+          // operator).
+          nodeModules: ['blake2b'],
+          forceDockerBundling: false,
+        },
+        depsLockFilePath: path.join(backendDir, 'package-lock.json'),
+      },
+    );
+
+    const revalidateOnChainRolesRule = new events.Rule(
+      this,
+      'RevalidateOnChainRolesRule',
+      {
+        ruleName: `drep-platform-${stage}-revalidate-onchain-roles-sync`,
+        description:
+          'Triggers daily on-chain role re-validation (DRep / SPO / CC / proposer deregistration sweep)',
+        // 02:30 UTC daily — slotted between the existing power-history
+        // sync (02:00) and pool-metadata sync (03:00) so the three
+        // anonymous-tier Koios consumers don't share an RPS budget.
+        schedule: scheduleFromFreshness(
+          getFreshnessRow('revalidate-onchain-roles').schedule,
+        ),
+        enabled: true,
+      },
+    );
+
+    revalidateOnChainRolesRule.addTarget(
+      new eventsTargets.LambdaFunction(this.revalidateOnChainRolesFn, {
+        retryAttempts: 1,
+        maxEventAge: cdk.Duration.hours(2),
+      }),
+    );
+
+    new cdk.CfnOutput(this, 'RevalidateOnChainRolesFnArn', {
+      value: this.revalidateOnChainRolesFn.functionArn,
+      exportName: `${stage}-RevalidateOnChainRolesFnArn`,
+    });
+
+    // ---- Avatar GC sweep Lambda (Sprint 5 follow-up, 2026-06-10) ----
+    //
+    // Daily sweep of the content-addressed DRep avatar S3 bucket. Walks
+    // the inventory, intersects with the referenced-hash set from the
+    // DDB PROFILE rows, and deletes objects older than the 24h grace
+    // window. See `backend/src/sync/gc-avatars.ts` for the full design
+    // and `lib/dreps/avatarStore.ts::gcDrepAvatars` for the unit-tested
+    // delete logic.
+    //
+    // # Why the bucket is referenced by NAME, not by ARN export
+    //
+    // The avatar bucket is created in `api-stack.ts` (shared with the
+    // serve handler + the directory-sync avatar-store pass). The
+    // scheduler stack does NOT depend on the api stack — adding a
+    // cross-stack ARN export would force an api-then-scheduler deploy
+    // ordering with no compensating benefit. The bucket name follows a
+    // deterministic convention (`drep-platform-${stage}-avatars`), so
+    // we look it up by name here and grant RW to the GC role
+    // explicitly. The runtime contract is the same `AVATAR_S3_BUCKET`
+    // env var the directory-sync Lambda already consumes — keeps the
+    // code path symmetric.
+    //
+    // # IAM
+    //
+    // S3 RW on the avatar bucket (List + Delete + Get + Head) + DDB
+    // read on the drep_directory table (for the referenced-set Query
+    // through `listReferencedImageHashes`). DDB read-only here is
+    // tighter than the directory-sync's RW grant — the GC Lambda
+    // never writes the directory.
+    //
+    // # Cadence
+    //
+    // Daily at 04:00 UTC — sourced from `shared/freshness.ts` via the
+    // infra mirror (id `gc-avatars`). Slotted AFTER the 02:00 / 02:30 /
+    // 03:00 Koios passes so the daily Lambdas don't pile up in one
+    // window for the CloudWatch alarm view.
+    //
+    // # Memory + timeout
+    //
+    // 256MB / 2 min — the sweep is a small S3 ListObjects + one DDB
+    // Query (paginated, but ~1600 rows fits in one page) + at most one
+    // DeleteObjects batch. At today's scale the run is sub-second.
+    const gcAvatarsRole = new iam.Role(this, 'GcAvatarsRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+      ],
+    });
+    // DDB read-only on the directory table — the GC Lambda only reads
+    // PROFILE rows to assemble the referenced-hash set; it never
+    // touches `imageContentHash` / `imageStoredUrl`.
+    databaseStack.drepDirectoryTable.grantReadData(gcAvatarsRole);
+    // Look up the avatar bucket by its deterministic name and grant
+    // RW (List + Delete need List + DeleteObject; Get needed by the
+    // adapter's `get` fallback path even though the GC sweep only
+    // calls list/delete).
+    const avatarBucket = s3.Bucket.fromBucketName(
+      this,
+      'GcAvatarBucketRef',
+      `drep-platform-${stage}-avatars`,
+    );
+    avatarBucket.grantReadWrite(gcAvatarsRole);
+
+    this.gcAvatarsFn = new lambdaNodejs.NodejsFunction(this, 'GcAvatarsFn', {
+      functionName: `drep-platform-${stage}-gc-avatars-sync`,
+      entry: path.join(backendDir, 'src/sync/gc-avatars.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      memorySize: 256,
+      timeout: cdk.Duration.minutes(2),
+      role: gcAvatarsRole,
+      environment: {
+        DYNAMODB_TABLE_PREFIX: `drep-platform-${stage}-`,
+        AVATAR_S3_BUCKET: `drep-platform-${stage}-avatars`,
+      },
+      bundling: {
+        minify: true,
+        sourceMap: false,
+        target: 'es2022',
+        externalModules: ['@aws-sdk/*'],
+        forceDockerBundling: false,
+      },
+      depsLockFilePath: path.join(backendDir, 'package-lock.json'),
+    });
+
+    const gcAvatarsRule = new events.Rule(this, 'GcAvatarsRule', {
+      ruleName: `drep-platform-${stage}-gc-avatars-sync`,
+      description:
+        'Triggers daily avatar GC sweep — deletes unreferenced S3 objects past the 24h grace window',
+      schedule: scheduleFromFreshness(getFreshnessRow('gc-avatars').schedule),
+      enabled: true,
+    });
+    gcAvatarsRule.addTarget(
+      new eventsTargets.LambdaFunction(this.gcAvatarsFn, {
+        retryAttempts: 1,
+        maxEventAge: cdk.Duration.hours(2),
+      }),
+    );
+
+    new cdk.CfnOutput(this, 'GcAvatarsFnArn', {
+      value: this.gcAvatarsFn.functionArn,
+      exportName: `${stage}-GcAvatarsFnArn`,
     });
 
     // ---- CloudWatch alarms on sync Lambda errors (Batch F #20, 2026-05-27) ----
@@ -722,5 +973,11 @@ export class SchedulerStack extends cdk.Stack {
       'revalidate-comment-stake',
     );
     buildErrorsAlarm('CommitteeEpochSweepErrorsAlarm', this.committeeEpochSweepFn, 'committee-epoch-sweep');
+    buildErrorsAlarm(
+      'RevalidateOnChainRolesErrorsAlarm',
+      this.revalidateOnChainRolesFn,
+      'revalidate-onchain-roles',
+    );
+    buildErrorsAlarm('GcAvatarsErrorsAlarm', this.gcAvatarsFn, 'gc-avatars');
   }
 }
