@@ -1,4 +1,5 @@
-import React, { Suspense, lazy } from 'react';
+import type React from 'react';
+import { Suspense, lazy } from 'react';
 import { Navigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useIsAuthenticated } from '@/stores/authStore';

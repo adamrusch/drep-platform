@@ -37,7 +37,7 @@ export async function isBlockfrostCircuitOpen(): Promise<{ open: boolean; expire
     kind: string;
     expiresAt: number;
   }>(tableNames.authNonces, { nonce: CIRCUIT_KEY });
-  if (!item || item.kind !== 'circuit') return { open: false };
+  if (item?.kind !== 'circuit') return { open: false };
   // DynamoDB TTL deletion is best-effort with multi-minute lag, so check
   // expiry inline rather than relying on the table to scrub.
   if (Date.now() / 1000 > item.expiresAt) return { open: false };

@@ -253,7 +253,7 @@ function findInlineUpdate(): undefined | {
     if (
       table === 'test-clubhouse_posts' &&
       updateExpression.includes('SET') &&
-      Object.prototype.hasOwnProperty.call(values, ':comments')
+      Object.hasOwn(values, ':comments')
     ) {
       return {
         table,

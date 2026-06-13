@@ -8,7 +8,8 @@
 // behaviour. State is local; the donut is informational, not interactive
 // outside its own surface.
 
-import React, { useMemo, useState } from 'react';
+import type React from 'react';
+import { useMemo, useState } from 'react';
 import {
   coalitionAt,
   snapThreshold,

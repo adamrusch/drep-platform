@@ -57,9 +57,9 @@ jobs:
           cache-dependency-path: backend/package-lock.json
       - run: npm ci
       - run: npm run typecheck
-      # Lint gate for the adopted identity subsystem (Biome; noUnused* as
-      # errors). Scoped to src/lib/identity for now; widen as the codebase
-      # is brought up to the same bar. See backend/biome.json.
+      # Lint gate (Biome; noUnused* as errors). Widened repo-wide on
+      # chore/repo-wide-lint — covers the full src/ tree. See
+      # backend/biome.json.
       - run: npm run lint
       # Supply-chain gate: fail on high-severity advisories in prod deps.
       - run: npm run audit:prod
@@ -82,6 +82,9 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run typecheck
+      # Lint gate (Biome; noUnused* as errors). Mirrors the backend job —
+      # widened repo-wide on chore/repo-wide-lint. See frontend/biome.json.
+      - run: npm run lint
       # Unit tests (vitest + RTL canaries — Batch F #18). Runs ahead of
       # the build so a failing test doesn't waste the 5-min Vite bundle
       # step. New tests are co-located as `*.test.{ts,tsx}` next to the
@@ -125,6 +128,9 @@ jobs:
         run: npm ci
       - run: npm ci
       - run: npm run typecheck
+      # Lint gate (Biome; noUnused* as errors). Mirrors the backend job —
+      # widened repo-wide on chore/repo-wide-lint. See infra/biome.json.
+      - run: npm run lint
       # `cdk synth --all` runs the full app and produces every stack's
       # template + every Lambda's bundled asset. This is the load-
       # bearing check — it catches CFN-invalid changes and broken

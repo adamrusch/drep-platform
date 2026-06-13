@@ -1,4 +1,5 @@
-import React, { useMemo, useState } from 'react';
+import type React from 'react';
+import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Star, User, ChevronDown, ChevronRight, ArrowBigUp, ArrowBigDown, MessageSquare, Flag } from 'lucide-react';
 import type { Comment, MyCommentVotes } from '@/types';
@@ -264,6 +265,7 @@ function CommentRow({
           )}
           {canDelete(comment) && (
             <button
+              type="button"
               onClick={() =>
                 void deleteComment.mutate({
                   actionId,

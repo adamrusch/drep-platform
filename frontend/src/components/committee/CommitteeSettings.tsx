@@ -168,6 +168,7 @@ function RosterCard({ drepId }: { drepId: string }): React.ReactElement {
   }, [details.data, intendedN, removalTarget, removalX]);
 
   // Live status check (on-blur via useEffect on trimmed value, debounced).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only re-debounce when address text changes; mutate identity isn't a meaningful trigger
   useEffect(() => {
     const trimmed = newAddress.trim();
     if (trimmed.length === 0) {
@@ -514,7 +515,7 @@ function AddMemberStatus({
  * the rationale-mode side and leave the threshold control off — adding/
  * removing a member is where the rule changes.
  */
-function CommitteeOtherSettingsCard({ drepId }: { drepId: string }): React.ReactElement {
+function CommitteeOtherSettingsCard({ drepId }: { drepId: string }): React.ReactElement | null {
   const { t } = useTranslation();
   const config = useUpdateVotingConfig(drepId);
   const storeKey = useStoreIpfsKey(drepId);
@@ -531,7 +532,7 @@ function CommitteeOtherSettingsCard({ drepId }: { drepId: string }): React.React
     () => Boolean(walletAddress && details.data && walletAddress === details.data.leadWallet),
     [walletAddress, details.data],
   );
-  if (!isLead) return <></>;
+  if (!isLead) return null;
 
   return (
     <Card>

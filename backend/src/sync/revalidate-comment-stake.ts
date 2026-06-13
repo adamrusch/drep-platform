@@ -115,7 +115,6 @@ import {
   type QueryResult,
 } from '../lib/dynamodb';
 import type {
-  CommentVoteItem,
   CommentVoterItem,
   DRepCommitteeItem,
 } from '../lib/types';
@@ -490,7 +489,7 @@ async function reweightWalletVotes(
   // unlikely to have >1MB of votes today, but defensively loop.
   let cursor: Record<string, unknown> | undefined;
   do {
-    let queryResult;
+    let queryResult: QueryResult<CommentVoteIndexRow>;
     try {
       queryResult = await queryItems<CommentVoteIndexRow>(
         tableNames.commentVotes,

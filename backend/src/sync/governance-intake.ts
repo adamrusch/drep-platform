@@ -12,6 +12,7 @@ import {
   mapStatus,
   parseCip108Body,
   type AnchorContent,
+  type BlockfrostEpoch,
   type BlockfrostProposal,
 } from '../lib/blockfrost';
 import {
@@ -43,7 +44,6 @@ import {
 } from '../lib/voteTally';
 import { getItem, putItem, putItemIfAbsent, queryItems, tableNames } from '../lib/dynamodb';
 import {
-  activeDRepIds,
   fanoutAutoPosts,
   selectCompletionSweepCandidates,
   selectFanoutCandidates,
@@ -364,7 +364,7 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
     result.koiosTipLagSec = tip.lagSec;
   } catch (koiosErr) {
     console.warn('Governance intake: Koios /tip unavailable, falling back to Blockfrost:', koiosErr);
-    let epochInfo;
+    let epochInfo: BlockfrostEpoch;
     try {
       epochInfo = await getLatestEpoch();
     } catch (err) {
@@ -761,7 +761,7 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
             // here. The function itself handles the multi-gateway walk +
             // mismatch surfacing logic.
             const cid = extractIpfsCid(metaUrl);
-            let recovered: { applied: boolean } = { applied: false };
+            const recovered: { applied: boolean } = { applied: false };
             if (cid) {
               const ipfsRes = await fetchIpfsAnchor(cid, metaHash);
               if (ipfsRes) {
@@ -781,7 +781,7 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
                   // (returns {}), but wrap defensively per the holdout
                   // rationale: the HOSKY body is well-formed but exotic
                   // proposals might not be.
-                  let cip108;
+                  let cip108: ReturnType<typeof parseCip108Body>;
                   try {
                     cip108 = parseCip108Body(parsedJson);
                   } catch (err) {
@@ -852,7 +852,7 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
                   // Same defensive note as the IPFS branch.
                 }
                 if (parsedJson) {
-                  let cip108;
+                  let cip108: ReturnType<typeof parseCip108Body>;
                   try {
                     cip108 = parseCip108Body(parsedJson);
                   } catch (err) {
@@ -1537,11 +1537,6 @@ const WATERMARK_LOOKBACK_SECONDS = 24 * 3_600;
  *  per-partition limits while keeping wall-clock under 30s on a cold
  *  backfill. */
 const VOTE_WRITE_CONCURRENCY = 16;
-
-interface VoteWatermark {
-  /** Last block_time we successfully wrote (or attempted) up to. */
-  blockTime: number;
-}
 
 interface VotePersistResult {
   written: number;

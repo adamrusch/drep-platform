@@ -55,6 +55,7 @@ export function RationaleEditorPage(): React.ReactElement {
   const canEdit = !collaborative || holdsLock;
 
   // Heartbeat + release lifecycle while holding a collaborative lock.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: lifecycle should pivot only on lock-state booleans; mutate identities aren't meaningful triggers
   useEffect(() => {
     if (!collaborative || !holdsLock) return;
     const id = setInterval(() => heartbeat.mutate(), HEARTBEAT_MS);

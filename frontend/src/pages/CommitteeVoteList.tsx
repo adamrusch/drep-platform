@@ -60,6 +60,7 @@ export function CommitteeVoteList(): React.ReactElement {
           </p>
 
           {/* Governance action — dropdown of OPEN actions by title. */}
+          {/* biome-ignore lint/a11y/noLabelWithoutControl: the <select> is rendered as a child of this label (conditional branch) */}
           <label className="block text-[12px] text-[var(--text-secondary)]">
             {t('committeeRoom.list.actionSelectLabel')}
             {govActions.isLoading ? (

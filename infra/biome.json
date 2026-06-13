@@ -3,7 +3,7 @@
   "vcs": { "enabled": false },
   "files": {
     "ignoreUnknown": true,
-    "includes": ["src/**"]
+    "includes": ["lib/**", "bin/**"]
   },
   "formatter": {
     "enabled": true,

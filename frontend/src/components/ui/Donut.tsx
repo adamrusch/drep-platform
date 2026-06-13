@@ -1,4 +1,4 @@
-import React from 'react';
+import type React from 'react';
 
 export interface DonutSegment {
   label: string;
@@ -77,7 +77,7 @@ export function Donut({
       role="img"
       aria-label={
         centerLabel
-          ? `${centerValue ? centerValue + ' — ' : ''}${centerLabel}`
+          ? `${centerValue ? `${centerValue} — ` : ''}${centerLabel}`
           : 'Donut chart'
       }
     >
