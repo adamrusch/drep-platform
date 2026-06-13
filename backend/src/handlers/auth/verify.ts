@@ -108,7 +108,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     // here. Malformed/unsupported claimed addresses fail closed (the
     // legacy decoder threw on these and the legacy verifier returned
     // `valid:false` — we map both to the same 401 with a parity reason).
-    let decodedClaimed;
+    let decodedClaimed: ReturnType<typeof decodeCardanoAddress>;
     try {
       decodedClaimed = decodeCardanoAddress(walletAddress);
     } catch {
