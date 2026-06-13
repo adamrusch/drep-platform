@@ -57,6 +57,12 @@ jobs:
           cache-dependency-path: backend/package-lock.json
       - run: npm ci
       - run: npm run typecheck
+      # Lint gate for the adopted identity subsystem (Biome; noUnused* as
+      # errors). Scoped to src/lib/identity for now; widen as the codebase
+      # is brought up to the same bar. See backend/biome.json.
+      - run: npm run lint
+      # Supply-chain gate: fail on high-severity advisories in prod deps.
+      - run: npm run audit:prod
       - run: npm test
 
   frontend:

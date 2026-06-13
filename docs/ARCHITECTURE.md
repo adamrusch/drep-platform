@@ -12,6 +12,7 @@ This document is the deep dive. For the front-door overview see the root
 - [Security layers](#security-layers)
 - [Failure modes and circuit breakers](#failure-modes-and-circuit-breakers)
 - [Cost protection](#cost-protection)
+- [Identity subsystem (four-role login, sessions, reconciliation)](#identity-subsystem-four-role-login-sessions-reconciliation)
 - [Why each tech was chosen](#why-each-tech-was-chosen)
 
 ---
@@ -479,6 +480,202 @@ Each layer addresses a different attack profile. Layer 1 stops the obvious
 cost amplifier; Layer 2 limits the per-IP base rate; Layer 3 catches what
 slips through; Layer 4 fixes the internal hot paths; Layer 5 guarantees
 human-in-the-loop awareness.
+
+---
+
+## Identity subsystem (four-role login, sessions, reconciliation)
+
+The platform's auth surface is layered: the legacy CIP-30 wallet login
+remains the production cookie path, and a parallel **on-chain login**
+admits the four CIP-1694 roles (DRep / SPO / CC member / Proposer)
+with cryptographic proof of control. The two surfaces resolve to one
+canonical person via the reconciliation model. This section maps the
+moving pieces; the per-decision rationale lives in
+[`docs/DECISIONS.md`](DECISIONS.md) (ADR-011 through ADR-016) and the
+threat-model walk lives in
+[`docs/SECURITY_REVIEW_IDENTITY.md`](SECURITY_REVIEW_IDENTITY.md).
+
+### The ported subsystem + the four roles
+
+`backend/src/lib/identity/` is a cohesive port of DRep Talk's
+`auth/*` + `crypto/*` + `cardano/identity.ts` (Apache-2.0), adapted to
+the backend stack — `cbor-x` for CBOR, Node `crypto` (with an SPKI
+prefix) for raw Ed25519, the existing `blake2b` dep, DynamoDB-backed
+nonce + session stores, and a `KoiosAdapter` wrapping the existing
+`lib/koios.ts`. The README in that directory documents the seams and
+forbids dissolving the module into the legacy `lib/auth.ts`.
+
+The four on-chain roles run **parallel** to the legacy CIP-30 path —
+new endpoints under `/auth/onchain/*`, a new JWT claim
+`onChainRoles: ('drep' | 'spo' | 'cc' | 'proposer')[]` carried
+alongside the legacy `roles`, and a new `personId` claim
+(see below). The legacy `UserRole` union is unchanged. Endpoints:
+
+| Method + path | Purpose |
+|---------------|---------|
+| `POST /auth/onchain/challenge` | Issue a fresh nonce for the on-chain login. |
+| `POST /auth/onchain/verify` | Verify the role-specific signature (CIP-8 for DRep/Proposer, raw Ed25519 for SPO Calidus + CC hot key), resolve the role via Koios, mint a JWT with `onChainRoles` + `jti` + `personId`. |
+| `POST /auth/onchain/link/challenge` | Issue a nonce for adding a second credential to the current person (the bytes encode the caller's `personId`, ADR-014 M1). |
+| `POST /auth/onchain/link/verify` | Verify the second credential's proof of control AND that the caller signed bytes bound to their own `personId`; reject 409 if the credential is already linked to a different person (no silent merge). |
+| `GET /auth/onchain/me` | Aggregated per-person response — every linked credential + the profile. |
+| `GET /auth/onchain/profile` / `PUT /auth/onchain/profile` | Read/edit the canonical person profile (`onchain_users` row); `socialLinks` shape-validated per S4d. |
+
+The handlers + the underlying resolvers live under
+`backend/src/handlers/auth/onchain*.ts` and
+`backend/src/lib/identity/auth/*`. The middleware emits
+`tokenSource: 'legacy' | 'onchain'` on the auth context so on-chain
+handlers can reject a legacy cookie (S1 fix).
+
+### Session model + revocation cron
+
+Every on-chain login mints a ULID `jti` and writes one row to
+`identity_sessions` (PK `sessionKey` = SHA-256(jti) hex; GSI
+`identityId-issuedAt-index` for per-identity enumeration). The
+authorizer's hot path consults `isSessionRevoked` on every
+authenticated request:
+
+- **Granular revoke** (one session) — `revokeSessionByJti` flips
+  `revoked: true`. The read uses `ConsistentRead: true` (M3) so a
+  just-landed revoke is visible on the next request.
+- **Bulk revoke** ("log out everywhere") — `revokeAllSessionsForUser`
+  enumerates via the GSI; M4 additionally tombstones the caller's
+  CURRENT `jti` directly before the GSI walk to handle the GSI's
+  eventual-consistency window.
+- **Fail-OPEN on store-read error** — a thrown read resolves to
+  `false`. Deliberate availability/security trade: the JWT is already
+  cryptographically valid, and a DDB blip shouldn't lock every
+  authenticated user out. Documented in the file header + the
+  authorizer.
+
+A **daily role-revalidation cron**
+(`backend/src/sync/revalidate-onchain-roles.ts`, EventBridge at
+02:30 UTC) enumerates every active identity via the GSI and revokes
+sessions whose role no longer holds on-chain — closes the window
+where a deregistered DRep / retired SPO / revoked CC keeps an
+unexpired JWT for up to 30 days. The cron uses a **strict Koios
+adapter** that propagates errors so a Koios outage surfaces as
+`upstream-failure` and SKIPS (never as "role gone → revoke"); the
+verify-path adapter swallows errors for clean 401s. The cron's SPO
+branch (M5) checks the pool's currently-registered Calidus key
+against the `spoCalidusPubKeyHex` persisted at login and revokes
+on rotation.
+
+ADR-015 records the **relaxed COSE address-header** decision: a
+COSE_Sign1 protected header without `address` is no longer a strict
+reject — the verifier falls back to deriving identity from the
+verified pubkey (matching the legacy verifier's behavior). Safe
+because the protected header is part of the signed `Sig_structure`,
+so any tampering would invalidate the signature, which is always
+verified first. The metric
+`DrepPlatform/Identity / IdentityCoseMissingAddressHeader` still
+tracks the affected-wallet shape; a sudden spike would surface
+operationally.
+
+### Person reconciliation + verified linking (no silent merge)
+
+`onchain_users` (PK `personId` = ULID) holds the canonical-person
+profile. `identity_links` (PK `identityKey` =
+`${credentialType}:${credentialId}` — `drep:` / `pool:` / `cc:` /
+`stake:`) maps each on-chain credential to a `personId`. GSI
+`personId-verifiedAt-index` enumerates every credential one person
+controls in a single-partition Query.
+
+Auto-provisioning on first on-chain login for an unmapped credential
+runs the conditional Put on `identity_links` FIRST
+(`attribute_not_exists(identityKey)`), and writes the `onchain_users`
+row only on successful claim — so a losing concurrent racer cannot
+strand an orphan person (S3 fix). A losing racer re-reads the winning
+link and returns its personId.
+
+**No silent merge.** A credential already mapped to a different
+person than the caller's session person is rejected (409). The link/
+verify challenge's signed payload format
+(`dreptalk-link:<personId>:<stage>:<domain>:<nonce>:<issuedAt>`)
+binds the caller's personId into the bytes the wallet signs (M1) and
+the verify handler asserts the parsed bound personId matches
+`authCtx.personId` INSIDE `consumeNonceWithCheck` — so a forged
+signature doesn't DoS the legitimate caller (S2) and a victim can't
+be socially engineered into signing a challenge that attaches their
+credential to the attacker's account.
+
+The legacy CIP-30 login also auto-provisions a person under
+`stake:<stakeAddr>` (ADR-016, sibling **PR #71** —
+`feat/legacy-login-cutover`), so a wallet login and the same human's
+on-chain logins resolve to one `personId`. The legacy `/auth/me`
+surfaces `personId` once that cutover lands.
+
+### Community flagging + admin moderation
+
+Sprint 4 introduced a community-flagging primitive across the three
+public discussion surfaces. Three sibling tables — `comment_flags`,
+`clubhouse_post_flags`, `clubhouse_comment_flags` — each holds one
+row per (target, flagger) keyed for idempotent inserts via
+`putItemIfAbsent`. The parent row carries a denormalised `flagCount`
+that's atomically `ADD`-ed only on a fresh insert (so duplicate
+flags don't inflate the count) and a `hidden: BOOL` flipped by a
+conditional `SET hidden = :true` once the threshold is crossed.
+Hidden rows are excluded from normal-user list responses;
+`platform_admin`s see them with the `hidden: true` marker for
+moderation. The flagger's on-chain role at the time of the flag is
+stored for audit (any one of the four roles counts equally toward
+the threshold — the count math is role-blind).
+
+The **admin moderation panel** that surfaces flagged/hidden content
+to `platform_admin`s for review is in sibling **PR #70**
+(`feat/moderation-panel`). It reads the flag tables + the
+`hidden: true` rows; this branch ships the underlying primitive but
+not the moderation UI/handlers.
+
+### Self-hosted avatars + concentration donut + CIP-20 vote tag
+
+Three smaller Sprint 5 surfaces ride alongside the identity work:
+
+- **Self-hosted avatars.** A content-addressed S3 bucket caches DRep
+  avatar bytes by SHA-256. The directory sync's avatar-store pass
+  fetches the upstream `image` URL, hashes the bytes, uploads to
+  `{hash}` if new, and stamps `imageContentHash` + `imageStoredUrl`
+  on the `drep_directory` row. Failures bump `imageFetchFailedAt`
+  (Unix seconds) and rotate the row to the back of the next pass
+  so a broken upstream doesn't starve healthy DReps. The frontend
+  prefers `imageStoredUrl` over `image` when present, so the
+  directory tile / wallet pill renders from the local cache. A
+  daily `gc-avatars` cron (04:00 UTC) removes orphan bucket objects
+  past a 24h grace window. See
+  `backend/src/lib/dreps/avatarStore.ts`,
+  `backend/src/handlers/directory/avatar.ts`.
+- **Voting-power concentration donut.** `GET /dreps/concentration`
+  returns the buckets the frontend's concentration donut renders,
+  with the live DVT thresholds (60/67/75 etc. per action type)
+  pulled from the `platform_state` `DREP_DVT_THRESHOLDS` row the
+  directory sync writes each cycle. Coalesces duplicate-percent
+  thresholds into one marker that lists every gated action. See
+  `backend/src/lib/dreps/concentration.ts`,
+  `backend/src/lib/dreps/concentrationView.ts`,
+  `backend/src/handlers/directory/concentration.ts`.
+- **CIP-20 attribution on on-chain submissions.** Every committee
+  vote the platform assembles for on-chain broadcast is stamped
+  with CIP-20 (label 674) transaction-message metadata so chain
+  analysts can attribute the vote to `drep.tools`. The helper is
+  duplicated byte-identically into `shared/cip20.ts` + `frontend/
+  src/lib/cip20.ts` (the repo avoids cross-workspace imports); a
+  drift-guard test pins the two copies. See
+  `backend/src/lib/cip20.driftguard.test.ts`.
+
+### Security posture
+
+This subsystem has been through an automated multi-reviewer security
+review (nine findings, M1–M5 must-fix + S1–S4 should-fix, all
+addressed in the adoption PR) — recorded in
+[`docs/SECURITY_REVIEW_IDENTITY.md`](SECURITY_REVIEW_IDENTITY.md)
+alongside the threat-model walk for the three new seams (the
+DDB-backed nonce adapter, the per-session revocation store, the
+daily role-revalidation cron). Before exposing four-role login to
+production traffic on `drep.tools`, the document recommends an
+**independent human code review** of those seams by an external
+security engineer familiar with COSE / CIP-8 and AWS identity
+patterns. Automated reviewers are great cost-amplifiers for caught
+bugs but don't fully substitute for a protocol-aware human pass on
+credential-handling code.
 
 ---
 

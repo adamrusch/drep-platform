@@ -2,3 +2,40 @@ drep.tools (drep-platform)
 Copyright 2026 Adam P. Rusch
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+------------------------------------------------------------------------
+DRep Talk (backend/src/lib/identity/*, backend/src/lib/dreps/*,
+backend/src/handlers/directory/concentration.ts,
+backend/src/handlers/directory/avatar.ts,
+frontend/src/components/DrepConcentration.tsx,
+frontend/src/lib/concentrationView.ts,
+frontend/src/lib/drepAvatar.ts)
+------------------------------------------------------------------------
+This product includes code adapted from DRep Talk
+(https://github.com/katomm/dreptalk.com), Copyright 2026 DRep Talk
+contributors, licensed under the Apache License, Version 2.0.
+
+The authentication and identity subsystem under
+backend/src/lib/identity/ is derived from DRep Talk's src/lib/auth/*,
+src/lib/crypto/*, and src/lib/cardano/identity.ts, modified to target
+the drep-platform (AWS Lambda) stack.
+
+The DRep directory robustness/UX subsystem under
+backend/src/lib/dreps/* and the corresponding handlers + frontend
+components is derived from DRep Talk's src/lib/dreps/* (voting-power
+concentration math + content-addressed avatar pipeline) and
+src/components/DrepConcentration.tsx, modified for drep-platform
+(DynamoDB + S3 instead of D1 + R2; AWS Lambda boundary).
+
+------------------------------------------------------------------------
+cardenticon (frontend/src/vendor/cardenticon/)
+------------------------------------------------------------------------
+This product includes a vendored copy of cardenticon
+(https://github.com/adatainment/cardenticon @ 6970eab), Copyright 2026
+cardenticon contributors, licensed under the Apache License, Version
+2.0. See frontend/src/vendor/cardenticon/LICENSE and
+frontend/src/vendor/cardenticon/NOTICE for the full attribution.
+
+cardenticon is derived from hashicon
+(https://github.com/emeraldpay/hashicon), Copyright 2018-2022
+EmeraldPay, Inc, also licensed under the Apache License, Version 2.0.

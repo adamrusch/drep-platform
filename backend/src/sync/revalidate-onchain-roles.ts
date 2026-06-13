@@ -1,0 +1,674 @@
+/**
+ * Daily on-chain role re-validation sync (Sprint 3, 2026-06-10).
+ *
+ * # The gap this closes
+ *
+ * Sprint 1 added the four-role on-chain login (`drep` / `proposer` /
+ * `spo` / `cc`). Each successful login mints a JWT carrying the
+ * granted `onChainRoles[]` claim, with a 30-day max lifetime
+ * (`remember_me`). The JWT itself is cryptographically valid for that
+ * full window — nothing on the read path re-checks Koios per request.
+ *
+ * That's a problem the moment an identity's on-chain role disappears
+ * BEFORE the JWT expires:
+ *
+ *   - A DRep DEREGISTERS — still holds a `drep`-role JWT for up to 30
+ *     days. Their vote-cast surface stays unlocked.
+ *   - An SPO RETIRES (or rotates Calidus key, revoking the previous) —
+ *     same problem with the `spo`-role JWT.
+ *   - A CC member's hot credential is REVOKED (status flips away from
+ *     `authorized`) — same problem with the `cc`-role JWT.
+ *   - A proposer's submitted action is RETRACTED such that they no
+ *     longer match `return_address` — `proposer` JWT lingers.
+ *
+ * The legacy `tokenVersion` counter doesn't help: it's a row on
+ * the `users` table, and on-chain login intentionally does NOT touch
+ * `users` (see `onchainVerify.ts` header). Bumping `tokenVersion` for
+ * a deregistered DRep would require resolving their identity to a
+ * legacy user row, which we don't keep for on-chain logins.
+ *
+ * # The fix
+ *
+ * Daily, enumerate every active on-chain identity via the dedicated
+ * `identity_sessions` table (`listActiveSessionIndices` folds per-row
+ * data into one entry per identity; Decision #1 backed this with a
+ * purpose-built table replacing the Sprint-1 shared-`authNonces`
+ * reuse) and re-resolve each identity's role via the same
+ * `resolveRole` + `koiosAdapter` the live verify path uses. If a
+ * role the session was granted no longer holds on-chain, revoke ALL
+ * of that identity's sessions via `revokeAllSessionsForUser` (which
+ * flips `revoked:true` on every active session row via the
+ * `identityId-issuedAt-index` GSI — the JWT authorizer fails CLOSED
+ * on the revoked rows).
+ *
+ * # CRITICAL: fail-safe on Koios errors / inconclusive data
+ *
+ * NEVER revoke on a Koios outage or an inconclusive read. The whole
+ * point of the four-role login is to give legitimate on-chain identities
+ * a way in; a Koios outage that strips everyone out is worse than the
+ * gap this sweep is closing. The cron ONLY revokes when it has a
+ * DEFINITIVE "role no longer present" reading:
+ *
+ *   - `resolveDRep` returned `{isDrep: false}` AND the Koios call did
+ *     not throw → DRep is definitively deregistered → revoke.
+ *   - `resolveSpo` returned `{isSpo: false}` AND no throw → revoke.
+ *   - `resolveCc` returned `{isCc: false}` AND no throw → revoke.
+ *   - `resolveProposer` returned `{isProposer: false}` AND no throw →
+ *     revoke.
+ *
+ * Anything else — the underlying Koios call threw, the adapter returned
+ * `null` because it caught an error internally, a re-resolution that's
+ * inconsistent with the cached state — SKIPS the identity. Next 24h
+ * cycle retries against fresh data.
+ *
+ * Locked in by explicit tests in `revalidate-onchain-roles.test.ts`:
+ *   - `still-valid identity keeps its sessions`
+ *   - `now-deregistered identity gets revoked`
+ *   - `Koios throw → identity skipped, sessions intact`
+ *
+ * # Cadence
+ *
+ * Daily (24h). On-chain registration changes take an epoch (~5 days
+ * mainnet) to propagate anyway, so 24h granularity is plenty. Shorter
+ * windows would burn Koios calls for no real change-detection win.
+ * 02:30 UTC chosen to slot between the existing daily DRep
+ * power-history (02:00) and pool-metadata (03:00) syncs so the three
+ * don't compete for the anonymous-tier Koios RPS budget.
+ *
+ * # Cost
+ *
+ * Per-cycle Koios calls = ~(N active on-chain identities), with the
+ * `drep` / `spo` / `cc` checks each costing one Koios call per
+ * identity (no batch endpoint for `drep_info` keyed on a single id;
+ * `committee_info` returns the full roster in one call and is
+ * adapter-cached); `proposer` re-uses the cached `proposal_list`.
+ * At steady state (mainnet ~2k DReps + ~3k SPOs + ~7 CC + a handful
+ * of proposers, of which a small fraction log into THIS platform) the
+ * total is well under the public-tier anonymous Koios quota. DDB cost
+ * is one Scan of the dedicated `identity_sessions` table (filtered
+ * server-side to `revoked!=true AND expiresAt>now`) + per-identity
+ * GSI Queries on the revoke path (only on definitive deregistrations).
+ * The Sprint-1 shared-`authNonces` Scan was wider (had to filter
+ * across nonce + tombstone + session-index kinds); Decision #1's
+ * single-purpose table tightens the per-pass cost.
+ *
+ * # Structured logging
+ *
+ * Mirrors `revalidate-comment-stake.ts`'s pattern — one structured
+ * end-of-pass log line and a per-identity warning on each skip.
+ */
+import type { ScheduledEvent, Context } from 'aws-lambda';
+import {
+  listActiveSessionIndices,
+  revokeAllSessionsForUser,
+  type ActiveSessionIndex,
+} from '../lib/sessionRevocation';
+import {
+  fetchDRepInfoBatch,
+  getCommitteeMembers,
+  invalidateCommitteeCache,
+  listAllPools,
+  listProposals,
+  type KoiosDRepInfo,
+  type KoiosCommitteeMember,
+  type KoiosPool,
+} from '../lib/koios';
+import type {
+  KoiosClient,
+  DrepInfo,
+  Proposal,
+  PoolCalidusKeyRow,
+  PoolStatusRow,
+  CommitteeMember,
+} from '../lib/identity/auth/koios';
+import {
+  resolveDRep,
+  resolveProposer,
+} from '../lib/identity/auth/resolveRole';
+import type { OnChainRole } from '../lib/types';
+
+// ---------------------------------------------------------------------------
+// STRICT KoiosClient — propagates errors instead of swallowing.
+// ---------------------------------------------------------------------------
+//
+// biome-ignore lint/complexity/useLiteralKeys: brackets match codebase env-var convention
+const KOIOS_BASE = process.env['KOIOS_BASE_URL'] ?? 'https://api.koios.rest/api/v1';
+/** Aggressive timeout for the SPO Calidus-by-pool lookup — small POST,
+ *  shouldn't hang the cron pass under brownouts. Matches the verify-path
+ *  adapter's `CALIDUS_TIMEOUT_MS`. */
+const STRICT_CALIDUS_TIMEOUT_MS = 8_000;
+
+//
+// The production `buildKoiosAdapter` (lib/identity/auth/koiosAdapter.ts)
+// catches every Koios failure and returns `null` / `[]` so the LIVE verify
+// path can fail-CLOSED cleanly (a 401 to the caller). For the daily
+// revalidation cron we need the OPPOSITE: errors MUST propagate so the
+// decision logic can distinguish a real "role no longer present" reading
+// from a Koios brownout. If we re-used `buildKoiosAdapter` here, a Koios
+// outage would surface as `drepInfo() → null` indistinguishable from a
+// definitive deregistration, and the cron would mass-revoke every active
+// identity — the exact failure mode the brief calls out as worse than the
+// problem this sweep is closing.
+//
+// So this adapter wraps the SAME underlying koios.ts helpers as the
+// verify-path adapter, but does NOT catch their errors. A `KoiosError`
+// propagates up to `decideForIdentity`'s try/catch where it correctly
+// maps to `upstream-failure` (skip the identity).
+//
+// The cron does NOT use the SPO Calidus-key resolver (the session index
+// stores the pool bech32 id, not the originating Calidus key), so the
+// strict adapter's `poolCalidusKey` is a defensive no-op. SPO revalidation
+// instead goes through `poolStatus` which strictly propagates errors.
+function buildStrictKoiosAdapter(): KoiosClient {
+  function mapDrepInfo(row: KoiosDRepInfo): DrepInfo {
+    return {
+      drep_id: row.drep_id,
+      hex: row.hex,
+      has_script: Boolean(row.has_script),
+      drep_status: row.drep_status ?? '',
+      deposit: row.deposit ?? null,
+      active: Boolean(row.active),
+      expires_epoch_no: row.expires_epoch_no ?? null,
+    };
+  }
+  function mapCommitteeMember(row: KoiosCommitteeMember): CommitteeMember {
+    return {
+      status: row.status,
+      cc_hot_id: row.cc_hot_id,
+      cc_cold_id: row.cc_cold_id,
+      cc_hot_hex: row.cc_hot_hex,
+      cc_cold_hex: row.cc_cold_hex,
+      expiration_epoch: row.expiration_epoch ?? null,
+      cc_hot_has_script: row.cc_hot_has_script,
+      cc_cold_has_script: row.cc_cold_has_script,
+    };
+  }
+  function mapPoolStatus(row: KoiosPool): PoolStatusRow {
+    return {
+      pool_id_bech32: row.pool_id_bech32,
+      pool_status: row.pool_status,
+      retiring_epoch: row.retiring_epoch ?? null,
+    };
+  }
+  return {
+    // PROPAGATES errors. The verify-path adapter would catch + return null
+    // here — we want the throw so brownouts map to upstream-failure.
+    async drepInfo(drepId: string): Promise<DrepInfo | null> {
+      const rows = await fetchDRepInfoBatch([drepId]);
+      const match = rows.find((r) => r.drep_id === drepId);
+      // null is a DEFINITIVE "no row for this drep id" reading — the
+      // batch call succeeded, the response was well-formed, the row is
+      // simply not present. That's the deregistration signature.
+      return match ? mapDrepInfo(match) : null;
+    },
+    async proposalsByReturnAddress(stakeAddress: string): Promise<Proposal[]> {
+      const all = await listProposals();
+      const filtered = all
+        .filter((p) => p.return_address === stakeAddress)
+        .map((row) =>
+          row.proposal_id && row.return_address
+            ? {
+                proposal_id: row.proposal_id,
+                return_address: row.return_address,
+                proposal_type: row.proposal_type,
+              }
+            : null,
+        );
+      return filtered.filter((p): p is Proposal => p !== null);
+    },
+    // Calidus-by-pubkey isn't used by the cron — the SPO branch uses
+    // `poolCalidusKeyByPool` below to look up the CURRENT Calidus key
+    // for a known pool id (M5 fix).
+    async poolCalidusKey(): Promise<null> {
+      return null;
+    },
+    async committeeInfo(): Promise<CommitteeMember[]> {
+      // S4 hardening (2026-06-10 security review) — bypass the 1h
+      // committee cache so a resigned CC member is caught on the next
+      // daily run. A warm Lambda container that served live verify
+      // traffic earlier in the day would otherwise hold a stale
+      // committee roster; for daily-cadence cron use the cache TTL
+      // is effectively dead weight. The legacy verify path keeps
+      // the cache (it's request-latency-sensitive); the cron pays
+      // the extra Koios call willingly.
+      invalidateCommitteeCache();
+      const rows = await getCommitteeMembers();
+      return rows.map(mapCommitteeMember);
+    },
+    // PROPAGATES errors (strict semantics). The verify-path adapter
+    // catches + returns null, making a brownout indistinguishable from a
+    // definitive deregistration; the cron needs the opposite contract so
+    // a thrown `/pool_list` maps cleanly to upstream-failure (skip).
+    // An empty match — the call succeeded and the response was
+    // well-formed, but no row for this pool id is present — IS the
+    // definitive "pool retired or never existed" signal.
+    async poolStatus(poolIdBech32: string): Promise<PoolStatusRow | null> {
+      const rows = await listAllPools();
+      const match = rows.find((r) => r.pool_id_bech32 === poolIdBech32);
+      return match ? mapPoolStatus(match) : null;
+    },
+    // M5 fix (2026-06-10 security review) — STRICT lookup of one
+    // pool's CURRENT registered Calidus key. PROPAGATES errors so the
+    // cron's SPO branch can distinguish "brownout" from "Calidus key
+    // rotated"; the verify-path adapter (`koiosAdapter.poolCalidusKeyByPool`)
+    // swallows errors and returns null.
+    //
+    // Returns the registered row when present, null when the pool has
+    // no registered Calidus key (either never registered, or revoked
+    // and not yet rotated). The decision logic in `decideForIdentity`
+    // SPO branch treats `null` AND `registered!=true` as revoke
+    // triggers (no current key → can't be the original operator), and
+    // a key that DIFFERS from the session's stored key as a revoke
+    // trigger too (rotation = ownership transfer).
+    async poolCalidusKeyByPool(poolIdBech32: string): Promise<PoolCalidusKeyRow | null> {
+      // Direct `/pool_calidus_keys` POST; the legacy koios.ts module
+      // doesn't wrap this endpoint, mirroring the verify-path adapter.
+      const url = `${KOIOS_BASE}/pool_calidus_keys`;
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), STRICT_CALIDUS_TIMEOUT_MS);
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify({ _pool_id_bech32: [poolIdBech32] }),
+          signal: ac.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+      if (!res.ok) {
+        // Strict: surface non-2xx so the decision logic treats it as
+        // upstream-failure (skip), not a definitive "no key" signal.
+        throw new Error(`Koios poolCalidusKeyByPool HTTP ${res.status} ${res.statusText}`);
+      }
+      const parsed = (await res.json()) as unknown;
+      if (!Array.isArray(parsed)) return null;
+      const rows = parsed as Array<{
+        pool_id_bech32?: string;
+        calidus_pub_key?: string;
+        calidus_id_bech32?: string;
+        registered?: boolean;
+        pool_status?: string;
+      }>;
+      // CIP-151 says at most one Calidus key is registered per pool
+      // at a time. Pick the registered row for the requested pool.
+      const match = rows.find(
+        (r) =>
+          typeof r.pool_id_bech32 === 'string' &&
+          r.pool_id_bech32 === poolIdBech32 &&
+          r.registered === true,
+      );
+      if (!match) return null;
+      if (
+        typeof match.pool_id_bech32 !== 'string' ||
+        typeof match.calidus_pub_key !== 'string' ||
+        typeof match.calidus_id_bech32 !== 'string' ||
+        typeof match.registered !== 'boolean' ||
+        typeof match.pool_status !== 'string'
+      ) {
+        return null;
+      }
+      return {
+        pool_id_bech32: match.pool_id_bech32,
+        calidus_pub_key: match.calidus_pub_key,
+        calidus_id_bech32: match.calidus_id_bech32,
+        registered: match.registered,
+        pool_status: match.pool_status,
+      };
+    },
+  };
+}
+
+export interface RevalidateOnChainRolesResult {
+  /** Active session-index rows enumerated this pass. */
+  identitiesScanned: number;
+  /** Identities the cron actually attempted a role re-check on. Equal to
+   *  `identitiesScanned` minus any rows skipped because their session-
+   *  index record predates Sprint 3 (no `onChainRole` field) — those
+   *  records are not actionable without the role context, so they're
+   *  counted under `identitiesSkippedNoRole` and not re-checked. */
+  identitiesChecked: number;
+  /** Pre-Sprint-3 records with no `onChainRole` field. Skipped — see
+   *  the long comment in `sessionRevocation.ts` `recordSessionForUser`.
+   *  These naturally age out as their `expiresAt` (≤30 days) passes. */
+  identitiesSkippedNoRole: number;
+  /** Identities whose Koios reading was inconclusive (lookup threw, the
+   *  adapter caught and returned null on an internal error, etc.).
+   *  SKIPPED — their sessions are NOT touched. */
+  identitiesUpstreamFailures: number;
+  /** Identities whose role STILL HOLDS on-chain. No action — their
+   *  sessions stay valid. */
+  identitiesStillValid: number;
+  /** Identities the cron definitively determined no longer hold their
+   *  granted role. `revokeAllSessionsForUser` was called on each. */
+  identitiesRevoked: number;
+  /** Sum of per-jti tombstones the cron wrote across all revoked
+   *  identities this pass. */
+  sessionsRevoked: number;
+  /** Per-identity revoke failures (a `revokeAllSessionsForUser` that
+   *  threw). Logged + counted. */
+  revokeErrors: number;
+}
+
+function emptyResult(): RevalidateOnChainRolesResult {
+  return {
+    identitiesScanned: 0,
+    identitiesChecked: 0,
+    identitiesSkippedNoRole: 0,
+    identitiesUpstreamFailures: 0,
+    identitiesStillValid: 0,
+    identitiesRevoked: 0,
+    sessionsRevoked: 0,
+    revokeErrors: 0,
+  };
+}
+
+/**
+ * Decision result for one identity. Pure data — `runRevalidateOnChainRoles`
+ * wires it to the revocation side-effects.
+ */
+type IdentityDecision =
+  | { action: 'skip-no-role' }
+  | { action: 'upstream-failure'; reason: string }
+  | { action: 'still-valid' }
+  | { action: 'revoke'; reason: string };
+
+/**
+ * Decide what to do with one identity's sessions, given a freshly-built
+ * `koios` adapter. Pure async function — no DDB writes happen in here.
+ * Exported for unit-testing the decision logic without going through the
+ * session-index Scan.
+ *
+ * # Decision table
+ *
+ *   - no `onChainRole` on the record → skip-no-role (legacy)
+ *   - any throw / unexpected error during role lookup → upstream-failure
+ *   - role-specific `is{Role}` is true → still-valid
+ *   - role-specific `is{Role}` is false AND no throw → revoke
+ *
+ * `resolveRole.ts`'s functions throw upstream errors directly when the
+ * supplied `KoiosClient` throws (the adapter swallows + returns null/[]
+ * for most failures, but we wrap the call in try/catch here as defense
+ * in depth — a custom test fake that throws still triggers the
+ * fail-safe path).
+ */
+export async function decideForIdentity(
+  index: ActiveSessionIndex,
+  koios: KoiosClient,
+): Promise<IdentityDecision> {
+  if (!index.onChainRole) {
+    return { action: 'skip-no-role' };
+  }
+  const role: OnChainRole = index.onChainRole;
+  try {
+    switch (role) {
+      case 'drep': {
+        const r = await resolveDRep(koios, index.walletAddress);
+        return r.isDrep
+          ? { action: 'still-valid' }
+          : {
+              action: 'revoke',
+              reason: `drep no longer registered (${r.reason ?? 'inactive'})`,
+            };
+      }
+      case 'spo': {
+        // SPO revalidation (Sprint 3 follow-up — closes the previously-
+        // no-op gap; M5 fix 2026-06-10 closes the Calidus-rotation gap).
+        //
+        // The session index stores the SPO's bech32 `pool1...` id AND
+        // (post-M5) the Calidus pubkey verified at login. The cron now
+        // checks BOTH:
+        //
+        //   - Pool lifecycle (`poolStatus(poolId)`): null/retired →
+        //     revoke. This is the Sprint-3 check; it still runs first
+        //     because a retired pool's session shouldn't survive even
+        //     if the Calidus check would have agreed.
+        //   - Calidus key currency (`poolCalidusKeyByPool(poolId)`):
+        //     for sessions that stored a `spoCalidusPubKeyHex` (every
+        //     post-M5 SPO login), the cron compares the pool's CURRENT
+        //     registered Calidus pubkey against the stored one. A
+        //     mismatch means the original operator's Calidus key was
+        //     rotated — pool ownership transfer is the canonical reason
+        //     — so the session must be revoked.
+        //
+        // Decision table (M5 final):
+        //
+        //   - `poolStatus()` THREW → upstream-failure (skip).
+        //   - `poolStatus()` returned `null` → revoke (pool retired or
+        //     absent).
+        //   - `poolStatus()` returned `pool_status='retired'` → revoke.
+        //   - Pool is still registered, and there's NO stored
+        //     `spoCalidusPubKeyHex` (pre-M5 row) → still-valid. The
+        //     row will age out via the 30-day JWT TTL; we can't
+        //     retroactively rotate-check sessions that didn't capture
+        //     the originating key.
+        //   - Pool is still registered, stored Calidus key present:
+        //       * `poolCalidusKeyByPool()` THREW → upstream-failure
+        //         (skip). Never revoke an SPO on a Koios brownout.
+        //       * Returned `null` OR `registered != true` → revoke
+        //         (no current key — the pool dropped its Calidus
+        //         registration; the old session can no longer
+        //         legitimately represent the operator).
+        //       * Returned a row whose `calidus_pub_key` matches the
+        //         stored one (case-insensitive) → still-valid.
+        //       * Returned a row whose `calidus_pub_key` DIFFERS from
+        //         the stored one → revoke (rotation/ownership transfer).
+        const r = await koios.poolStatus(index.walletAddress);
+        if (r === null) {
+          return {
+            action: 'revoke',
+            reason: 'pool absent from pool_list (retired or never registered)',
+          };
+        }
+        if (r.pool_status === 'retired') {
+          return {
+            action: 'revoke',
+            reason: `pool_status='retired'`,
+          };
+        }
+        // M5 — Calidus key rotation check. Only meaningful when the
+        // session row captured the originating Calidus pubkey
+        // (post-M5 logins). Pre-M5 rows have no stored key and we
+        // can't retroactively detect rotation — those sessions
+        // continue under the pool-lifecycle-only check and age out
+        // via the 30-day JWT TTL.
+        const storedCalidus = index.spoCalidusPubKeyHex;
+        if (!storedCalidus) {
+          return { action: 'still-valid' };
+        }
+        const current = await koios.poolCalidusKeyByPool(index.walletAddress);
+        if (current === null || current.registered !== true) {
+          return {
+            action: 'revoke',
+            reason:
+              'no current registered Calidus key for pool (revoked, never registered, or pool dropped registration)',
+          };
+        }
+        if (current.calidus_pub_key.toLowerCase() !== storedCalidus.toLowerCase()) {
+          return {
+            action: 'revoke',
+            reason: 'Calidus key rotated (pool ownership transfer)',
+          };
+        }
+        return { action: 'still-valid' };
+      }
+      case 'cc': {
+        // The CC role check uses `committeeInfo()` (cached, batched —
+        // one call returns the whole roster). The identity's
+        // `walletAddress` field stores the cold credential ID (or
+        // hot, falling back per `resolveCc`'s contract); both are
+        // checked.
+        //
+        // We re-resolve by walking the roster directly — `resolveCc`
+        // expects a hot KEY HASH (28-byte blake2b), which we don't
+        // store on the session index. So we open-code the
+        // "identity still in the authorized member set" check
+        // here against the same `committeeInfo()` payload that
+        // `resolveCc` would consult.
+        const members = await koios.committeeInfo();
+        if (!Array.isArray(members)) {
+          // Adapter contract is to return `[]` on error; defensive.
+          return { action: 'upstream-failure', reason: 'committeeInfo returned non-array' };
+        }
+        const matched = members.find(
+          (m) =>
+            m.status === 'authorized' &&
+            m.cc_hot_has_script === false &&
+            (m.cc_cold_id === index.walletAddress || m.cc_hot_id === index.walletAddress),
+        );
+        if (matched) {
+          return { action: 'still-valid' };
+        }
+        // If we got an empty committee back, that's *probably* a
+        // legitimate end-state (no CC) but also a common Koios
+        // brownout failure mode. Treat the empty list as
+        // upstream-failure (skip) rather than risk wiping every CC
+        // session on a transient brownout.
+        if (members.length === 0) {
+          return {
+            action: 'upstream-failure',
+            reason: 'committeeInfo returned empty array (inconclusive — skip rather than mass-revoke)',
+          };
+        }
+        return {
+          action: 'revoke',
+          reason: 'CC identity not in current authorized member set',
+        };
+      }
+      case 'proposer': {
+        const r = await resolveProposer(koios, index.walletAddress);
+        return r.isProposer
+          ? { action: 'still-valid' }
+          : { action: 'revoke', reason: 'no submitted proposals with this return_address' };
+      }
+    }
+  } catch (err) {
+    return {
+      action: 'upstream-failure',
+      reason: `role-lookup threw: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+/**
+ * Run one revalidation pass against the live `koiosAdapter` + DDB.
+ *
+ * Steps:
+ *   1. Enumerate every active session-index row (filtered by
+ *      `kind='session_index'`).
+ *   2. For each row, `decideForIdentity` against the Koios adapter.
+ *   3. If `revoke`, call `revokeAllSessionsForUser(walletAddress)`.
+ *   4. Otherwise (`still-valid` / `skip-no-role` / `upstream-failure`),
+ *      sessions are NOT touched.
+ *   5. Best-effort structured log at end of pass.
+ */
+export async function runRevalidateOnChainRoles(
+  koios: KoiosClient = buildStrictKoiosAdapter(),
+  enumerator: () => Promise<ActiveSessionIndex[]> = listActiveSessionIndices,
+  revoke: (walletAddress: string) => Promise<number> = revokeAllSessionsForUser,
+): Promise<RevalidateOnChainRolesResult> {
+  const result = emptyResult();
+
+  let indices: ActiveSessionIndex[];
+  try {
+    indices = await enumerator();
+  } catch (err) {
+    // Hard failure on the enumeration. Log + exit empty; the cron's
+    // CloudWatch error alarm picks up the Lambda error metric. This
+    // is the safer fail-mode — never revoke on a partial enumeration
+    // (which would be a half-pass with unknown semantics).
+    console.error(
+      'revalidate-onchain-roles: session-index Scan failed; aborting pass:',
+      err instanceof Error ? err.message : err,
+    );
+    return result;
+  }
+  result.identitiesScanned = indices.length;
+
+  if (indices.length === 0) {
+    console.log(
+      'revalidate-onchain-roles: no active on-chain identities to revalidate',
+    );
+    return result;
+  }
+
+  for (const idx of indices) {
+    const decision = await decideForIdentity(idx, koios);
+    switch (decision.action) {
+      case 'skip-no-role':
+        result.identitiesSkippedNoRole += 1;
+        console.warn(
+          `revalidate-onchain-roles: skipping ${idx.walletAddress} — pre-Sprint-3 record (no onChainRole field); will age out by expiresAt=${idx.expiresAt}`,
+        );
+        continue;
+      case 'upstream-failure':
+        result.identitiesChecked += 1;
+        result.identitiesUpstreamFailures += 1;
+        console.warn(
+          `revalidate-onchain-roles: skipping ${idx.walletAddress} (role=${idx.onChainRole ?? '?'}) — ${decision.reason}`,
+        );
+        continue;
+      case 'still-valid':
+        result.identitiesChecked += 1;
+        result.identitiesStillValid += 1;
+        continue;
+      case 'revoke': {
+        result.identitiesChecked += 1;
+        try {
+          const written = await revoke(idx.walletAddress);
+          result.identitiesRevoked += 1;
+          result.sessionsRevoked += written;
+          console.log(
+            `revalidate-onchain-roles: revoked ${written} session(s) for ${idx.walletAddress} (role=${idx.onChainRole ?? '?'}) — ${decision.reason}`,
+          );
+        } catch (err) {
+          result.revokeErrors += 1;
+          console.error(
+            `revalidate-onchain-roles: revokeAllSessionsForUser failed for ${idx.walletAddress}:`,
+            err instanceof Error ? err.message : err,
+          );
+        }
+        continue;
+      }
+    }
+  }
+
+  console.log(
+    `revalidate-onchain-roles: pass complete — ` +
+      `scanned=${result.identitiesScanned} checked=${result.identitiesChecked} ` +
+      `stillValid=${result.identitiesStillValid} revoked=${result.identitiesRevoked} ` +
+      `sessionsRevoked=${result.sessionsRevoked} ` +
+      `upstreamFailures=${result.identitiesUpstreamFailures} ` +
+      `skippedNoRole=${result.identitiesSkippedNoRole} ` +
+      `revokeErrors=${result.revokeErrors}`,
+  );
+  return result;
+}
+
+/**
+ * EventBridge scheduled handler. Cadence: every 24 hours (02:30 UTC).
+ *
+ * Wraps `runRevalidateOnChainRoles` with a top-level try/catch so a
+ * hard failure produces an empty-result return rather than an unhandled
+ * promise rejection (the latter would still surface as a Lambda error
+ * via the existing CloudWatch alarm, but the structured result keeps
+ * the downstream API stable).
+ */
+export const handler = async (
+  _event: ScheduledEvent,
+  _context: Context,
+): Promise<RevalidateOnChainRolesResult> => {
+  try {
+    return await runRevalidateOnChainRoles();
+  } catch (err) {
+    console.error(
+      'revalidate-onchain-roles: hard failure at top level:',
+      err instanceof Error ? err.message : err,
+    );
+    return emptyResult();
+  }
+};

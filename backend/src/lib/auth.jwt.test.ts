@@ -139,6 +139,34 @@ describe('issueJWT / verifyJWT — registeredDrepId rename', () => {
   });
 });
 
+describe('issueJWT / verifyJWT — Decision #3 personId claim', () => {
+  it('round-trips personId through issue → verify', async () => {
+    const PERSON = '01HZZZ_test_person';
+    const { token } = await issueJWT(WALLET, ['guest'], 'normal', undefined, 0, {
+      onChainRoles: ['drep'],
+      personId: PERSON,
+    });
+    const verified = await verifyJWT(token);
+    expect(verified.personId).toBe(PERSON);
+    expect(verified.onChainRoles).toEqual(['drep']);
+  });
+
+  it('omits personId from the wire when none was supplied (legacy compat)', async () => {
+    const { token } = await issueJWT(WALLET, ['delegator'], 'normal');
+    const [, payloadB64] = token.split('.');
+    expect(payloadB64).toBeDefined();
+    const payloadJson = Buffer.from(payloadB64!, 'base64url').toString('utf8');
+    const parsed = JSON.parse(payloadJson) as Record<string, unknown>;
+    expect(parsed['personId']).toBeUndefined();
+  });
+
+  it('reads back undefined when the token omits personId', async () => {
+    const { token } = await issueJWT(WALLET, ['delegator'], 'normal');
+    const verified = await verifyJWT(token);
+    expect(verified.personId).toBeUndefined();
+  });
+});
+
 describe('buildSignMessage — stage binding', () => {
   it('embeds the stage so a challenge signed on one stage cannot verify on another', () => {
     const prev = process.env['STAGE'];

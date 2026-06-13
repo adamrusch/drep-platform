@@ -1,7 +1,26 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { queryItems, tableNames } from '../../lib/dynamodb';
-import type { ClubhousePostItem } from '../../lib/types';
+import type { ClubhousePostItem, UserRole } from '../../lib/types';
 import { ok, badRequest, internalError } from '../_response';
+
+/** Defensive read of optional authorizer context (Sprint 4) — same
+ *  pattern as `handlers/comments/list.ts`. The clubhouse list is
+ *  registered as a PUBLIC route; admins reach it via an authenticated
+ *  cookie which the API Gateway authorizer stamps onto the event
+ *  context when present. Anonymous reads see the default hide filter. */
+function isPlatformAdmin(event: APIGatewayProxyEventV2): boolean {
+  const rc = event.requestContext as unknown as {
+    authorizer?: { lambda?: { roles?: string } };
+  };
+  const rawRoles = rc.authorizer?.lambda?.roles;
+  if (!rawRoles) return false;
+  try {
+    const parsed = JSON.parse(rawRoles) as UserRole[];
+    return Array.isArray(parsed) && parsed.includes('platform_admin');
+  } catch {
+    return false;
+  }
+}
 
 /**
  * GET /clubhouse/{drepId}
@@ -95,6 +114,14 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
       // Denormalized counters (P0-3 migration)
       'commentCount',
       'lastReplyAt',
+      // Sprint 4 — community-flag denormalised counters. `flagCount`
+      // surfaces the per-row flag headcount and `hidden` is the
+      // threshold-reached marker. Projecting both means the post-Query
+      // filter step below can decide visibility without an extra
+      // round-trip; `platform_admin` callers also need them surfaced
+      // verbatim on the wire for the moderation UI's "FLAGGED" badge.
+      'flagCount',
+      'hidden',
     ];
     // `body` collides with the AWS-SDK reserved-word "Body" via case-
     // folded matching in some bundler setups; using ExpressionAttributeNames
@@ -121,8 +148,19 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
         : {}),
     });
 
+    // Sprint 4 — community-flag hide filter. `hidden === true` rows
+    // are EXCLUDED for normal users and INCLUDED (with the marker
+    // intact) for `platform_admin`s so the moderation UI can render a
+    // distinct "FLAGGED — HIDDEN" treatment. The filter runs post-
+    // Query for the same lastKey-pagination simplicity rationale
+    // documented in `handlers/comments/list.ts`.
+    const isAdmin = isPlatformAdmin(event);
+    const visibleItems = isAdmin
+      ? result.items
+      : result.items.filter((p) => p.hidden !== true);
+
     return ok({
-      items: result.items,
+      items: visibleItems,
       lastEvaluatedKey: result.lastEvaluatedKey
         ? Buffer.from(JSON.stringify(result.lastEvaluatedKey)).toString('base64')
         : undefined,

@@ -22,10 +22,20 @@ export class DatabaseStack extends cdk.Stack {
   public readonly ccMembersTable: dynamodb.Table;
   public readonly auditLogTable: dynamodb.Table;
   public readonly authNoncesTable: dynamodb.Table;
+  // ---- Decision #1 (2026-06-10): dedicated per-session revocation store ----
+  public readonly identitySessionsTable: dynamodb.Table;
+  // ---- Decision #3 (2026-06-10): canonical person + identity-link model ----
+  public readonly onchainUsersTable: dynamodb.Table;
+  public readonly identityLinksTable: dynamodb.Table;
   // ---- Phase 2: committee voting ----
   public readonly committeeVotesTable: dynamodb.Table;
   public readonly committeeMembershipTable: dynamodb.Table;
   public readonly platformStateTable: dynamodb.Table;
+  // ---- Sprint 4: community flagging primitive ----
+  public readonly commentFlagsTable: dynamodb.Table;
+  public readonly clubhousePostFlagsTable: dynamodb.Table;
+  // ---- Sprint 4 follow-up: clubhouse-comment flagging (closes Sprint 4 gap) ----
+  public readonly clubhouseCommentFlagsTable: dynamodb.Table;
 
   private readonly tablePrefix: string;
 
@@ -581,6 +591,212 @@ export class DatabaseStack extends cdk.Stack {
       removalPolicy: isPersistent(props.stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
+    // ---- identity_sessions (Decision #1, 2026-06-10) ----
+    //
+    // Per-session revocation store for the on-chain login JWTs (DRep /
+    // SPO / CC / Proposer). Sprint 1 reused `authNonces` with a `kind`
+    // discriminator to defer infra changes; Decision #1 splits sessions
+    // off into a purpose-built table for two correctness wins and one
+    // perf win.
+    //
+    // **Why a dedicated table:**
+    //   1. A per-identity GSI makes `revokeAllSessionsForUser` and the
+    //      daily role-revalidation cron's enumeration into single-
+    //      partition Queries — no more filtered Scan of a shared
+    //      multi-purpose table.
+    //   2. One row per session (instead of separate tombstone +
+    //      session-index rows kept in sync via best-effort writes)
+    //      removes a race where a concurrent login could lose a hash
+    //      and leave a session out of the revoke-all set.
+    //   3. Decouples session-store cost from the high-churn
+    //      auth-nonces traffic (challenges/mutations get burned within
+    //      minutes) so a future migration of either subsystem moves
+    //      independently.
+    //
+    // **Shape:** see `lib/sessionRevocation.ts` for the full row spec.
+    //   PK = `sessionKey` (STRING) = SHA-256(jti) hex.
+    //   Attributes: `identityId`, `onChainRoles[]`, `issuedAt`,
+    //               `expiresAt`, `revoked?`.
+    //   TTL: `expiresAt` (NUMBER, epoch seconds).
+    //   GSI: `identityId-issuedAt-index`
+    //        PK=`identityId`, SK=`issuedAt`, projection ALL so the cron
+    //        + revoke-all path can read the full row in one Query
+    //        without a second GetItem per session.
+    //
+    // **Capacity:** modest. At steady state, one row per active on-chain
+    // session, expiring at the 30-day JWT max. Even a hypothetical
+    // 10k-DAU surface stays under ~300k rows total. PAY_PER_REQUEST keeps
+    // ops simple; the GSI is single-identity-partition so PPR's
+    // adaptive-capacity behaviour is well-suited.
+    //
+    // **PITR ON / RETAIN on persistent stages** — session rows aren't
+    // long-lived BUT a botched migration / accidental table truncation
+    // would lock out every active on-chain session until a fresh login,
+    // which we'd rather avoid. Consistent with the sibling auth tables.
+    //
+    // **Deploy order:** create the table FIRST (CDK DatabaseStack
+    // deploy), THEN ship the backend code that reads from it. The
+    // backend's `tableNames.identitySessions` is a string that resolves
+    // at module-load — if the table doesn't yet exist, the first
+    // authorizer / verify-handler invocation will get a
+    // ResourceNotFoundException. The `isSessionRevoked` fail-OPEN
+    // contract means the worst case during the brief deploy window is
+    // "per-session revocation is a no-op" (legacy `tokenVersion` is
+    // still authoritative); but the cleanest path is "database stack
+    // ACTIVE → api/scheduler stacks deploy".
+    this.identitySessionsTable = new dynamodb.Table(this, 'IdentitySessionsTable', {
+      tableName: `${this.tablePrefix}identity_sessions`,
+      partitionKey: { name: 'sessionKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      timeToLiveAttribute: 'expiresAt',
+      removalPolicy: isPersistent(props.stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
+    // Per-identity GSI — single-partition Query target for
+    // `revokeAllSessionsForUser` (logout `{"all":true}`) AND the daily
+    // role-revalidation cron's identity enumeration. SK `issuedAt`
+    // (epoch seconds) keeps the per-identity row set sortable so a
+    // future "show me my recent sessions" surface gets it for free
+    // without another GSI.
+    this.identitySessionsTable.addGlobalSecondaryIndex({
+      indexName: 'identityId-issuedAt-index',
+      partitionKey: { name: 'identityId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'issuedAt', type: dynamodb.AttributeType.NUMBER },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    // ---- onchain_users (Decision #3, 2026-06-10) ----
+    //
+    // The canonical "person" table for the on-chain identity subsystem.
+    // One row per recognised individual, keyed by an opaque `personId`
+    // (ULID). Holds the editable profile (displayName, bio, links) plus
+    // bookkeeping (createdAt / updatedAt). The on-chain credentials
+    // (drep:<drepId>, pool:<poolId>, cc:<ccCred>, stake:<stakeAddr>)
+    // that map to this person live in the sibling `identity_links`
+    // table — Decision #3's "one individual is recognised whether they
+    // log in via wallet (stake) or raw-key (SPO/CC) on-chain."
+    //
+    // **Why a separate table from the legacy `users` table:**
+    //   - The legacy `users` table is keyed by `walletAddress` (stake
+    //     address). On-chain-only identities (e.g. an SPO that signs
+    //     with a raw Calidus key and has never connected a CIP-30
+    //     wallet) have NO row there. The on-chain login flow today
+    //     identifies a caller by the credential (drepId / poolId /
+    //     ccCred / stake) without touching `users` at all — see the
+    //     onchainVerify handler docblock and `lib/auth.ts`. To recognise
+    //     "this is the same person across multiple on-chain credentials"
+    //     we need a separate canonical-person layer.
+    //   - The legacy `users` row carries platform-role bookkeeping
+    //     (`tokenVersion`, legacy `roles[]`) that's bound to the CIP-30
+    //     wallet session. Folding the on-chain person there would
+    //     collide on the PK (stake address) for the wallet-stake case
+    //     and break every existing read site. Decision #3 explicitly
+    //     scopes the new model to a NEW table so the legacy CIP-30
+    //     surface is unchanged.
+    //
+    // **Shape:**
+    //   PK = `personId` (STRING) — ULID, opaque, never reused.
+    //   Attributes:
+    //     `displayName?`  — short string, optional.
+    //     `bio?`          — longer string, optional.
+    //     `socialLinks?`  — embedded {twitter?, github?, website?, discord?}.
+    //     `createdAt`     — ISO-8601.
+    //     `updatedAt`     — ISO-8601.
+    //   No SK, no GSIs — every access pattern is `GetItem(personId)` or
+    //   `PutItem(personId)`. Listing every recognised person would be a
+    //   future Scan but isn't called for by Decision #3.
+    //
+    // **Capacity:** modest. One row per recognised individual; on-chain
+    // login flow auto-provisions on first login for an unmapped
+    // credential. Mainnet today: a few hundred to low-thousands of
+    // unique on-chain identities.
+    //
+    // PITR ON + RETAIN on persistent stages — these rows are user-
+    // editable profile content; an accidental table truncation should
+    // be recoverable.
+    //
+    // **Deploy order:** create the table FIRST (CDK DatabaseStack
+    // deploy), THEN ship the backend code that reads from it. The new
+    // login reconciliation code in onchainVerify will not be deployed
+    // until the API stack rolls — the same brief window as the
+    // identity_sessions table.
+    this.onchainUsersTable = new dynamodb.Table(this, 'OnchainUsersTable', {
+      tableName: `${this.tablePrefix}onchain_users`,
+      partitionKey: { name: 'personId', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: isPersistent(props.stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
+    // ---- identity_links (Decision #3, 2026-06-10) ----
+    //
+    // Maps each on-chain credential to a canonical `personId` in the
+    // sibling `onchain_users` table. This is the "one person, many
+    // credentials" join — the reconciliation layer Decision #3 exists
+    // to build.
+    //
+    // **Shape:**
+    //   PK = `identityKey` (STRING) — namespaced credential string:
+    //     `drep:<drepId>` | `pool:<poolId>` | `cc:<ccCred>` |
+    //     `stake:<stakeAddr>`. The namespace prefix is load-bearing —
+    //     it prevents collision between a DRep id and a CC cold id that
+    //     happen to share a bech32 prefix style, and makes the credential
+    //     type self-describing on read.
+    //   Attributes:
+    //     `personId`         — ULID FK into `onchain_users`.
+    //     `credentialType`   — 'drep' | 'pool' | 'cc' | 'stake'.
+    //                          Denormalised from the PK prefix for cheap
+    //                          read-side filtering.
+    //     `verifiedAt`       — ISO-8601 timestamp the link was minted.
+    //                          On a fresh login that auto-provisioned a
+    //                          new person + link this is the login time;
+    //                          on an explicit `link/verify` call it's
+    //                          the moment the new credential signed the
+    //                          stage-bound nonce.
+    //     `verifiedVia`      — 'login' | 'link'. Audit breadcrumb: did
+    //                          this link come from the login auto-
+    //                          provision path, or from an explicit
+    //                          `/auth/onchain/link/verify` call?
+    //
+    // **GSI `personId-verifiedAt-index`:**
+    //   PK = `personId`, SK = `verifiedAt` (STRING — ISO-8601 sorts
+    //   lexicographically as chronological). Projection ALL so the
+    //   `/auth/onchain/me` aggregation handler can resolve the full
+    //   credential set for a person in one Query without a follow-up
+    //   batchGet. Sortable by `verifiedAt` so a UI can show "this
+    //   credential was added on …".
+    //
+    // **Capacity:** ~1-5 credentials per person typical. Mainnet today
+    // sits in the low-thousands of links total even with full adoption.
+    // PAY_PER_REQUEST handles the burst on a busy login hour comfortably;
+    // the GSI is single-personId-partition so PPR's adaptive-capacity
+    // behaviour is well-suited.
+    //
+    // **Safety contract (critical, Decision #3):** the link/verify flow
+    // does NOT silently merge two persons. If a credential is presented
+    // for linking but is already mapped to a DIFFERENT personId than
+    // the caller's session person, the link is REJECTED with a clear
+    // "credential already linked to another account" error. Account-
+    // merge is a future product decision; do not infer it from a
+    // signature. See `handlers/auth/linkVerify.ts` for the gate.
+    //
+    // PITR ON + RETAIN on persistent stages — links are evidence of
+    // verified cryptographic proofs and would be expensive to rebuild.
+    this.identityLinksTable = new dynamodb.Table(this, 'IdentityLinksTable', {
+      tableName: `${this.tablePrefix}identity_links`,
+      partitionKey: { name: 'identityKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: isPersistent(props.stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+    this.identityLinksTable.addGlobalSecondaryIndex({
+      indexName: 'personId-verifiedAt-index',
+      partitionKey: { name: 'personId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'verifiedAt', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
     // ---- committee_votes (Phase 2) ----
     // One partition per (committee, governance action): PK=`${drepId}#${actionId}`.
     // Co-locates the single proposal, every member's latest cast, the rationale
@@ -655,6 +871,121 @@ export class DatabaseStack extends cdk.Stack {
       removalPolicy: isPersistent(props.stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
+    // ---- comment_flags (Sprint 4) ----
+    // Community-flagging primitive for governance-action comments.
+    //
+    // **Threat model:** an on-chain-verified writer (a wallet that has
+    // proven `drep` / `spo` / `cc` / `proposer` via the Sprint 1
+    // `/auth/onchain/verify` flow) raises a flag against a comment.
+    // Three DISTINCT such flags hide the comment from normal users.
+    // `platform_admin`s still see the row (with a `hidden: true`
+    // marker) so they can moderate. The per-flagger uniqueness
+    // prevents one wallet from racking up the count alone.
+    //
+    // **Shape:**
+    //   PK = `commentId`  — same ULID used as the SK on the comments
+    //     table; co-locates every flag for one comment under one
+    //     partition, so a future audit/moderation surface can
+    //     `Query(commentId)` to enumerate the flaggers in one round-trip.
+    //   SK = `flaggerId`  — the flagger's bech32 stake address.
+    //
+    // **Counter integrity:** the matching `flagCount` counter on the
+    // parent `comments` row is mutated via a denormalised atomic ADD
+    // gated by `putItemIfAbsent` on this table — see
+    // `handlers/comments/flag.ts`. Only a FRESH insert (outcome
+    // `'written'`) bumps the counter. A duplicate flag (outcome
+    // `'skipped'`) leaves the counter alone, so the count tracks
+    // distinct-flagger headcount even under retries.
+    //
+    // **Capacity:** modest. ~50 flags per high-traffic comment × small
+    // number of high-traffic comments = pennies. PAY_PER_REQUEST. PITR
+    // ON because flag rows are evidence — accidental table truncation
+    // should be recoverable.
+    //
+    // No GSIs at launch — every access pattern is `GetItem(commentId,
+    // flaggerId)` (idempotent insert) or `Query(commentId)` (audit).
+    // A future "wallets that have flagged the most content" leaderboard
+    // would need a GSI on `flaggerId`; that's out-of-scope for Sprint 4.
+    this.commentFlagsTable = new dynamodb.Table(this, 'CommentFlagsTable', {
+      tableName: `${this.tablePrefix}comment_flags`,
+      partitionKey: { name: 'commentId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'flaggerId', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: isPersistent(props.stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
+    // ---- clubhouse_post_flags (Sprint 4) ----
+    // Same primitive as `comment_flags`, but scoped to clubhouse posts.
+    //
+    // **PK shape (`postKey`):** intentionally MATCHES the partition-key
+    // format already used by the `clubhouse_comments` table —
+    // `${drepId}#${postId}`. The helper `clubhouseCommentPostKey` in
+    // `lib/types.ts` is reused for compose; see `handlers/clubhouse/
+    // flagPost.ts`. Reusing the format means a future moderation UI
+    // can correlate flags on a post with flags on its threaded
+    // comments without learning a second key shape.
+    //
+    // SK = `flaggerId` — bech32 stake address of the flagging wallet,
+    // identical to the comment-flags semantics.
+    //
+    // **Counter integrity:** `clubhouse_posts.flagCount` atomic-ADDed
+    // only when the per-flagger row is freshly inserted; conditional
+    // `hidden` set when the count crosses the threshold. See
+    // `handlers/clubhouse/flagPost.ts`.
+    //
+    // **Capacity / PITR:** same rationale as `comment_flags` above.
+    this.clubhousePostFlagsTable = new dynamodb.Table(this, 'ClubhousePostFlagsTable', {
+      tableName: `${this.tablePrefix}clubhouse_post_flags`,
+      partitionKey: { name: 'postKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'flaggerId', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: isPersistent(props.stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
+    // ---- clubhouse_comment_flags (Sprint 4 follow-up) ----
+    // Same primitive as `comment_flags` / `clubhouse_post_flags`, but
+    // scoped to clubhouse COMMENTS. Sprint 4 added flagging for
+    // governance-action comments + clubhouse posts; clubhouse-comments
+    // were the missing leg of the trio. This table closes that gap.
+    //
+    // **PK shape (`postKey`):** intentionally MATCHES the partition-key
+    // format already used by both the `clubhouse_comments` table AND
+    // the `clubhouse_post_flags` table — `${drepId}#${postId}`. A
+    // single comment is then keyed within that partition by `commentId`
+    // composed into the SK. We reuse the helper
+    // `clubhouseCommentPostKey(drepId, postId)` in `lib/types.ts`.
+    //
+    // **SK shape (`commentFlagKey`):** `${commentId}#${flaggerId}` —
+    // the smallest tuple that keeps the (comment, flagger) tuple
+    // unique while still letting a single `Query(postKey)` enumerate
+    // every flag for every comment under one post (useful for a
+    // future moderation surface). Doing PK=commentId would also be
+    // valid but would scatter flags across as many partitions as the
+    // post has flagged comments, fragmenting the access pattern
+    // future moderation UIs are likely to want.
+    //
+    // **Counter integrity:** the matching `flagCount` counter on the
+    // parent `clubhouse_comments` row is mutated via a denormalised
+    // atomic ADD gated by `putItemIfAbsent` on this table — see
+    // `handlers/clubhouse/flagComment.ts`. Only a FRESH insert
+    // (outcome `'written'`) bumps the counter. A duplicate flag
+    // (outcome `'skipped'`) leaves the counter alone, so the count
+    // tracks distinct-flagger headcount even under retries.
+    //
+    // **Capacity / PITR:** same rationale as the two sibling flag
+    // tables above. Modest volume; PITR ON because flag rows are
+    // evidence — accidental table truncation should be recoverable.
+    this.clubhouseCommentFlagsTable = new dynamodb.Table(this, 'ClubhouseCommentFlagsTable', {
+      tableName: `${this.tablePrefix}clubhouse_comment_flags`,
+      partitionKey: { name: 'postKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'commentFlagKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: isPersistent(props.stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
     // ---- Outputs ----
     new cdk.CfnOutput(this, 'UsersTableName', { value: this.usersTable.tableName, exportName: `${props.stage}-UsersTableName` });
     new cdk.CfnOutput(this, 'DRepCommitteesTableName', { value: this.drepCommitteesTable.tableName, exportName: `${props.stage}-DRepCommitteesTableName` });
@@ -670,8 +1001,14 @@ export class DatabaseStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'CCMembersTableName', { value: this.ccMembersTable.tableName, exportName: `${props.stage}-CCMembersTableName` });
     new cdk.CfnOutput(this, 'AuditLogTableName', { value: this.auditLogTable.tableName, exportName: `${props.stage}-AuditLogTableName` });
     new cdk.CfnOutput(this, 'AuthNoncesTableName', { value: this.authNoncesTable.tableName, exportName: `${props.stage}-AuthNoncesTableName` });
+    new cdk.CfnOutput(this, 'IdentitySessionsTableName', { value: this.identitySessionsTable.tableName, exportName: `${props.stage}-IdentitySessionsTableName` });
+    new cdk.CfnOutput(this, 'OnchainUsersTableName', { value: this.onchainUsersTable.tableName, exportName: `${props.stage}-OnchainUsersTableName` });
+    new cdk.CfnOutput(this, 'IdentityLinksTableName', { value: this.identityLinksTable.tableName, exportName: `${props.stage}-IdentityLinksTableName` });
     new cdk.CfnOutput(this, 'CommitteeVotesTableName', { value: this.committeeVotesTable.tableName, exportName: `${props.stage}-CommitteeVotesTableName` });
     new cdk.CfnOutput(this, 'CommitteeMembershipTableName', { value: this.committeeMembershipTable.tableName, exportName: `${props.stage}-CommitteeMembershipTableName` });
     new cdk.CfnOutput(this, 'PlatformStateTableName', { value: this.platformStateTable.tableName, exportName: `${props.stage}-PlatformStateTableName` });
+    new cdk.CfnOutput(this, 'CommentFlagsTableName', { value: this.commentFlagsTable.tableName, exportName: `${props.stage}-CommentFlagsTableName` });
+    new cdk.CfnOutput(this, 'ClubhousePostFlagsTableName', { value: this.clubhousePostFlagsTable.tableName, exportName: `${props.stage}-ClubhousePostFlagsTableName` });
+    new cdk.CfnOutput(this, 'ClubhouseCommentFlagsTableName', { value: this.clubhouseCommentFlagsTable.tableName, exportName: `${props.stage}-ClubhouseCommentFlagsTableName` });
   }
 }

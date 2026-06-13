@@ -320,6 +320,23 @@ export function _resetCache(): void {
   _epochInfoCache = null;
 }
 
+/**
+ * S4 hardening (2026-06-10 security review) — invalidate ONLY the
+ * Constitutional Committee cache. Used by the daily role-revalidation
+ * cron's strict adapter so a CC member who resigned mid-day is caught
+ * on the next pass even if the lambda runtime kept a warm
+ * `_committeeCache` from an earlier per-request call within the same
+ * container.
+ *
+ * The cache TTL is 1h (`COMMITTEE_CACHE_TTL_MS`); for daily-cadence
+ * cron use that's effectively serving stale data for almost the
+ * entire pass. Invalidating just the committee slot is the surgical
+ * fix — proposal / pool / drep caches still serve.
+ */
+export function invalidateCommitteeCache(): void {
+  _committeeCache = null;
+}
+
 // ---- Internal helpers ----
 
 /**
@@ -1158,6 +1175,83 @@ export async function getEpochInfo(epochNo: number): Promise<KoiosEpochInfo> {
     throw new KoiosError('/epoch_info', 'missing epoch_no');
   }
   return row as KoiosEpochInfo;
+}
+
+// ---- Epoch protocol parameters (Sprint 5 — DRep voting thresholds) ----
+//
+// `/epoch_params` returns the live protocol params for an epoch — most
+// notably the `dvt_*` fields that encode the DRep voting thresholds per
+// governance action type (NoConfidence, UpdateCommittee normal/no-confidence,
+// HardFork, NewConstitution, TreasuryWithdrawal, ParameterChange in four
+// flavors, MotionNoConfidence's UpdateToConstitution, …). The concentration
+// donut uses these to mark the 60/67/75 thresholds.
+
+/** Subset of `/epoch_params` fields the concentration donut cares about. All
+ *  values are fractional doubles in [0, 1] (e.g. 0.67 for 67%). Optional
+ *  because not every field is guaranteed to be present in every epoch — we
+ *  drop the markers we couldn't resolve rather than failing the request. */
+export interface KoiosEpochDvtParams {
+  /** No-confidence motion threshold. */
+  dvt_motion_no_confidence?: number;
+  /** Update committee — normal mode. */
+  dvt_committee_normal?: number;
+  /** Update committee — no-confidence mode. */
+  dvt_committee_no_confidence?: number;
+  /** Update to the constitution. */
+  dvt_update_to_constitution?: number;
+  /** Hard fork initiation. */
+  dvt_hard_fork_initiation?: number;
+  /** Protocol parameter change — network group. */
+  dvt_p_p_network_group?: number;
+  /** Protocol parameter change — economic group. */
+  dvt_p_p_economic_group?: number;
+  /** Protocol parameter change — technical group. */
+  dvt_p_p_technical_group?: number;
+  /** Protocol parameter change — governance group. */
+  dvt_p_p_gov_group?: number;
+  /** Treasury withdrawal. */
+  dvt_treasury_withdrawal?: number;
+}
+
+/**
+ * Fetch DRep voting thresholds for an epoch. Returns null on any failure
+ * — callers should treat the donut markers as "thresholds unknown" rather
+ * than blocking the response.
+ */
+export async function getEpochParams(epochNo: number): Promise<KoiosEpochDvtParams | null> {
+  try {
+    const res = await koiosFetch(`/epoch_params?_epoch_no=${epochNo}`, {
+      method: 'GET',
+      timeoutMs: 5_000,
+    });
+    if (!res.ok) {
+      console.warn(`[Koios /epoch_params] HTTP ${res.status} for epoch ${epochNo}`);
+      return null;
+    }
+    const parsed = (await readJsonCapped(res, '/epoch_params')) as unknown;
+    const row = Array.isArray(parsed) ? parsed[0] : parsed;
+    if (!row || typeof row !== 'object') return null;
+    const r = row as Record<string, unknown>;
+    const pick = (k: string): number | undefined => {
+      const v = r[k];
+      return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+    };
+    return {
+      dvt_motion_no_confidence: pick('dvt_motion_no_confidence'),
+      dvt_committee_normal: pick('dvt_committee_normal'),
+      dvt_committee_no_confidence: pick('dvt_committee_no_confidence'),
+      dvt_update_to_constitution: pick('dvt_update_to_constitution'),
+      dvt_hard_fork_initiation: pick('dvt_hard_fork_initiation'),
+      dvt_p_p_network_group: pick('dvt_p_p_network_group'),
+      dvt_p_p_economic_group: pick('dvt_p_p_economic_group'),
+      dvt_p_p_technical_group: pick('dvt_p_p_technical_group'),
+      dvt_p_p_gov_group: pick('dvt_p_p_gov_group'),
+      dvt_treasury_withdrawal: pick('dvt_treasury_withdrawal'),
+    };
+  } catch (err) {
+    console.warn(`[Koios /epoch_params] fetch failed for epoch ${epochNo}:`, err);
+    return null;
+  }
 }
 
 // ---- DRep voting power history (Phase C: new sync) ----
