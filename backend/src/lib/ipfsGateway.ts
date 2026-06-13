@@ -175,15 +175,15 @@ export function extractIpfsCid(anchorUrl: string): string | null {
 
   // ipfs://CID or ipfs://ipfs/CID
   const ipfsMatch = trimmed.match(/^ipfs:\/\/(?:ipfs\/)?([A-Za-z0-9]+)/);
-  if (ipfsMatch && ipfsMatch[1]) return validateCidLike(ipfsMatch[1]);
+  if (ipfsMatch?.[1]) return validateCidLike(ipfsMatch[1]);
 
   // https://anything/ipfs/CID  (path-style gateway URL)
   const pathMatch = trimmed.match(/^https?:\/\/[^/]+\/ipfs\/([A-Za-z0-9]+)/i);
-  if (pathMatch && pathMatch[1]) return validateCidLike(pathMatch[1]);
+  if (pathMatch?.[1]) return validateCidLike(pathMatch[1]);
 
   // https://CID.ipfs.anything/  (subdomain-style gateway URL)
   const subdomainMatch = trimmed.match(/^https?:\/\/([A-Za-z0-9]+)\.ipfs\./i);
-  if (subdomainMatch && subdomainMatch[1]) return validateCidLike(subdomainMatch[1]);
+  if (subdomainMatch?.[1]) return validateCidLike(subdomainMatch[1]);
 
   return null;
 }

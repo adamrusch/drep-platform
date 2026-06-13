@@ -1,4 +1,4 @@
-import React from 'react';
+import type React from 'react';
 
 interface SparklineProps {
   /** Series of values, oldest → newest. Min 2 points. */

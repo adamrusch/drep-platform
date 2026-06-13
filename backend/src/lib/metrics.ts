@@ -72,7 +72,6 @@ export function emitIdentityMetric(
   extraDimensions: Record<string, string> = {},
 ): void {
   try {
-    // biome-ignore lint/complexity/useLiteralKeys: brackets match codebase env-var convention
     const stage = process.env['STAGE'] ?? 'unknown';
     const dimensions: Record<string, string> = { Stage: stage, ...extraDimensions };
     const dimensionKeys = Object.keys(dimensions);

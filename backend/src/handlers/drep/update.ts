@@ -2,7 +2,7 @@ import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 }
 import { getItem, putItem, tableNames } from '../../lib/dynamodb';
 import type { DRepCommitteeItem } from '../../lib/types';
 import { extractAuthContext, requireRole } from '../../middleware/role-guard';
-import { ok, badRequest, forbidden, notFound, internalError, handleError } from '../_response';
+import { ok, badRequest, forbidden, notFound, handleError } from '../_response';
 
 interface UpdateDRepBody {
   committeeName?: string;

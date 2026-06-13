@@ -1,4 +1,4 @@
-import React from 'react';
+import type React from 'react';
 import { useTranslation } from 'react-i18next';
 import { Activity, BarChart3, RefreshCw } from 'lucide-react';
 import { Card, CardHeader, CardTitle } from '@/components/ui/Card';

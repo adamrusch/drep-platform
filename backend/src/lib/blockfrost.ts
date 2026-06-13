@@ -5,7 +5,6 @@ import type {
   GovernanceAction,
   GovernanceActionType,
   GovernanceActionStatus,
-  GovernanceReference,
   VoteTally,
 } from './types';
 import { summarizeGovernanceDescription } from './governanceSummary';

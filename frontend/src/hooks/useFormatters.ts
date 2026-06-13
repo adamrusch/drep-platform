@@ -37,7 +37,7 @@ export function useFormatters(): {
   const formatLovelace = useCallback(
     (lovelace: string): string => {
       const ada = Number(lovelace) / 1_000_000;
-      return new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(ada) + ' ADA';
+      return `${new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(ada)} ADA`;
     },
     [locale],
   );

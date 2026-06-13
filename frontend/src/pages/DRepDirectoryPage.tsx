@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import type React from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useQuery, keepPreviousData } from '@tanstack/react-query';
@@ -393,6 +394,7 @@ export function DRepDirectoryPage(): React.ReactElement {
   // Mirror the debounced search into the URL — replace, not push, so the
   // browser back-stack doesn't fill with intermediate values. Searching
   // also resets to page 1.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only run on debounced search change; adding `searchParams`/`setSearchParams` causes an update loop
   useEffect(() => {
     const next = new URLSearchParams(searchParams);
     const prevSearch = next.get('q') ?? '';
@@ -594,6 +596,7 @@ export function DRepDirectoryPage(): React.ReactElement {
           {SORT_OPTIONS.map((opt) => (
             <button
               key={opt.id}
+              type="button"
               role="tab"
               aria-selected={sort === opt.id}
               onClick={() => setSort(opt.id)}
@@ -712,6 +715,7 @@ export function DRepDirectoryPage(): React.ReactElement {
         <nav
           ref={navRef}
           aria-label={t('drepDirectory.pagination.navAriaLabel')}
+          // biome-ignore lint/a11y/noNoninteractiveTabindex: nav handles arrow-key navigation between pagination buttons; it must be focusable
           tabIndex={0}
           onKeyDown={onNavKeyDown}
           className={cn(

@@ -1,4 +1,4 @@
-import React from 'react';
+import type React from 'react';
 import { useAuthStore, useIsAuthenticated } from '@/stores/authStore';
 import { GuestLanding } from './GuestLanding';
 import { DRepDashboard } from './DRepDashboard';

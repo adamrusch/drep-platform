@@ -72,7 +72,7 @@ function planCleanup(
   const strippedKeys: Array<{ drepId: string; postId: string }> = [];
   let skipped = 0;
   for (const post of posts) {
-    const hasInline = Object.prototype.hasOwnProperty.call(post, 'comments');
+    const hasInline = Object.hasOwn(post, 'comments');
     if (hasInline) {
       strippedKeys.push({
         drepId: post['drepId'] as string,

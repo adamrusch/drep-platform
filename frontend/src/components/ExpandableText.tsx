@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
+import type React from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 interface ExpandableTextProps {
@@ -27,6 +28,7 @@ export function ExpandableText({
   const [overflowing, setOverflowing] = useState(false);
   const ref = useRef<HTMLParagraphElement>(null);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `text` is intentionally tracked so the overflow check re-runs when content changes (not just on resize)
   useEffect(() => {
     const el = ref.current;
     if (!el) return;

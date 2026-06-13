@@ -32,7 +32,8 @@
  * with a clear message — DO NOT auto-retry or "fix" anything; the
  * user has to use the original account or contact support.
  */
-import React, { useCallback, useState } from 'react';
+import type React from 'react';
+import { useCallback, useState } from 'react';
 import { post } from '@/lib/api';
 import type { OnChainRole } from '@/types';
 import {
