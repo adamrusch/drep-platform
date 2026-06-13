@@ -817,6 +817,41 @@
       "revoking": "…",
       "revoke": "Revoke",
       "actionFailed": "Action failed."
+    },
+    "moderation": {
+      "title": "Moderation queue",
+      "description": "Items the community has flagged or that have crossed the hide threshold (3 distinct on-chain flaggers). Unhide reverses a community hide; Hide pre-emptively suppresses a row.",
+      "loading": "Loading queue…",
+      "loadFailed": "Failed to load the moderation queue.",
+      "empty": "No flagged or hidden items right now.",
+      "actionFailed": "Action failed.",
+      "filter": {
+        "all": "All",
+        "comment": "Comments",
+        "clubhousePost": "Clubhouse posts",
+        "clubhouseComment": "Clubhouse comments"
+      },
+      "types": {
+        "comment": "Comment",
+        "clubhouse_post": "Clubhouse post",
+        "clubhouse_comment": "Clubhouse comment"
+      },
+      "row": {
+        "hiddenPill": "Hidden",
+        "visiblePill": "Visible",
+        "flagCount": "{{count}} flags",
+        "flagCount_one": "{{count}} flag",
+        "author": "Author:",
+        "unhide": "Unhide",
+        "hide": "Hide",
+        "showFlaggers": "Show flaggers",
+        "hideFlaggers": "Hide flaggers"
+      },
+      "flaggers": {
+        "loading": "Loading flaggers…",
+        "loadFailed": "Failed to load flaggers.",
+        "none": "No per-flagger evidence rows recorded."
+      }
     }
   },
   "rationales": {
