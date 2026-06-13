@@ -170,6 +170,17 @@ export const handler = async (
         // uses this — NOT `drepId` — to grant a non-lead member access to
         // their committee space.
         committeeMembership,
+        // Decision #2 / Decision #3 (2026-06-10) — when the JWT carries a
+        // `personId`, surface it so the SPA can route the wallet user into
+        // the same on-chain profile UI that an on-chain login (DRep / SPO /
+        // CC / proposer) reaches. The CIP-30 wallet login reconciles to a
+        // `stake:<stakeAddr>` `identity_links` row at login; the personId
+        // it minted (or returned for a returning user) rides the JWT. A
+        // pre-Decision-2 token (issued before the legacy cutover) omits
+        // it — the FE falls back to the legacy `walletAddress`-keyed
+        // identity in that case. Best-effort: when reconciliation failed
+        // at login the claim is absent and we just don't surface it.
+        ...(authCtx.personId ? { personId: authCtx.personId } : {}),
       },
       // Defense in depth: this endpoint is auth-bound and MUST NOT be
       // shared between users. The CloudFront distribution in front of
