@@ -1,6 +1,6 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { extractAuthContext, requireRole } from '../../middleware/role-guard';
-import { ok, forbidden, internalError, handleError } from '../_response';
+import { ok, forbidden, handleError } from '../_response';
 import { runGovernanceIntake } from '../../sync/governance-intake';
 
 export const handler = async (

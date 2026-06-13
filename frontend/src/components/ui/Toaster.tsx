@@ -1,4 +1,4 @@
-import React from 'react';
+import type React from 'react';
 import { CheckCircle2, AlertCircle, AlertTriangle, Info, X } from 'lucide-react';
 import { useUiStore } from '@/stores/uiStore';
 import { cn } from '@/lib/utils';
@@ -28,7 +28,7 @@ export function Toaster(): React.ReactElement | null {
   if (toasts.length === 0) return null;
 
   return (
-    <div className="toast-stack" role="region" aria-label="Notifications" aria-live="polite">
+    <section className="toast-stack" aria-label="Notifications" aria-live="polite">
       {toasts.map((toast) => {
         const Icon =
           toast.variant === 'error'
@@ -70,6 +70,6 @@ export function Toaster(): React.ReactElement | null {
           </div>
         );
       })}
-    </div>
+    </section>
   );
 }

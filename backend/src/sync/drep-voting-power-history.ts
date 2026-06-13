@@ -95,6 +95,7 @@ import {
   listAllDReps,
   fetchDRepPowerHistory,
   KoiosError,
+  type KoiosDRepListEntry,
 } from '../lib/koios';
 import { putItemIfAbsent, tableNames } from '../lib/dynamodb';
 
@@ -194,7 +195,7 @@ export async function runPowerHistorySync(): Promise<PowerHistorySyncResult> {
     drepsErrored: 0,
   };
 
-  let listing;
+  let listing: KoiosDRepListEntry[];
   try {
     listing = await listAllDReps();
   } catch (err) {

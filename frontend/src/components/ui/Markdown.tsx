@@ -1,4 +1,4 @@
-import React from 'react';
+import type React from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeSanitize, { defaultSchema, type Options as SanitizeOptions } from 'rehype-sanitize';

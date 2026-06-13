@@ -1,4 +1,5 @@
-import React, { useMemo, useState } from 'react';
+import type React from 'react';
+import { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
@@ -411,6 +412,7 @@ function PostCard({
               Organic posts keep the existing two-letter initial avatar. */}
           {isAutoPost ? (
             <span
+              role="img"
               className="w-8 h-8 rounded-token-full bg-[var(--info-soft)] text-[var(--info)] flex items-center justify-center flex-shrink-0"
               title={t('clubhouse.tooltip.governanceFeed')}
               aria-label={t('clubhouse.tooltip.governanceFeedAria')}
@@ -500,6 +502,7 @@ function PostCard({
           )}
           {canDelete && (
             <button
+              type="button"
               onClick={onDelete}
               className="text-xs text-[var(--danger)] hover:underline"
             >
@@ -579,6 +582,7 @@ function PostCard({
 
       <div className="flex items-center gap-4 pt-1 text-[12.5px] text-[var(--text-tertiary)]">
         <button
+          type="button"
           onClick={() => setShowComments(!showComments)}
           className="inline-flex items-center gap-1.5 hover:text-[var(--text-primary)] transition-colors"
         >

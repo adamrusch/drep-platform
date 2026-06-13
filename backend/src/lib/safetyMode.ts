@@ -21,7 +21,7 @@ export function isSafetyModeActive(
   item: PlatformSafetyModeItem | undefined,
   nowSec: number,
 ): boolean {
-  if (!item || !item.active) return false;
+  if (!item?.active) return false;
   if (item.expiresAt !== undefined && nowSec >= item.expiresAt) return false;
   return true;
 }

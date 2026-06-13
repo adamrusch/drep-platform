@@ -175,7 +175,7 @@ export const handler = async (
       commentId: decodedCommentId,
     });
 
-    if (!comment || !comment.walletAddress) {
+    if (!comment?.walletAddress) {
       return notFound('Comment');
     }
 

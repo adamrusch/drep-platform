@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import type React from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useMutation } from '@tanstack/react-query';
@@ -74,8 +75,9 @@ export function ProfileSetup(): React.ReactElement {
 
       <form onSubmit={handleSubmit} className="space-y-4">
         <div>
-          <label className="block text-sm font-medium mb-1">{t('profileSetup.displayName')}</label>
+          <label htmlFor="profile-displayName" className="block text-sm font-medium mb-1">{t('profileSetup.displayName')}</label>
           <input
+            id="profile-displayName"
             value={displayName}
             onChange={(e) => setDisplayName(e.target.value)}
             maxLength={100}
@@ -85,8 +87,9 @@ export function ProfileSetup(): React.ReactElement {
         </div>
 
         <div>
-          <label className="block text-sm font-medium mb-1">{t('profileSetup.bio')}</label>
+          <label htmlFor="profile-bio" className="block text-sm font-medium mb-1">{t('profileSetup.bio')}</label>
           <textarea
+            id="profile-bio"
             value={bio}
             onChange={(e) => setBio(e.target.value)}
             maxLength={2_000}
@@ -104,8 +107,9 @@ export function ProfileSetup(): React.ReactElement {
             { key: 'website', value: website, setter: setWebsite },
           ].map(({ key, value, setter }) => (
             <div key={key}>
-              <label className="block text-xs text-muted-foreground mb-1">{t(`profileSetup.fields.${key}`)}</label>
+              <label htmlFor={`profile-social-${key}`} className="block text-xs text-muted-foreground mb-1">{t(`profileSetup.fields.${key}`)}</label>
               <input
+                id={`profile-social-${key}`}
                 value={value}
                 onChange={(e) => setter(e.target.value)}
                 placeholder={t(`profileSetup.placeholders.${key}`)}

@@ -544,7 +544,7 @@ const DREP_B = 'drep1bbb';
 const POST_A = 'post-a';
 const POST_B = 'post-b';
 const POST_KEY_A = `${DREP_A}#${POST_A}`;
-const POST_KEY_B = `${DREP_B}#${POST_B}`;
+const _POST_KEY_B = `${DREP_B}#${POST_B}`;
 
 function makePollPost(opts: {
   drepId: string;
