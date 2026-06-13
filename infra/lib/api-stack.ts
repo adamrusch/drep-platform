@@ -11,6 +11,7 @@ import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as route53Targets from 'aws-cdk-lib/aws-route53-targets';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as cloudfrontOrigins from 'aws-cdk-lib/aws-cloudfront-origins';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as budgets from 'aws-cdk-lib/aws-budgets';
@@ -136,10 +137,44 @@ export class ApiStack extends cdk.Stack {
       databaseStack.ccMembersTable,
       databaseStack.auditLogTable,
       databaseStack.authNoncesTable,
+      // Decision #1 (2026-06-10) — dedicated per-session revocation
+      // store for the on-chain login JWTs. Read by the JWT authorizer
+      // (per-request `isSessionRevoked`), written by `onchainVerify`
+      // (`recordSessionForUser`) + `logout` (`revokeSessionByJti` /
+      // `revokeAllSessionsForUser`). Granted RW across the shared
+      // `lambdaRole` because every authenticated Lambda — including
+      // the authorizer — shares it; the authorizer is the read hot
+      // path (one GetItem per request), the verify/logout handlers
+      // own the writes.
+      databaseStack.identitySessionsTable,
+      // Decision #3 (2026-06-10) — canonical person + identity-link
+      // model. `onchain_users` is the editable profile (person row);
+      // `identity_links` maps each on-chain credential
+      // (`drep:<drepId>` / `pool:<poolId>` / `cc:<ccCred>` /
+      // `stake:<stakeAddr>`) to a `personId`. Read by `onchainVerify`
+      // (login reconciliation), the `/auth/onchain/link/*` flow
+      // (explicit credential link with cryptographic proof), the
+      // `/auth/onchain/me` aggregation handler, and the on-chain
+      // profile get/update handlers. RW across the shared role so
+      // login + link + profile writes all go through one IAM grant.
+      databaseStack.onchainUsersTable,
+      databaseStack.identityLinksTable,
       // Phase 2 committee voting.
       databaseStack.committeeVotesTable,
       databaseStack.committeeMembershipTable,
       databaseStack.platformStateTable,
+      // Sprint 4 — community flagging primitive. Both the flag-write
+      // path (`comments/flag.ts` / `clubhouse/flagPost.ts`) and any
+      // future moderation surface need RW access to the per-flagger
+      // evidence rows. Same broad RW pattern as the sibling tables in
+      // this loop — read paths today are scoped by handler.
+      databaseStack.commentFlagsTable,
+      databaseStack.clubhousePostFlagsTable,
+      // Sprint 4 follow-up — clubhouse-comment flagging primitive.
+      // Same broad RW pattern as the sibling flag tables; the read
+      // path is the comment list handler (filters hidden for normal
+      // users, surfaces for `platform_admin`).
+      databaseStack.clubhouseCommentFlagsTable,
     ]) {
       table.grantReadWriteData(lambdaRole);
     }
@@ -147,6 +182,42 @@ export class ApiStack extends cdk.Stack {
     // Grant Secrets Manager read
     jwtSecret.grantRead(lambdaRole);
     blockfrostSecret.grantRead(lambdaRole);
+
+    // ---- Sprint 5: content-addressed DRep avatar bucket ----
+    //
+    // **Why a separate S3 bucket:** the avatar pipeline downloads each
+    // DRep's CIP-119 image URL once, hashes it, and stores the bytes by
+    // sha256 (`avatars/<hash>`). The directory sync (avatar-store pass)
+    // writes; the `/api/avatar/{hash}` Lambda reads. Bytes are immutable
+    // (content-addressed) so we serve them with a 1-year cache header
+    // via CloudFront — the bucket itself stays private, block-public-
+    // access on. Versioning OFF because the keys ARE the version (a
+    // content hash never changes meaning); a separate version history
+    // would just double storage.
+    //
+    // **Lifecycle:** none built in. The avatar-store sync's GC pass
+    // (`gcDrepAvatars`) deletes objects that no PROFILE row references
+    // after a 24h grace window. A blunt S3 lifecycle rule (e.g. "delete
+    // after 30 days unused") would either be too conservative (storing
+    // stale orphans for ages) or too aggressive (deleting live avatars
+    // the sweep just stamped). The application-driven GC has the right
+    // information (the DDB referenced set) so it stays the owner.
+    const avatarBucket = new s3.Bucket(this, 'DRepAvatarBucket', {
+      bucketName: `drep-platform-${stage}-avatars`,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      versioned: false,
+      removalPolicy: isPersistent(stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: !isPersistent(stage),
+    });
+    // RW for sync (avatar-store) + Read for the serve handler. Granting at
+    // the role level rather than per-Lambda keeps the IAM surface small;
+    // both Lambdas already share `lambdaRole`. The serve handler only
+    // calls GetObject, but a single role grant for both eliminates a
+    // future "we forgot to add the read grant" footgun.
+    avatarBucket.grantReadWrite(lambdaRole);
+    sharedEnv.AVATAR_S3_BUCKET = avatarBucket.bucketName;
 
     // Per-DRep IPFS keys (opt-in, encrypted). Handlers create/read/update
     // secrets under drep-platform/{stage}/drep-ipfs/*. Scoped to that prefix.
@@ -203,6 +274,31 @@ export class ApiStack extends cdk.Stack {
     const logoutFn = fn('AuthLogoutFn', 'handlers/auth/logout.ts');
     const meFn = fn('AuthMeFn', 'handlers/auth/me.ts');
     const mutationNonceFn = fn('AuthMutationNonceFn', 'handlers/auth/mutationNonce.ts');
+    // ---- On-chain auth handlers (Sprint 1) ----
+    // Parallel to /auth/challenge + /auth/verify above — these own the new
+    // four-role login flow (DRep / SPO / CC / Proposer) using the ported
+    // `lib/identity/*` module. The legacy CIP-30 flow is UNTOUCHED; a wallet
+    // may hold both cookies simultaneously.
+    const onchainChallengeFn = fn('AuthOnchainChallengeFn', 'handlers/auth/onchainChallenge.ts');
+    const onchainVerifyFn = fn('AuthOnchainVerifyFn', 'handlers/auth/onchainVerify.ts');
+    // Decision #3 (2026-06-10) — explicit credential-linking flow.
+    // `linkChallenge` mints a stage-bound nonce; `linkVerify` consumes
+    // it AFTER verifying the new credential's signature with the SAME
+    // verifier the login path uses (CIP-8 for drep/proposer/stake, raw
+    // Ed25519 for spo/cc). On success the new credential is mapped to
+    // the caller's existing `personId`. Safety: if the credential is
+    // already mapped to a different person the link is REJECTED, never
+    // silently merged. The `/auth/onchain/me` handler aggregates the
+    // person + every linked credential + their union of on-chain roles.
+    const onchainLinkChallengeFn = fn('AuthOnchainLinkChallengeFn', 'handlers/auth/linkChallenge.ts');
+    const onchainLinkVerifyFn = fn('AuthOnchainLinkVerifyFn', 'handlers/auth/linkVerify.ts');
+    const onchainMeFn = fn('AuthOnchainMeFn', 'handlers/auth/onchainMe.ts');
+    // On-chain profile (person row) get + update. Minimal — these
+    // mirror the legacy `profile/*` conventions but key off the
+    // session's `personId` instead of the wallet address. The full
+    // profile UI is out of scope.
+    const onchainProfileGetFn = fn('AuthOnchainProfileGetFn', 'handlers/auth/onchainProfileGet.ts');
+    const onchainProfileUpdateFn = fn('AuthOnchainProfileUpdateFn', 'handlers/auth/onchainProfileUpdate.ts');
 
     // ---- Governance handlers ----
     const govListFn = fn('GovListFn', 'handlers/governance/list.ts');
@@ -259,6 +355,16 @@ export class ApiStack extends cdk.Stack {
     // while this is a chain-state read of every registered DRep.
     const drepDirectoryListFn = fn('DRepDirectoryListFn', 'handlers/directory/list.ts');
     const drepDirectoryGetFn = fn('DRepDirectoryGetFn', 'handlers/directory/get.ts');
+    // Sprint 5 — voting-power concentration donut data + content-addressed
+    // avatar serve (S3-backed; bucket above).
+    const drepDirectoryConcentrationFn = fn(
+      'DRepDirectoryConcentrationFn',
+      'handlers/directory/concentration.ts',
+    );
+    const drepDirectoryAvatarFn = fn(
+      'DRepDirectoryAvatarFn',
+      'handlers/directory/avatar.ts',
+    );
 
     // ---- Comments handlers ----
     const commentsListFn = fn('CommentsListFn', 'handlers/comments/list.ts');
@@ -266,6 +372,8 @@ export class ApiStack extends cdk.Stack {
     const commentsDeleteFn = fn('CommentsDeleteFn', 'handlers/comments/delete.ts');
     const commentsVoteFn = fn('CommentsVoteFn', 'handlers/comments/vote.ts');
     const commentsMyVotesFn = fn('CommentsMyVotesFn', 'handlers/comments/myVotes.ts');
+    // Sprint 4 — community flagging for governance-action comments.
+    const commentsFlagFn = fn('CommentsFlagFn', 'handlers/comments/flag.ts');
 
     // ---- Clubhouse handlers ----
     const clubhouseListFn = fn('ClubhouseListFn', 'handlers/clubhouse/list.ts');
@@ -282,6 +390,15 @@ export class ApiStack extends cdk.Stack {
     );
     const clubhouseDeletePostFn = fn('ClubhouseDeletePostFn', 'handlers/clubhouse/deletePost.ts');
     const clubhouseVotePollFn = fn('ClubhouseVotePollFn', 'handlers/clubhouse/votePoll.ts');
+    // Sprint 4 — community flagging for clubhouse posts.
+    const clubhouseFlagPostFn = fn('ClubhouseFlagPostFn', 'handlers/clubhouse/flagPost.ts');
+    // Sprint 4 follow-up — community flagging for clubhouse comments.
+    // Closes the missing leg of the Sprint 4 trio (comment / post /
+    // clubhouse-comment). Same threshold + atomic-counter semantics.
+    const clubhouseFlagCommentFn = fn(
+      'ClubhouseFlagCommentFn',
+      'handlers/clubhouse/flagComment.ts',
+    );
     // Right-rail data — public reads, separate Lambdas so their in-memory
     // caches don't fight for warm-container space with the write path.
     // See backend/src/handlers/clubhouse/_rail.ts for the cache + ranking
@@ -433,6 +550,71 @@ export class ApiStack extends cdk.Stack {
       'AuthMutationNonce',
       true,
     );
+    // On-chain login routes (Sprint 1) — additive, do NOT replace the legacy
+    // `/auth/challenge` and `/auth/verify` above. Public reads (the nonce is
+    // harmless without a signature; verification gates access via a real
+    // signature + Koios role resolution).
+    addRoute(
+      apigwv2.HttpMethod.POST,
+      '/auth/onchain/challenge',
+      onchainChallengeFn,
+      'AuthOnchainChallenge',
+    );
+    addRoute(
+      apigwv2.HttpMethod.POST,
+      '/auth/onchain/verify',
+      onchainVerifyFn,
+      'AuthOnchainVerify',
+    );
+    // Decision #3 — credential-linking flow (authenticated). The
+    // caller MUST be signed in via on-chain login (carries a
+    // `personId` claim). The challenge issues a stage-bound nonce; the
+    // verify call accepts the new credential's signature, verifies
+    // with the SAME rigor as the login path, and maps the new
+    // credential to the caller's existing `personId`. Safety: a
+    // credential already mapped to a DIFFERENT personId is rejected
+    // (no silent merge). See `handlers/auth/linkVerify.ts`.
+    addRoute(
+      apigwv2.HttpMethod.POST,
+      '/auth/onchain/link/challenge',
+      onchainLinkChallengeFn,
+      'AuthOnchainLinkChallenge',
+      true,
+    );
+    addRoute(
+      apigwv2.HttpMethod.POST,
+      '/auth/onchain/link/verify',
+      onchainLinkVerifyFn,
+      'AuthOnchainLinkVerify',
+      true,
+    );
+    // Decision #3 — `/auth/onchain/me` aggregation. Returns the
+    // person's profile + every linked credential + the union of their
+    // on-chain roles. Distinct from the legacy `/auth/me` (which is
+    // wallet-keyed and UNTOUCHED by Decision #3).
+    addRoute(
+      apigwv2.HttpMethod.GET,
+      '/auth/onchain/me',
+      onchainMeFn,
+      'AuthOnchainMe',
+      true,
+    );
+    // Decision #3 — on-chain profile (person row) get + update.
+    // Minimal surface; the full profile UI is out of scope.
+    addRoute(
+      apigwv2.HttpMethod.GET,
+      '/auth/onchain/profile',
+      onchainProfileGetFn,
+      'AuthOnchainProfileGet',
+      true,
+    );
+    addRoute(
+      apigwv2.HttpMethod.PUT,
+      '/auth/onchain/profile',
+      onchainProfileUpdateFn,
+      'AuthOnchainProfileUpdate',
+      true,
+    );
 
     // ---- Governance routes ----
     // NOTE: register `/governance/stats` BEFORE `/governance/{actionId}`.
@@ -490,7 +672,30 @@ export class ApiStack extends cdk.Stack {
 
     // ---- DRep directory routes (chain-state) ----
     addRoute(apigwv2.HttpMethod.GET, '/dreps', drepDirectoryListFn, 'DRepDirectoryList');
+    // Sprint 5 — voting-power concentration. Register BEFORE the `{drepId}`
+    // capture below so the literal segment wins; HTTP API v2 prefers static
+    // segments over path parameters regardless of declaration order, but
+    // listing the literal route first also matches the local conventions.
+    addRoute(
+      apigwv2.HttpMethod.GET,
+      '/dreps/concentration',
+      drepDirectoryConcentrationFn,
+      'DRepDirectoryConcentration',
+    );
     addRoute(apigwv2.HttpMethod.GET, '/dreps/{drepId}', drepDirectoryGetFn, 'DRepDirectoryGet');
+    // Sprint 5 — content-addressed avatar serve. The URL is
+    // `/api/avatar/{hash}` rather than `/dreps/avatar/...` so the
+    // CloudFront cache behavior can match a top-level prefix without
+    // colliding with the cached `/dreps/*` behavior (which is GET-only
+    // already — the avatar route would fit there fine, but the explicit
+    // `/api/*` prefix matches the URL the avatar-store sync embeds in
+    // the DRep row and matches the DRep Talk shape we're porting from).
+    addRoute(
+      apigwv2.HttpMethod.GET,
+      '/api/avatar/{hash}',
+      drepDirectoryAvatarFn,
+      'DRepDirectoryAvatar',
+    );
 
     // ---- Comments routes ----
     addRoute(apigwv2.HttpMethod.GET, '/comments/{actionId}', commentsListFn, 'CommentsList');
@@ -525,6 +730,19 @@ export class ApiStack extends cdk.Stack {
       '/comments/{actionId}/my-votes',
       commentsMyVotesFn,
       'CommentsMyVotes',
+      true,
+    );
+    // Sprint 4 — community flag a comment. Auth-only; the handler
+    // ALSO requires the caller to hold at least one on-chain role
+    // (`drep` / `spo` / `cc` / `proposer`) via `requireOnChainRole`.
+    // Three distinct on-chain-verified flaggers hide the comment from
+    // normal users; the per-flagger row + atomic-ADD counter mutation
+    // happen in `handlers/comments/flag.ts`.
+    addRoute(
+      apigwv2.HttpMethod.POST,
+      '/comments/{actionId}/{commentId}/flag',
+      commentsFlagFn,
+      'CommentsFlag',
       true,
     );
 
@@ -567,6 +785,29 @@ export class ApiStack extends cdk.Stack {
       '/clubhouse/{drepId}/post/{postId}/vote',
       clubhouseVotePollFn,
       'ClubhouseVotePoll',
+      true,
+    );
+    // Sprint 4 — community flag a clubhouse post. Auth-only; the
+    // handler ALSO requires the caller to hold at least one on-chain
+    // role (`drep` / `spo` / `cc` / `proposer`). Same threshold (3
+    // distinct flaggers) hides the post from normal users. See
+    // `handlers/clubhouse/flagPost.ts`.
+    addRoute(
+      apigwv2.HttpMethod.POST,
+      '/clubhouse/{drepId}/post/{postId}/flag',
+      clubhouseFlagPostFn,
+      'ClubhouseFlagPost',
+      true,
+    );
+    // Sprint 4 follow-up — community flag a clubhouse COMMENT. Same
+    // auth contract (on-chain role required), same hide threshold (3
+    // distinct flaggers), same atomic counter-then-hide semantics as
+    // the post flag. See `handlers/clubhouse/flagComment.ts`.
+    addRoute(
+      apigwv2.HttpMethod.POST,
+      '/clubhouse/{drepId}/post/{postId}/comment/{commentId}/flag',
+      clubhouseFlagCommentFn,
+      'ClubhouseFlagComment',
       true,
     );
     // Right-rail data — public reads, no auth gate. These power the
@@ -697,6 +938,28 @@ export class ApiStack extends cdk.Stack {
         queryStringBehavior: cloudfront.CacheQueryStringBehavior.all(),
         enableAcceptEncodingGzip: true,
         enableAcceptEncodingBrotli: true,
+      });
+      // Sprint 5 — immutable cache policy for `/api/avatar/*`. The bytes
+      // are content-addressed (sha256 in URL), so they can never change
+      // — 1-year TTL matches the Lambda's `cache-control` header. We use
+      // a separate policy from `cachedKeyPolicy` rather than relying on
+      // the origin Cache-Control because CloudFront's `maxTtl` caps how
+      // long the edge will keep an object regardless of what the origin
+      // header says; this policy raises that cap to one year.
+      const avatarCachePolicy = new cloudfront.CachePolicy(this, 'ApiAvatarCachePolicy', {
+        cachePolicyName: `drep-platform-${stage}-api-avatar`,
+        comment: 'Long-TTL cache for content-addressed DRep avatars.',
+        defaultTtl: cdk.Duration.days(365),
+        minTtl: cdk.Duration.days(1),
+        maxTtl: cdk.Duration.days(365),
+        cookieBehavior: cloudfront.CacheCookieBehavior.none(),
+        headerBehavior: cloudfront.CacheHeaderBehavior.none(),
+        queryStringBehavior: cloudfront.CacheQueryStringBehavior.none(),
+        // Image bytes are already compressed in their native codec; no
+        // benefit from gzip/brotli on top, and skipping the negotiation
+        // saves cycles.
+        enableAcceptEncodingGzip: false,
+        enableAcceptEncodingBrotli: false,
       });
       const cachedOriginPolicy = new cloudfront.OriginRequestPolicy(
         this,
@@ -926,6 +1189,23 @@ export class ApiStack extends cdk.Stack {
             cachePolicy: cachedKeyPolicy,
             originRequestPolicy: cachedOriginPolicy,
             compress: true,
+          },
+          // Sprint 5 — content-addressed DRep avatars. The bytes are
+          // immutable (URL contains the sha256), so we get a much longer
+          // TTL than the 30s default the rest of the cached behaviors
+          // use: a year, matching the Lambda's `cache-control` header.
+          // The avatar Lambda is the only handler under this prefix; no
+          // mutations share the path so we don't need a no-cache
+          // sibling. Origin policy is the standard cached one (no
+          // cookies in the cache key) since avatars are public-read.
+          '/api/avatar/*': {
+            origin,
+            viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+            allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
+            cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
+            cachePolicy: avatarCachePolicy,
+            originRequestPolicy: cachedOriginPolicy,
+            compress: false, // bytes are already in an efficient image codec
           },
         },
         priceClass: cloudfront.PriceClass.PRICE_CLASS_100,

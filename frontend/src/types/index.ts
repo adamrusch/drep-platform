@@ -9,6 +9,19 @@ export type UserRole =
   | 'trusted_delegator'
   | 'platform_admin';
 
+/**
+ * On-chain proven roles (Sprint 1 — mirror of the backend `OnChainRole`).
+ *
+ * Travel as a parallel `onChainRoles[]` JWT claim alongside `UserRole`-
+ * shaped `roles`. The two surfaces are intentionally distinct: `UserRole`
+ * is the platform-internal role assignment (delegator / lead_drep / etc.);
+ * `OnChainRole` is a credential that was just proven on-chain via a
+ * fresh signature. A user might hold both (e.g. a `delegator` who is also
+ * a `drep` on-chain), or only one (a wallet-less SPO that proved its
+ * pool's Calidus key but has no `lead_drep` row).
+ */
+export type OnChainRole = 'drep' | 'spo' | 'cc' | 'proposer';
+
 export type GovernanceActionType =
   | 'ParameterChange'
   | 'HardForkInitiation'
@@ -397,6 +410,12 @@ export interface DRepDirectoryEntry {
    *  image fallback logic. Optional for backwards compat with rows
    *  synced before this flag existed. */
   isPredefined?: boolean;
+  /** Sprint 5 — sha256-hex of the self-hosted avatar bytes living at
+   *  `/api/avatar/<hash>`. Set once the avatar-store sync has
+   *  downloaded and validated the upstream `image` URL. Absent / null
+   *  means "no self-hosted avatar yet — render the cardenticon
+   *  identicon as fallback." See `lib/drepAvatar.ts`. */
+  imageContentHash?: string | null;
   lastSyncedAt: string;
   enrichmentVersion: number;
 }
@@ -556,6 +575,16 @@ export interface Comment {
   supportLovelace?: string;
   upvoteCount?: number;
   downvoteCount?: number;
+  /** Sprint 4 — community-flag counter. Distinct on-chain-verified
+   *  flaggers tracked by `comment_flags`; the backend reaches the
+   *  hide threshold at 3. Optional for back-compat with rows written
+   *  before the field landed. */
+  flagCount?: number;
+  /** Sprint 4 — true when the row reached the hide threshold. Normal
+   *  users never see hidden rows on the wire (the backend filters
+   *  them); `platform_admin`s see them with this marker so the
+   *  moderation UI can render a "FLAGGED — HIDDEN" treatment. */
+  hidden?: boolean;
 }
 
 /** Map of `commentId → user's vote` returned by
@@ -628,6 +657,13 @@ export interface ClubhousePost {
    *  by the right-rail's "active in last 24h" filter. Absent on posts
    *  with zero comments. */
   lastReplyAt?: string;
+  /** Sprint 4 — community-flag counter on the post row. See the
+   *  `Comment.flagCount` doc for the threshold semantic. */
+  flagCount?: number;
+  /** Sprint 4 — true when the post reached the hide threshold. Filtered
+   *  out by the backend for normal users; surfaced to `platform_admin`
+   *  for moderation. */
+  hidden?: boolean;
 }
 
 export interface ClubhouseComment {
@@ -656,6 +692,17 @@ export interface ClubhouseComment {
    *  author who re-delegates to this DRep has the flag cleared back
    *  to `true` on the next pass. */
   authorDelegationActive?: boolean;
+  /** Sprint 4 follow-up — community-flagging counter for clubhouse
+   *  comments. Materialised on the comment row by atomic ADD when a
+   *  fresh per-flagger row is inserted in `clubhouse_comment_flags`.
+   *  Absent on rows with zero flags. */
+  flagCount?: number;
+  /** Sprint 4 follow-up — true when `flagCount` reached the hide
+   *  threshold (3). Filtered out by the backend for normal users;
+   *  surfaced to `platform_admin` with the marker intact so the
+   *  moderation UI can decide whether to reverse the community
+   *  decision. */
+  hidden?: boolean;
 }
 
 /**

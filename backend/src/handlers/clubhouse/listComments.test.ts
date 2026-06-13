@@ -171,6 +171,121 @@ describe('GET /clubhouse/{drepId}/post/{postId}/comments', () => {
     expect(res).toMatchObject({ statusCode: 500 });
   });
 
+  // ---- Sprint 4 follow-up — community-flag hide filter ----
+
+  it('excludes hidden rows for anonymous (normal) callers', async () => {
+    mockQuery.mockResolvedValueOnce({
+      items: [
+        {
+          postKey: `${DREP_ID}#${POST_ID}`,
+          commentId: 'visible-1',
+          drepId: DREP_ID,
+          postId: POST_ID,
+          authorWallet: 'w1',
+          body: 'visible',
+          createdAt: '2026-05-27T10:00:00.000Z',
+          depth: 0,
+        },
+        {
+          postKey: `${DREP_ID}#${POST_ID}`,
+          commentId: 'hidden-1',
+          drepId: DREP_ID,
+          postId: POST_ID,
+          authorWallet: 'w2',
+          body: 'hidden by community',
+          createdAt: '2026-05-27T10:05:00.000Z',
+          depth: 0,
+          flagCount: 3,
+          hidden: true,
+        },
+      ],
+      count: 2,
+    });
+
+    const res = (await handler(
+      buildEvent({ drepId: DREP_ID, postId: POST_ID }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 200 });
+    const body = parseBody(res);
+    expect(body.items).toHaveLength(1);
+    expect(body.items[0]!['commentId']).toBe('visible-1');
+    // The hidden row's `flagCount` / `hidden` are not surfaced because
+    // the row itself is filtered out for anonymous callers.
+    expect(body.items[0]!['hidden']).toBeUndefined();
+  });
+
+  it('includes hidden rows (with the marker) for platform_admin callers', async () => {
+    mockQuery.mockResolvedValueOnce({
+      items: [
+        {
+          postKey: `${DREP_ID}#${POST_ID}`,
+          commentId: 'hidden-1',
+          drepId: DREP_ID,
+          postId: POST_ID,
+          authorWallet: 'w2',
+          body: 'hidden by community',
+          createdAt: '2026-05-27T10:05:00.000Z',
+          depth: 0,
+          flagCount: 3,
+          hidden: true,
+        },
+      ],
+      count: 1,
+    });
+
+    const adminEvt = buildEvent({ drepId: DREP_ID, postId: POST_ID });
+    (adminEvt.requestContext as unknown as {
+      authorizer?: { lambda?: { roles?: string } };
+    }).authorizer = {
+      lambda: { roles: JSON.stringify(['platform_admin']) },
+    };
+
+    const res = (await handler(adminEvt)) as APIGatewayProxyResultV2;
+    expect(res).toMatchObject({ statusCode: 200 });
+    const body = parseBody(res);
+    expect(body.items).toHaveLength(1);
+    expect(body.items[0]).toMatchObject({
+      commentId: 'hidden-1',
+      flagCount: 3,
+      hidden: true,
+    });
+  });
+
+  it('surfaces flagCount on a non-hidden row that has a non-zero count', async () => {
+    // A row that has been flagged once (below the hide threshold) keeps
+    // `flagCount: 1` on the wire but no `hidden` field. Lets the FE
+    // show "Flagged" affordance state without yet hiding the row.
+    mockQuery.mockResolvedValueOnce({
+      items: [
+        {
+          postKey: `${DREP_ID}#${POST_ID}`,
+          commentId: 'sub-threshold',
+          drepId: DREP_ID,
+          postId: POST_ID,
+          authorWallet: 'w3',
+          body: 'one flag, still visible',
+          createdAt: '2026-05-27T10:10:00.000Z',
+          depth: 0,
+          flagCount: 1,
+        },
+      ],
+      count: 1,
+    });
+
+    const res = (await handler(
+      buildEvent({ drepId: DREP_ID, postId: POST_ID }),
+    )) as APIGatewayProxyResultV2;
+
+    expect(res).toMatchObject({ statusCode: 200 });
+    const body = parseBody(res);
+    expect(body.items[0]).toMatchObject({
+      commentId: 'sub-threshold',
+      flagCount: 1,
+    });
+    expect(body.items[0]!['hidden']).toBeUndefined();
+  });
+
   it('paginates through multiple DDB pages defensively', async () => {
     // First page returns 2 items + LastEvaluatedKey; second page
     // returns 1 item + undefined LastEvaluatedKey → loop terminates.

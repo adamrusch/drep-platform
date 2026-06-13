@@ -128,6 +128,92 @@ export function useDeleteClubhousePost() {
   });
 }
 
+interface FlagClubhousePostParams {
+  drepId: string;
+  postId: string;
+}
+
+/** Backend response from `POST /clubhouse/{drepId}/post/{postId}/flag`.
+ *  Matches `FlagCommentResponse` in `useComments.ts`. */
+export interface FlagClubhousePostResponse {
+  outcome: 'flagged' | 'already_flagged';
+  postId: string;
+  flagCount?: number;
+  hidden?: boolean;
+}
+
+/**
+ * Sprint 4 — community flag a clubhouse post.
+ *
+ * Requires the caller to be authenticated AND to hold at least one
+ * on-chain role. The FE renders the affordance only for callers with
+ * `onChainRoles.length > 0`; this hook does not enforce that gate
+ * itself (the backend rejects with 403). On success we invalidate the
+ * clubhouse post list so the per-row `flagCount` / `hidden`
+ * propagate.
+ */
+export function useFlagClubhousePost() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ drepId, postId }: FlagClubhousePostParams) =>
+      post<FlagClubhousePostResponse>(
+        `/clubhouse/${encodeURIComponent(drepId)}/post/${encodeURIComponent(postId)}/flag`,
+        {},
+      ),
+    onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({
+        queryKey: QUERY_KEYS.posts(variables.drepId),
+      });
+    },
+  });
+}
+
+interface FlagClubhouseCommentParams {
+  drepId: string;
+  postId: string;
+  commentId: string;
+}
+
+/** Backend response from
+ *  `POST /clubhouse/{drepId}/post/{postId}/comment/{commentId}/flag`. */
+export interface FlagClubhouseCommentResponse {
+  outcome: 'flagged' | 'already_flagged';
+  commentId: string;
+  flagCount?: number;
+  hidden?: boolean;
+}
+
+/**
+ * Sprint 4 follow-up — community flag a clubhouse COMMENT.
+ *
+ * Closes the last leg of the Sprint 4 flagging trio (governance-action
+ * comments + clubhouse posts already had affordances; clubhouse
+ * comments were the missing one). Same identity contract as the two
+ * sibling hooks — auth + on-chain role required, the FE gates the
+ * affordance on `onChainRoles.length > 0`. On success we invalidate
+ * BOTH the per-post comments cache (so the row's `flagCount` /
+ * `hidden` re-render in place) AND the post list (so the
+ * `commentCount` and any future derived badges stay consistent).
+ */
+export function useFlagClubhouseComment() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ drepId, postId, commentId }: FlagClubhouseCommentParams) =>
+      post<FlagClubhouseCommentResponse>(
+        `/clubhouse/${encodeURIComponent(drepId)}/post/${encodeURIComponent(postId)}/comment/${encodeURIComponent(commentId)}/flag`,
+        {},
+      ),
+    onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({
+        queryKey: QUERY_KEYS.comments(variables.drepId, variables.postId),
+      });
+      void queryClient.invalidateQueries({
+        queryKey: QUERY_KEYS.posts(variables.drepId),
+      });
+    },
+  });
+}
+
 interface VotePollParams {
   drepId: string;
   postId: string;

@@ -195,6 +195,7 @@
     }
   },
   "invitations": {
+    "cardTitle_one": "保留中の委員会招待が {{count}} 件あります",
     "cardTitle_other": "保留中の委員会招待が {{count}} 件あります",
     "explainer": "委員会の議長があなたのウォレットを招待しています。承諾すると投票メンバーになります。参加しない場合は辞退してください。",
     "roleLine": "招待された役割: {{role}}",
@@ -210,14 +211,18 @@
     "rejectedToast": "招待を辞退しました。",
     "acceptFailedToast": "招待を承認できませんでした。",
     "rejectFailedToast": "招待を辞退できませんでした。",
+    "bellAria_one": "保留中の委員会招待が {{count}} 件あります",
     "bellAria_other": "保留中の委員会招待が {{count}} 件あります",
     "preferencesTitle": "委員会の招待",
     "autoDeclineLabel": "委員会の招待をすべて辞退する",
     "autoDeclineHelp": "有効にすると、あなたのウォレットに対して新たに発行される招待は作成時に自動で辞退されます。すでに保留中の招待には影響しません — それらを辞退するには下のボタンを使用してください。",
+    "declineAllButton_one": "保留中の {{count}} 件の招待をすべて辞退",
     "declineAllButton_other": "保留中の {{count}} 件の招待をすべて辞退",
     "decliningAll": "辞退中…",
+    "declineAllToast_one": "保留中の {{count}} 件の招待を辞退しました。",
     "declineAllToast_other": "保留中の {{count}} 件の招待を辞退しました。",
     "declineAllFailedToast": "保留中の招待を辞退できませんでした。",
+    "pendingCardTitle_one": "保留中の招待 {{count}} 件",
     "pendingCardTitle_other": "保留中の招待 {{count}} 件",
     "pendingDefaultLabel": "招待されたウォレット",
     "revoke": "取り消し",
@@ -268,7 +273,15 @@
       "notDelegated": "まだDRepに委任していません。ディレクトリを見て委任先を見つけ、そのクラブハウスに参加しましょう。",
       "guest": "DRepに委任するウォレットを接続して、限定クラブハウスに参加してください。",
       "browseDReps": "DRepを見る"
-    }
+    },
+    "flag": "通報",
+    "flagged": "通報済み",
+    "flagTooltip": "この投稿をコミュニティレビューのために通報",
+    "alreadyFlaggedTooltip": "この投稿は既に通報済みです",
+    "flagSubmitted": "通報を送信しました",
+    "flagFailed": "通報に失敗しました",
+    "hiddenByCommunity_one": "コミュニティにより非表示 — {{count}}件の通報",
+    "hiddenByCommunity_other": "コミュニティにより非表示 — {{count}}件の通報"
   },
   "composer": {
     "kind": {
@@ -608,9 +621,13 @@
     "votedAgo": "{{time}}に投票",
     "voteTooltipWithCount": "{{count}}票 • 最終投票 {{date}}",
     "voteTooltipNoCount": "最終投票 {{date}}",
+    "countActiveDRep_one": "アクティブなDRepはいません",
     "countActiveDRep_other": "アクティブなDRepはいません",
+    "countDRep_one": "DRepはいません",
     "countDRep_other": "DRepはいません",
+    "showingActive_one": "{{total}}件のアクティブなDRepのうち{{start}}〜{{end}}件を表示中",
     "showingActive_other": "{{total}}件のアクティブなDRepのうち{{start}}〜{{end}}件を表示中",
+    "showingAll_one": "{{total}}件のDRepのうち{{start}}〜{{end}}件を表示中",
     "showingAll_other": "{{total}}件のDRepのうち{{start}}〜{{end}}件を表示中",
     "loadFailed": "DRepの読み込みに失敗しました",
     "emptySearch": "「{{search}}」に一致するDRepはありませんでした。",
@@ -694,6 +711,7 @@
       "scriptTitle": "スクリプト制御のDRep",
       "anchorVerified": "アンカー検証済み",
       "anchorMismatch": "アンカー不一致",
+      "delegatedSince_one": "委任中・{{count}}エポック（E{{epoch}}から）",
       "delegatedSince_other": "委任中・{{count}}エポック（E{{epoch}}から）",
       "delegated": "あなたはこのDRepに委任しています",
       "delegatedTitleDays": "Cardanoのエポックは各約5日です。およそ{{days}}日間委任しています。",
@@ -1016,7 +1034,15 @@
     "error": "エラー",
     "replyPosted": "返信を投稿しました",
     "commentPosted": "コメントを投稿しました",
-    "signatureNote": "投稿には新しいウォレット署名が必要です。ウォレットが一度限りのメッセージへの署名を求めます — これに手数料はかからず、トランザクションはブロードキャストされません。"
+    "signatureNote": "投稿には新しいウォレット署名が必要です。ウォレットが一度限りのメッセージへの署名を求めます — これに手数料はかからず、トランザクションはブロードキャストされません。",
+    "flag": "通報",
+    "flagged": "通報済み",
+    "flagTooltip": "このコメントをコミュニティレビューのために通報",
+    "alreadyFlaggedTooltip": "このコメントは既に通報済みです",
+    "flagSubmitted": "通報を送信しました",
+    "flagFailed": "通報に失敗しました",
+    "hiddenByCommunity_one": "コミュニティにより非表示 — {{count}}件の通報",
+    "hiddenByCommunity_other": "コミュニティにより非表示 — {{count}}件の通報"
   },
   "castVote": {
     "optionSupportLabel": "賛成",
@@ -1086,5 +1112,68 @@
     "relatedProposals": "関連プロポーザル",
     "noRelated": "現在、このタイプの他のアクティブなプロポーザルはありません。",
     "untitledAction": "無題のアクション"
+  },
+  "footer": {
+    "dataFreshness": "データの鮮度",
+    "imprint": "運営者情報",
+    "privacy": "プライバシー",
+    "security": "セキュリティ",
+    "contributing": "コントリビューション"
+  },
+  "help": {
+    "dataFreshness": {
+      "title": "データの鮮度",
+      "intro": "drep.tools はオンチェーンの値をページ読み込みごとではなくスケジュールに従って取得します — これによりプラットフォームを高速かつ低コストで運用できます。サイト全体に表示される値はライブではなくキャッシュされたものです。以下に示す更新頻度はスケジューラが実行する唯一の信頼できる情報源であり、このページの内容がプラットフォームの実際の動作と乖離することはありません。",
+      "col": {
+        "data": "データ",
+        "refresh": "更新頻度",
+        "notes": "備考"
+      },
+      "footnote": "出典: shared/freshness.ts （スケジューラ向けに infra/lib/freshness.ts へ、このページ向けに frontend/src/lib/freshness.ts へバイト単位で同一にミラーリングされており、バックエンドの drift-guard テストで 3 つのコピーが固定されています）。"
+    }
+  },
+  "legal": {
+    "notConfigured": "（未設定）",
+    "configurationNote": "これらのページはビルド時の VITE_LEGAL_* 環境変数から運営者情報を表示します。未設定の場合は中立的なプレースホルダーが表示され、ページは引き続き描画されます。",
+    "imprint": {
+      "title": "運営者情報",
+      "operatorHeading": "運営者",
+      "contactHeading": "連絡先",
+      "vatHeading": "付加価値税識別番号",
+      "responsibleHeading": "コンテンツ責任者",
+      "aboutHeading": "本サイトについて",
+      "aboutBody": "drep.tools は、Cardano の DRep ガバナンスのための、非カストディアル型のウォレット認証プラットフォームです。秘密鍵を受け取り、要求し、保存することは一切ありません。サインインはウォレットでワンタイムメッセージに署名することにより行われ、オンチェーンの役割は署名により証明されます。",
+      "liabilityHeading": "コンテンツおよびリンクに関する責任",
+      "liabilityBody": "ユーザーが生成したコンテンツ（コメント、クラブハウス投稿、委員会提案）は、その投稿者の意見を反映するものです。本サイトに表示されるオンチェーンデータは、Koios および Blockfrost を通じて公開された Cardano ブロックチェーンから読み取られたものであり、当方の管理下にはありません。リンクされた外部サイトについては、各運営者が責任を負います。"
+    },
+    "privacy": {
+      "title": "プライバシーポリシー",
+      "lastUpdated": "最終更新日: 2026年6月10日",
+      "intro": "drep.tools は、データの最小化を前提として構築された、Cardano の DRep ガバナンスのためのウォレット認証プラットフォームです。当方はパスワード、メールアカウント、第三者による広告やクロスサイトトラッキングを一切使用しません。本ポリシーは、当方が処理する情報および GDPR に基づくお客様の権利について説明します。",
+      "controllerHeading": "管理者",
+      "controllerIntro": "本サイトにおけるデータ処理の責任者は以下のとおりです:",
+      "processingHeading": "処理する情報とその目的",
+      "walletHeading": "ウォレットサインインと身元証明",
+      "walletBody": "認証は非カストディアル方式です。お客様はワンタイムメッセージに署名することで Cardano ウォレットの管理権を証明します。当方は秘密鍵を受領、要求、保存することはなく、パスワードも存在しません。サインイン時には、お客様の公開オンチェーン識別子（ステークアドレス、DRep ID、SPO プール ID、または CC メンバーのホットキー）および証明された役割を、お客様が行うミューテーションを認可するために保存します。法的根拠: GDPR 第 6 条 1 項 (b) および (f)。",
+      "contentHeading": "お客様が公開するコンテンツ",
+      "contentBody": "お客様が作成したコメント、クラブハウス投稿、委員会提案、および投票は公開され、お客様の公開オンチェーン識別子に紐づけて保存されます。委員会のミューテーションには新しいウォレット署名が伴い、これにより当該アクションは否認不能となります。法的根拠: GDPR 第 6 条 1 項 (b) および (f)。",
+      "sessionHeading": "セッショントークン",
+      "sessionBody": "サインイン状態を維持するため、短期間有効な JWT を発行します。広告用やトラッキング用の Cookie は設定しないため、同意バナーは不要です。法的根拠: GDPR 第 6 条 1 項 (f)。",
+      "logsHeading": "サーバーログとセキュリティ",
+      "logsBody": "当方のインフラ提供者（AWS）は、サイト提供、不正利用対策、レート制限のために、IP アドレスなどの接続メタデータを処理します。これらは短期間のみ保持されます。法的根拠: GDPR 第 6 条 1 項 (f)。",
+      "chainHeading": "公開ブロックチェーンデータ",
+      "chainBody": "オンチェーンの役割を検証しガバナンス情報を表示するため、Koios および Blockfrost を介して Cardano ブロックチェーンから公開データを読み取ります。公開オンチェーン識別子を超えて個人データを送信することはありません。",
+      "recipientsHeading": "受領者および処理者",
+      "recipientsBody": "当方は AWS（ホスティング・DynamoDB・Secrets Manager）、Koios（読み取り専用の Cardano データ）、Blockfrost（読み取り専用の Cardano データ）、および Cardano IPFS ネットワーク（投票理由アンカー用）を利用しています。お客様のデータを販売することはなく、第三者の広告も利用していません。",
+      "retentionHeading": "保存期間",
+      "retentionBody": "アカウントデータはお客様のアカウントが有効な間保持されます。公開コンテンツは引き続きプラットフォームの記録として残ります。公開された Cardano ブロックチェーンに書き込まれたデータ（例: お客様が送信した委員会投票）は当方の管理下になく、当方が削除することはできません。",
+      "rightsHeading": "お客様の権利",
+      "rightsBodyPrefix": "GDPR に基づき、お客様にはアクセス権（第 15 条）、訂正権（第 16 条）、削除権（第 17 条）、制限権（第 18 条）、データポータビリティの権利（第 20 条）、異議申立権（第 21 条）、および監督機関への苦情申立権があります。これらを行使するには、以下までご連絡ください: ",
+      "rightsBodySuffix": "。当方はお客様のアカウントおよびプラットフォーム上のコンテンツを削除できますが、公開ブロックチェーン上に記録されたデータを変更または削除することはできません。",
+      "automatedHeading": "自動化された意思決定",
+      "automatedBody": "GDPR 第 22 条の意味における自動化された意思決定やプロファイリングは行っていません。",
+      "changesHeading": "本ポリシーの変更",
+      "changesBody": "本ポリシーは更新されることがあります。最新版は常にこのページでご確認いただけます。"
+    }
   }
 }

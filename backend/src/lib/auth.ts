@@ -2,7 +2,7 @@ import { SignJWT, jwtVerify, type JWTPayload as JoseJWTPayload } from 'jose';
 import * as crypto from 'crypto';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { decode as cborDecode, encode as cborEncode } from 'cbor-x';
-import type { JWTPayload, UserRole, SessionType } from './types';
+import type { JWTPayload, UserRole, SessionType, OnChainRole } from './types';
 import { putItem, getItem, deleteItem, tableNames } from './dynamodb';
 import {
   decodeCardanoAddress,
@@ -19,6 +19,12 @@ interface AuthNonceItem extends Record<string, unknown> {
   walletAddress: string;
   expiresAt: number; // epoch seconds for DynamoDB TTL
 }
+
+// The session-revocation store (Sprint 1) writes onto the same
+// `tableNames.authNonces` table to avoid a new CDK table this sprint.
+// Discriminated via `kind: 'session'` so the legacy nonce-kind invariants
+// in this file never touch these records. `nonce` here is
+// SHA-256(jti) in hex — a deterministic, opaque key.
 
 // ---- Secrets Manager client (module-level, reused across invocations) ----
 
@@ -558,6 +564,14 @@ const SESSION_DURATIONS: Record<SessionType, number> = {
  *
  * Renamed from `drepId` on 2026-05-27. See `verifyJWT` for backward-
  * compatibility behavior with tokens issued before this rename.
+ *
+ * `extra` carries optional Sprint-1 additions — `onChainRoles[]` (a
+ * parallel claim alongside `roles`, proven via the on-chain login flow)
+ * and `jti` (a unique session id used to drive per-session revocation
+ * via the identity session store). Both are additive: pre-Sprint-1
+ * callers (the legacy CIP-30 verify handler) pass nothing and tokens
+ * keep the prior shape exactly. Pre-Sprint-1 tokens still verify because
+ * `verifyJWT` reads both claims as optional.
  */
 export async function issueJWT(
   walletAddress: string,
@@ -565,24 +579,43 @@ export async function issueJWT(
   sessionType: SessionType,
   registeredDrepId?: string,
   tokenVersion = 0,
+  extra?: { onChainRoles?: OnChainRole[]; jti?: string; personId?: string },
 ): Promise<{ token: string; expiresAt: string }> {
   const secret = await getJwtSecret();
   const durationSecs = SESSION_DURATIONS[sessionType];
   const expiresAt = new Date(Date.now() + durationSecs * 1000);
+
+  // onChainRoles is a parallel claim, NOT folded into `roles`. When absent
+  // or empty, we omit the field rather than writing `[]` — legacy tokens
+  // round-trip with identical bytes that way.
+  const onChainRoles = extra?.onChainRoles;
+  const hasOnChainRoles = Array.isArray(onChainRoles) && onChainRoles.length > 0;
+
+  // Decision #3 — `personId` is a parallel claim like `onChainRoles`. Omit
+  // when absent so legacy + pre-Decision-3 tokens stay byte-identical.
+  const personId =
+    typeof extra?.personId === 'string' && extra.personId.length > 0
+      ? extra.personId
+      : undefined;
 
   const payload: Record<string, unknown> = {
     roles,
     sessionType,
     tokenVersion,
     ...(registeredDrepId ? { registeredDrepId } : {}),
+    ...(hasOnChainRoles ? { onChainRoles } : {}),
+    ...(personId ? { personId } : {}),
   };
 
-  const token = await new SignJWT(payload)
+  let builder = new SignJWT(payload)
     .setProtectedHeader({ alg: 'HS256' })
     .setSubject(walletAddress)
     .setIssuedAt()
-    .setExpirationTime(expiresAt)
-    .sign(secret);
+    .setExpirationTime(expiresAt);
+  if (extra?.jti) {
+    builder = builder.setJti(extra.jti);
+  }
+  const token = await builder.sign(secret);
 
   return { token, expiresAt: expiresAt.toISOString() };
 }
@@ -609,6 +642,8 @@ export async function verifyJWT(token: string): Promise<JWTPayload> {
     registeredDrepId?: string;
     tokenVersion?: number;
     drepId?: string; // legacy — remove after 2026-06-03
+    onChainRoles?: OnChainRole[];
+    personId?: string;
   };
 
   if (!josePayload.sub) {
@@ -624,12 +659,32 @@ export async function verifyJWT(token: string): Promise<JWTPayload> {
   // Prefer the new field; fall back to legacy for in-flight tokens.
   const registeredDrepId = josePayload.registeredDrepId ?? josePayload.drepId;
 
+  // Sprint 1 additions: read defensively so a pre-Sprint-1 token (no
+  // onChainRoles claim, no jti) continues to verify and surfaces as
+  // `onChainRoles: []`. The authorizer's revocation path treats a missing
+  // `jti` as "not granularly revocable" and falls back to `tokenVersion`.
+  const onChainRoles = Array.isArray(josePayload.onChainRoles)
+    ? josePayload.onChainRoles.filter(
+        (r): r is OnChainRole => r === 'drep' || r === 'spo' || r === 'cc' || r === 'proposer',
+      )
+    : [];
+
   return {
     sub: josePayload.sub,
     roles: josePayload.roles,
     sessionType: josePayload.sessionType,
     registeredDrepId,
     tokenVersion: typeof josePayload.tokenVersion === 'number' ? josePayload.tokenVersion : 0,
+    onChainRoles,
+    ...(typeof josePayload.jti === 'string' && josePayload.jti.length > 0
+      ? { jti: josePayload.jti }
+      : {}),
+    // Decision #3 — `personId` is optional on read. Pre-Decision-3
+    // tokens omit it; downstream handlers fall back to resolving via
+    // the on-chain credential (`identityKey` → `identity_links`).
+    ...(typeof josePayload.personId === 'string' && josePayload.personId.length > 0
+      ? { personId: josePayload.personId }
+      : {}),
     iat: josePayload.iat ?? 0,
     exp: josePayload.exp ?? 0,
   };
@@ -647,6 +702,75 @@ export async function verifyJWT(token: string): Promise<JWTPayload> {
 export function cookieName(): string {
   const stage = process.env['STAGE'] ?? 'dev';
   return stage === 'prod' ? 'access_token' : `access_token_${stage}`;
+}
+
+/**
+ * Stage-stamped cookie name for the NEW on-chain login (Sprint 1) —
+ * parallel to `cookieName()` so the legacy CIP-30 cookie keeps its
+ * exact name (`access_token` / `access_token_<stage>`) and the new
+ * on-chain session lives at `access_token_onchain` /
+ * `access_token_onchain_<stage>`. Two cookies CAN coexist on the same
+ * subdomain — the authorizer prefers the legacy one first (see
+ * `extractTokenFromCookie`), and an on-chain-only login still works
+ * because the new cookie is read by `extractOnChainTokenFromCookie`
+ * below. The stage stamping mirrors the legacy rationale: a broader
+ * `.drep.tools` cookie set by prod must not shadow a stage cookie on
+ * a test subdomain.
+ */
+export function onChainCookieName(): string {
+  const stage = process.env['STAGE'] ?? 'dev';
+  return stage === 'prod' ? 'access_token_onchain' : `access_token_onchain_${stage}`;
+}
+
+/**
+ * Extract a JWT for the on-chain session cookie.
+ *
+ * The on-chain login issues a JWT under `access_token_onchain[_<stage>]`
+ * — parallel to the legacy `access_token[_<stage>]` cookie — so a wallet
+ * may hold both simultaneously without either shadowing the other. This
+ * helper exists so authorizer code can look up the on-chain token
+ * independently of the legacy one.
+ */
+export function extractOnChainTokenFromCookie(cookieHeader: string | undefined): string | null {
+  if (!cookieHeader) return null;
+  const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${onChainCookieName()}=([^;]+)`));
+  return match ? (match[1] ?? null) : null;
+}
+
+/**
+ * Build the Set-Cookie header for a successful on-chain login.
+ *
+ * Mirrors `buildSetCookieHeader` (legacy) but writes to the on-chain
+ * cookie name. The cookie domain (when configured) is shared so the SPA
+ * at https://drep.tools authenticates against https://api.drep.tools.
+ */
+export function buildOnChainSetCookieHeader(token: string, sessionType: SessionType): string {
+  const maxAge = SESSION_DURATIONS[sessionType];
+  const cookieDomain = process.env['COOKIE_DOMAIN'];
+  return [
+    `${onChainCookieName()}=${token}`,
+    `Max-Age=${maxAge}`,
+    'HttpOnly',
+    'Secure',
+    'SameSite=Strict',
+    'Path=/',
+    ...(cookieDomain ? [`Domain=${cookieDomain}`] : []),
+  ].join('; ');
+}
+
+/** Build a clear-cookie header for the on-chain session — used by logout. */
+export function buildOnChainClearCookieHeader(): string {
+  const cookieDomain = process.env['COOKIE_DOMAIN'];
+  const parts = [
+    `${onChainCookieName()}=`,
+    'Max-Age=0',
+    'HttpOnly',
+    'Secure',
+    'SameSite=Strict',
+    'Path=/',
+  ];
+  if (cookieDomain) parts.push(`Domain=${cookieDomain}`);
+  return parts.join('; ');
 }
 
 export function extractTokenFromCookie(cookieHeader: string | undefined): string | null {

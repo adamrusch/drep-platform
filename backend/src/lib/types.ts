@@ -16,6 +16,28 @@ export type UserRole =
   // safety-mode clears and future moderation. See handlers/admin/.
   | 'platform_admin';
 
+/**
+ * On-chain proven roles, carried as a SEPARATE JWT claim from `roles`.
+ *
+ * The four roles map 1:1 to the `AuthRole` union used by the ported
+ * `identity/auth/users.ts`. They are proven at login via a fresh signature
+ * over a stage-bound nonce (`drep` and `proposer` via CIP-8 COSE; `spo` and
+ * `cc` via a raw Ed25519 paste flow). The on-chain identity is then
+ * resolved against Koios — see `identity/auth/resolveRole.ts`.
+ *
+ * Why this is NOT folded into `UserRole`:
+ *   - `UserRole` is used as a discriminated union across the codebase for
+ *     exhaustiveness checks; adding values would force churn through every
+ *     `switch` / role-gate handler and risk silently breaking checks that
+ *     iterate over the full set.
+ *   - The legacy CIP-30 wallet login (the live `roles` claim) is untouched
+ *     by Sprint 1 — it stays authoritative for existing users.
+ *   - On-chain roles travel as a parallel `onChainRoles[]` JWT claim so a
+ *     handler can opt in (e.g. "is this user an active SPO?") without
+ *     entangling with platform roles like `lead_drep` / `platform_admin`.
+ */
+export type OnChainRole = 'drep' | 'spo' | 'cc' | 'proposer';
+
 export type GovernanceActionType =
   | 'ParameterChange'
   | 'HardForkInitiation'
@@ -426,6 +448,31 @@ export interface JWTPayload {
    *  increments the row, invalidating every outstanding token at once.
    *  Absent on legacy tokens → treated as 0. */
   tokenVersion?: number;
+  /** On-chain proven roles for the new identity subsystem (Sprint 1).
+   *
+   *  Carries the roles a wallet proved via the on-chain login flows
+   *  (`/auth/onchain/verify`). Always optional and defaults to `[]` on
+   *  read so every legacy CIP-30 token continues to verify unchanged.
+   *  This claim NEVER reflects the legacy `roles` set — they're two
+   *  parallel surfaces sharing the same JWT envelope. */
+  onChainRoles?: OnChainRole[];
+  /** Unique session id (ULID), present on every token issued after the
+   *  per-session revocation path landed. Hashed via SHA-256 to derive the
+   *  revocation-store key. Absent on tokens issued before the change —
+   *  the authorizer treats absence as "not granularly revocable" and
+   *  falls back to the coarse `tokenVersion` check. */
+  jti?: string;
+  /** Decision #3 (2026-06-10) — canonical person id (ULID) for the
+   *  on-chain identity subsystem. Present only on tokens minted by the
+   *  on-chain login (`/auth/onchain/verify`) AFTER Decision #3 lands.
+   *
+   *  When set, identifies the same individual across multiple on-chain
+   *  credentials (DRep / SPO / CC / Proposer / wallet-stake). Optional
+   *  so legacy CIP-30 tokens AND pre-Decision-3 on-chain tokens both
+   *  verify unchanged (the `me`/link handlers fall back to a re-resolve
+   *  via `identityKey` → `identity_links` when absent — a rolling
+   *  upgrade path). */
+  personId?: string;
   iat: number;
   exp: number;
 }
@@ -434,6 +481,81 @@ export interface AuthChallenge {
   nonce: string;
   message: string;
   expiresAt: string;
+}
+
+// ============================================================
+// Decision #3 (2026-06-10) — canonical person + identity-link model.
+//
+// Adds a "person" layer so one individual is recognised as the same
+// person whether they log in via a CIP-30 wallet (stake credential) or
+// a raw-key (SPO Calidus / CC hot key) on-chain login. The legacy
+// `users` table (CIP-30 wallet sessions) is UNTOUCHED — these types
+// describe the new on-chain person model only.
+//
+// **Credential type**: the four `OnChainRole` values map almost 1:1 to
+// credential types, except `proposer` doesn't have its own credential
+// — a proposer proves control of a stake address, so its credential
+// type is `stake`. We expose `'stake'` as a fifth credential type to
+// keep that distinction explicit (a stake-credential link can come
+// from either a proposer login OR a future wallet-stake link).
+// ============================================================
+
+/** Credential type used to namespace an `identityKey`. The PK on
+ *  `identity_links` is `${credentialType}:${credentialId}`. */
+export type IdentityCredentialType = 'drep' | 'pool' | 'cc' | 'stake';
+
+/** Where this identity_links row was created.
+ *   - `'login'` — auto-provisioned on first on-chain login for an
+ *     unmapped credential (the onchainVerify reconciliation path).
+ *   - `'link'`  — added via an explicit `/auth/onchain/link/verify`
+ *     call where the caller, already signed in with one credential,
+ *     proved control of a SECOND credential. */
+export type IdentityLinkOrigin = 'login' | 'link';
+
+/** PK=`personId`. One row per recognised individual. The on-chain
+ *  credentials that map to this person live in `identity_links`. */
+export interface OnchainUserItem {
+  /** ULID. Opaque; never reused. */
+  personId: string;
+  /** Optional display name shown across on-chain surfaces. */
+  displayName?: string;
+  /** Free-form short bio. */
+  bio?: string;
+  /** Same shape as the legacy `SocialLinks` — keep the type identical
+   *  so a future client can reuse the same Zod schema across both
+   *  legacy + on-chain profile flows. */
+  socialLinks?: SocialLinks;
+  /** ISO-8601. */
+  createdAt: string;
+  /** ISO-8601. */
+  updatedAt: string;
+  [key: string]: unknown;
+}
+
+/** PK=`identityKey` (= `${credentialType}:${credentialId}`). Maps one
+ *  on-chain credential to a canonical `personId`. */
+export interface IdentityLinkItem {
+  /** Namespaced credential string. Format MUST match the writer
+   *  (`identityKeyFor`) so reads + writes agree byte-for-byte. */
+  identityKey: string;
+  /** FK into `onchain_users.personId`. */
+  personId: string;
+  /** Credential type — same as the namespace prefix in `identityKey`.
+   *  Denormalised so callers don't have to re-parse the PK. */
+  credentialType: IdentityCredentialType;
+  /** ISO-8601 — when the link was minted. GSI sort key on
+   *  `personId-verifiedAt-index`. */
+  verifiedAt: string;
+  /** Audit breadcrumb — was this link auto-provisioned on a fresh
+   *  login (`'login'`) or added via the explicit link flow
+   *  (`'link'`)? */
+  verifiedVia: IdentityLinkOrigin;
+  /** Optional — for `'link'` rows, the on-chain role the caller's
+   *  CURRENT session was authenticated under at the time the link was
+   *  created. Informational; the load-bearing security check is the
+   *  signature verification on the link/verify call. */
+  linkedFromRole?: OnChainRole;
+  [key: string]: unknown;
 }
 
 export interface AuthToken {
@@ -709,6 +831,29 @@ export interface DRepDirectoryItem {
    *  contract; on the Item shape it's the same value persisted to
    *  DynamoDB. */
   isPredefined?: boolean;
+  /** Sprint 5 — content-addressed avatar pipeline. sha256-hex of the
+   *  fetched-and-validated bytes living at S3 key `avatars/<hash>`. Set
+   *  once the avatar-store sync has successfully downloaded the upstream
+   *  `image` URL and persisted the bytes. Absent / null means "no
+   *  self-hosted avatar yet; the frontend renders the identicon
+   *  fallback." Decoupled from the on-chain `image` field so the
+   *  presence of a Cardanoscan-style anchor URL doesn't automatically
+   *  mean we're proxying it (we never proxy at request time — only
+   *  serve previously-validated bytes from S3). */
+  imageContentHash?: string | null;
+  /** Sprint 5 — the upstream `image` URL the bytes hashed at
+   *  `imageContentHash` originally came from. Stored so the avatar-store
+   *  sync can cheap-skip rows whose upstream URL is unchanged (no
+   *  re-download), and so an operator can trace a given hash back to its
+   *  source. Cleared together with `imageContentHash` when the upstream
+   *  removes the avatar. */
+  imageStoredUrl?: string | null;
+  /** Sprint 5 — unix-ms timestamp of the most recent failed download
+   *  attempt. Set by the avatar-store sync when fetch / validation
+   *  fails; the next sync run uses it to rotate the row to the back of
+   *  the work queue so a single broken upstream doesn't starve fresh
+   *  rows. Cleared on a successful store. */
+  imageFetchFailedAt?: number | null;
   lastSyncedAt: string;
   enrichmentVersion: number;
   [key: string]: unknown;
@@ -1025,6 +1170,39 @@ export interface PlatformSafetyModeItem {
   [key: string]: unknown;
 }
 
+/**
+ * platform_state — PK stateKey='DREP_DVT_THRESHOLDS' (Sprint 5).
+ *
+ * Persisted snapshot of the live DRep voting thresholds from Koios's
+ * `/epoch_params`. Written by the directory sync (best-effort each cycle)
+ * and read by the concentration handler so the donut can render the
+ * 60/67/75 threshold markers without doing a per-request Koios round-trip.
+ *
+ * All `dvt_*` fields are fractional doubles in [0, 1]; the concentration
+ * handler converts them to integer percents (0..100) for the donut and
+ * coalesces duplicate-percent thresholds into one marker that lists every
+ * gated action. Optional because not every Koios revision exposes every
+ * threshold; absent fields are simply skipped on render.
+ */
+export interface PlatformDrepDvtThresholdsItem {
+  stateKey: 'DREP_DVT_THRESHOLDS';
+  /** Epoch the snapshot was taken from. */
+  epochNo: number;
+  /** ISO-8601 of the sync cycle that wrote this row. */
+  capturedAt: string;
+  dvt_motion_no_confidence?: number;
+  dvt_committee_normal?: number;
+  dvt_committee_no_confidence?: number;
+  dvt_update_to_constitution?: number;
+  dvt_hard_fork_initiation?: number;
+  dvt_p_p_network_group?: number;
+  dvt_p_p_economic_group?: number;
+  dvt_p_p_technical_group?: number;
+  dvt_p_p_gov_group?: number;
+  dvt_treasury_withdrawal?: number;
+  [key: string]: unknown;
+}
+
 export interface GovernanceActionItem {
   actionId: string;
   SK: 'ACTION';
@@ -1145,6 +1323,48 @@ export interface CommentItem {
   upvoteCount?: number;
   /** Headcount of active downvotes. */
   downvoteCount?: number;
+  /** Sprint 4 — community-flagging counter. Atomically `ADD`ed when a
+   *  fresh per-flagger row is inserted in `comment_flags`. Optional for
+   *  backwards compat with rows written before the field landed —
+   *  treat absence as zero. */
+  flagCount?: number;
+  /** Sprint 4 — true when `flagCount` reached the hide threshold
+   *  (`HIDE_THRESHOLD` in `handlers/comments/flag.ts`). Set via a
+   *  conditional `SET hidden = :true` in the same atomic update that
+   *  bumps the counter. Hidden rows are excluded from list responses
+   *  for normal users; `platform_admin`s see them with a
+   *  `hidden: true` marker so they can moderate. Absent / `false`
+   *  means visible. */
+  hidden?: boolean;
+  [key: string]: unknown;
+}
+
+/**
+ * One row of `comment_flags` (Sprint 4) — PK=`commentId`, SK=`flaggerId`.
+ *
+ * The minimal evidence row backing the per-comment `flagCount` counter
+ * on the parent comment. One row per (comment, flagger) — the flag
+ * handler uses `putItemIfAbsent` so duplicate-flag attempts from the
+ * same wallet are idempotent at the schema layer.
+ *
+ * `role` carries the on-chain role the flagger proved at the time the
+ * flag was raised (`'drep' | 'spo' | 'cc' | 'proposer'`). It's stored
+ * for the audit trail — a future moderation surface can reconstruct
+ * "who flagged this and by what authority." NOT consumed by the count
+ * math: any one of the four on-chain roles counts equally toward the
+ * hide threshold.
+ */
+export interface CommentFlagItem {
+  /** PK — the ULID of the comment being flagged. */
+  commentId: string;
+  /** SK — the flagger's bech32 stake address. Combined with `commentId`
+   *  this is the per-(comment, flagger) uniqueness key. */
+  flaggerId: string;
+  /** The on-chain role the flagger had proved at the time of the flag.
+   *  See `OnChainRole` for the four values. */
+  role: OnChainRole;
+  /** ISO-8601 timestamp the flag was raised. */
+  createdAt: string;
   [key: string]: unknown;
 }
 
@@ -1334,7 +1554,93 @@ export interface ClubhousePostItem {
    *  filter without scanning the comment set. Absent on posts with zero
    *  comments. */
   lastReplyAt?: string;
+  /** Sprint 4 — community-flagging counter. Atomically `ADD`ed when a
+   *  fresh per-flagger row is inserted in `clubhouse_post_flags`.
+   *  Optional for backwards compat with rows written before the field
+   *  landed — treat absence as zero. */
+  flagCount?: number;
+  /** Sprint 4 — true when `flagCount` reached the hide threshold. Set
+   *  via a conditional `SET hidden = :true` in the same atomic update
+   *  that bumps the counter. Hidden posts are excluded from list
+   *  responses for normal users; `platform_admin`s see them with a
+   *  `hidden: true` marker for moderation. Absent / `false` means
+   *  visible. */
+  hidden?: boolean;
   [key: string]: unknown;
+}
+
+/**
+ * One row of `clubhouse_post_flags` (Sprint 4) — PK=`postKey`,
+ * SK=`flaggerId`.
+ *
+ * Same shape and semantics as `CommentFlagItem` but scoped to clubhouse
+ * posts. The PK format matches `clubhouseCommentPostKey(drepId, postId)`
+ * — see `lib/types.ts` and the table-stack rationale for why it
+ * mirrors the de-inlined-comments partition format.
+ */
+export interface ClubhousePostFlagItem {
+  /** PK — `${drepId}#${postId}`, composed via
+   *  `clubhouseCommentPostKey(drepId, postId)`. */
+  postKey: string;
+  /** SK — the flagger's bech32 stake address. */
+  flaggerId: string;
+  /** The on-chain role the flagger had proved at the time of the flag. */
+  role: OnChainRole;
+  /** ISO-8601 timestamp the flag was raised. */
+  createdAt: string;
+  [key: string]: unknown;
+}
+
+/**
+ * One row of `clubhouse_comment_flags` (Sprint 4 follow-up) —
+ * PK=`postKey`, SK=`commentFlagKey`.
+ *
+ * Closes the previously-missing leg of the Sprint 4 flagging trio
+ * (`comment_flags` + `clubhouse_post_flags` already exist; this is the
+ * clubhouse-comments primitive).
+ *
+ * `postKey` shares the partition shape with `clubhouse_comments` +
+ * `clubhouse_post_flags` — `${drepId}#${postId}`. The SK composes the
+ * comment id with the flagger id so a single partition `Query` returns
+ * every flag for every comment under one post in one round-trip; that's
+ * useful for a future moderation surface that wants to enumerate the
+ * flagged comments for a post without an extra cross-table walk. The
+ * per-(comment, flagger) tuple is the uniqueness constraint that
+ * `putItemIfAbsent` exploits to make duplicate flags idempotent.
+ */
+export interface ClubhouseCommentFlagItem {
+  /** PK — `${drepId}#${postId}`, composed via
+   *  `clubhouseCommentPostKey(drepId, postId)`. */
+  postKey: string;
+  /** SK — `${commentId}#${flaggerId}`, composed via
+   *  `clubhouseCommentFlagKey(commentId, flaggerId)`. The tuple keeps
+   *  one row per (comment, flagger) even across a `Query(postKey)`
+   *  that returns every flag on every comment under the post. */
+  commentFlagKey: string;
+  /** Denormalised — the comment id this flag targets. Same value
+   *  embedded in `commentFlagKey`; carried as a top-level field for
+   *  trivial server-side filtering after a partition Query. */
+  commentId: string;
+  /** Denormalised — the drep id (the post's owning clubhouse). */
+  drepId: string;
+  /** Denormalised — the post id. */
+  postId: string;
+  /** The flagger's bech32 stake address. */
+  flaggerId: string;
+  /** The on-chain role the flagger had proved at the time of the flag. */
+  role: OnChainRole;
+  /** ISO-8601 timestamp the flag was raised. */
+  createdAt: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Compose the SK used by the `clubhouse_comment_flags` table.
+ * `${commentId}#${flaggerId}` — keeps one row per (comment, flagger)
+ * even when several different commenters share a `postKey` partition.
+ */
+export function clubhouseCommentFlagKey(commentId: string, flaggerId: string): string {
+  return `${commentId}#${flaggerId}`;
 }
 
 /** A clubhouse comment can be top-level OR a reply to a top-level
@@ -1418,6 +1724,18 @@ export interface ClubhouseCommentRowItem {
    *  on first-write avoids a migration; the sweep populates the
    *  attribute only when it flips. */
   authorDelegationActive?: boolean;
+  /** Sprint 4 follow-up — community-flagging counter for clubhouse
+   *  comments. Atomically `ADD`ed when a fresh per-flagger row is
+   *  inserted in `clubhouse_comment_flags`. Optional for backwards
+   *  compat with rows written before this field landed — treat absence
+   *  as zero. */
+  flagCount?: number;
+  /** Sprint 4 follow-up — true when `flagCount` reached the hide
+   *  threshold. Set via a conditional `SET hidden = :true` after the
+   *  atomic ADD; hidden comments are excluded from list responses for
+   *  normal users while `platform_admin`s see them with a `hidden:
+   *  true` marker so they can moderate. */
+  hidden?: boolean;
   [key: string]: unknown;
 }
 

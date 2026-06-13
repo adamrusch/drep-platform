@@ -89,6 +89,10 @@ describe('buildUnsignedVoteTx', () => {
     const calls: {
       voter?: unknown; govActionId?: unknown; votingProcedure?: unknown;
       changeAddress?: string; utxos?: unknown[];
+      metadataLabel?: number; metadataValue?: object;
+      // Track whether `complete()` was reached via the metadataValue
+      // branch or the direct branch, so we can assert the chain shape.
+      completePath?: 'with-metadata' | 'without-metadata';
     } = {};
     const vote = vi.fn((voter, govActionId, votingProcedure) => {
       calls.voter = voter; calls.govActionId = govActionId; calls.votingProcedure = votingProcedure;
@@ -98,7 +102,22 @@ describe('buildUnsignedVoteTx', () => {
           return {
             selectUtxosFrom: (utxos: unknown[]) => {
               calls.utxos = utxos;
-              return { complete: () => Promise.resolve('UNSIGNED_HEX') };
+              return {
+                metadataValue: (label: number, metadata: object) => {
+                  calls.metadataLabel = label;
+                  calls.metadataValue = metadata;
+                  return {
+                    complete: () => {
+                      calls.completePath = 'with-metadata';
+                      return Promise.resolve('UNSIGNED_HEX');
+                    },
+                  };
+                },
+                complete: () => {
+                  calls.completePath = 'without-metadata';
+                  return Promise.resolve('UNSIGNED_HEX');
+                },
+              };
             },
           };
         },
@@ -157,5 +176,67 @@ describe('buildUnsignedVoteTx', () => {
     );
     expect(calls.votingProcedure).toEqual({ voteKind: 'No' });
     expect((calls.votingProcedure as Record<string, unknown>)['anchor']).toBeUndefined();
+  });
+
+  // ---- Sprint 6: CIP-20 attribution (label 674) ----
+
+  it('attaches the default drep.tools CIP-20 attribution by default', async () => {
+    const { deps, calls } = buildDepsAndCaptures();
+    await buildUnsignedVoteTx(
+      {
+        drepId: 'drep1abc',
+        actionId: `${HASH64}#0`,
+        position: 'Yes',
+        anchorUrl: null,
+        anchorHash: null,
+        wallet,
+      },
+      deps,
+    );
+    expect(calls.completePath).toBe('with-metadata');
+    expect(calls.metadataLabel).toBe(674);
+    // Default envelope is `{ msg: ["Voted via drep.tools", "drep-tools"] }`.
+    expect(calls.metadataValue).toEqual({
+      msg: ['Voted via drep.tools', 'drep-tools'],
+    });
+  });
+
+  it('honours an explicit attributionMetadata envelope', async () => {
+    const { deps, calls } = buildDepsAndCaptures();
+    const customEnvelope = { msg: ['Hello from a custom caller'] };
+    await buildUnsignedVoteTx(
+      {
+        drepId: 'drep1abc',
+        actionId: `${HASH64}#0`,
+        position: 'Yes',
+        anchorUrl: null,
+        anchorHash: null,
+        wallet,
+        attributionMetadata: customEnvelope,
+      },
+      deps,
+    );
+    expect(calls.completePath).toBe('with-metadata');
+    expect(calls.metadataLabel).toBe(674);
+    expect(calls.metadataValue).toBe(customEnvelope);
+  });
+
+  it('attaches no CIP-20 metadata when attributionMetadata is null', async () => {
+    const { deps, calls } = buildDepsAndCaptures();
+    await buildUnsignedVoteTx(
+      {
+        drepId: 'drep1abc',
+        actionId: `${HASH64}#0`,
+        position: 'Yes',
+        anchorUrl: null,
+        anchorHash: null,
+        wallet,
+        attributionMetadata: null,
+      },
+      deps,
+    );
+    expect(calls.completePath).toBe('without-metadata');
+    expect(calls.metadataLabel).toBeUndefined();
+    expect(calls.metadataValue).toBeUndefined();
   });
 });
