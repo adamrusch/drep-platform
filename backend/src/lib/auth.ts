@@ -240,6 +240,36 @@ export interface WalletSignature {
  * Oracle consultation: NO subagent available in this session; implemented
  * per the CIP-8 / CIP-30 spec text above and made step 1 the load-bearing
  * check so that security never depends on the optional header parse.
+ *
+ * # 2026-06-11 cutover (`feat/legacy-login-cutover`)
+ *
+ * The /auth/verify login handler NO LONGER calls this. It now uses the
+ * PORTED `verifyCip8` from `lib/identity/auth/cose.ts` (the same verifier
+ * the on-chain login uses) plus an explicit pubkey↔claimed-address
+ * binding step that replicates this function's load-bearing check.
+ * Parity is locked in by `handlers/auth/verify.parity.test.ts`, which
+ * proves the new path and this legacy function produce identical
+ * accept/reject decisions across the CIP-30 corpus — including the
+ * wrong-claimed-address rejection (the P0-1 exploit). This function
+ * remains here BECAUSE two OTHER callers still use it:
+ *
+ *   - `handlers/comments/create.ts` — mutation-nonce signature verify
+ *   - `handlers/committee/_committee.ts` — mutation-nonce signature verify
+ *     (DRep-link and committee mutations)
+ *
+ * Both call sites verify a wallet-signed MUTATION nonce, not a login.
+ * They share the same legacy contract and are EXPLICITLY OUT OF SCOPE
+ * for this login cutover (different surface area, different threat
+ * model — mutations already require an authenticated session). New
+ * call sites SHOULD prefer `verifyCip8` + an explicit
+ * `publicKeyMatchesAddress` binding (the pattern in
+ * `handlers/auth/verify.ts`); this function will be retired in a
+ * follow-up that cuts those two mutation paths over.
+ *
+ * @deprecated For NEW callers, use `verifyCip8` from
+ *   `lib/identity/auth/cose.ts` + an explicit binding step (see
+ *   `handlers/auth/verify.ts` for the canonical pattern). Existing
+ *   mutation-nonce callers keep using this until they're migrated.
  */
 export function verifyWalletSignature(
   walletAddress: string,
