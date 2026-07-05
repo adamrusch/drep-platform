@@ -1407,7 +1407,14 @@ export class ApiStack extends cdk.Stack {
     // non-personal role address on the project's own domain.
     const operatorEmail =
       (this.node.tryGetContext('operatorEmail') as string | undefined) ?? 'ops@drep.tools';
-    new budgets.CfnBudget(this, 'SoftBudget', {
+    // NOTE: logical ID is `SoftBudgetV2` (was `SoftBudget`). AWS Budgets
+    // cannot cleanly change a subscriber on an existing budget in place —
+    // CFN attempts a replace and collides on the unique BudgetName. Giving
+    // the resource a fresh logical ID makes CFN CREATE it anew; the stale
+    // physical budget of the same name must be deleted first (see the
+    // deploy runbook) so the create doesn't collide. Same BudgetName is
+    // retained so cost tracking is continuous.
+    new budgets.CfnBudget(this, 'SoftBudgetV2', {
       budget: {
         budgetName: `drep-platform-${stage}-soft-monthly`,
         budgetType: 'COST',
@@ -1466,7 +1473,9 @@ export class ApiStack extends cdk.Stack {
       ],
     });
 
-    new budgets.CfnBudget(this, 'HardBudget', {
+    // Logical ID `HardBudgetV2` (was `HardBudget`) — same rationale as
+    // SoftBudgetV2 above (clean CREATE to change the subscriber).
+    new budgets.CfnBudget(this, 'HardBudgetV2', {
       budget: {
         budgetName: `drep-platform-${stage}-hard-monthly`,
         budgetType: 'COST',
