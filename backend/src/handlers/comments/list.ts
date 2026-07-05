@@ -1,7 +1,7 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { queryItems, tableNames } from '../../lib/dynamodb';
 import type { CommentItem, UserRole } from '../../lib/types';
-import { ok, badRequest, internalError } from '../_response';
+import { ok, badRequest, internalError, parseLimit } from '../_response';
 
 /**
  * Did the caller present a JWT proving `platform_admin`?
@@ -61,7 +61,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     const lastKey = qs['lastKey'];
     const onlyPublic = qs['public'] === 'true';
 
-    const limit = limitParam ? Math.min(parseInt(limitParam, 10), 100) : 50;
+    const limit = parseLimit(limitParam, 50, 100);
 
     const exprNames: Record<string, string> = { '#actionId': 'actionId' };
     const exprValues: Record<string, unknown> = { ':actionId': decodeURIComponent(actionId) };

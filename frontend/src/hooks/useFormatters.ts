@@ -46,7 +46,10 @@ export function useFormatters(): {
     (epoch: number, networkEpochDurationMs = 5 * 24 * 60 * 60 * 1000): string => {
       const EPOCH_0_UNIX_MS = 1_506_203_091_000;
       const ts = EPOCH_0_UNIX_MS + epoch * networkEpochDurationMs;
-      return new Date(ts).toLocaleDateString(locale);
+      // Cardano epoch boundaries are defined in UTC; render in UTC so users
+      // in every timezone see the same epoch date (a local-TZ render could
+      // show the boundary a day early/late for users west/east of UTC).
+      return new Date(ts).toLocaleDateString(locale, { timeZone: 'UTC' });
     },
     [locale],
   );

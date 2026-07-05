@@ -1,7 +1,7 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { queryItems, tableNames } from '../../lib/dynamodb';
 import type { DRepCommitteeItem } from '../../lib/types';
-import { ok, internalError } from '../_response';
+import { ok, internalError, parseLimit } from '../_response';
 
 /**
  * GET /drep
@@ -20,7 +20,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     const lastKey = qs['lastKey'];
     const leadWallet = qs['leadWallet'];
 
-    const limit = limitParam ? Math.min(parseInt(limitParam, 10), 100) : 20;
+    const limit = parseLimit(limitParam, 20, 100);
 
     const exclusiveStartKey = lastKey
       ? (JSON.parse(Buffer.from(lastKey, 'base64').toString('utf-8')) as Record<string, unknown>)

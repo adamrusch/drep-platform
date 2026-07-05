@@ -1,5 +1,6 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { updateItem, tableNames } from '../../lib/dynamodb';
+import { nowISO, nowSec } from '../../lib/time';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { ok, badRequest, conflict, handleError } from '../_response';
 import { RATIONALE_LOCK_TTL_SEC, voteScopeOf } from './_committee';
@@ -16,8 +17,8 @@ export const handler = async (
     const actionId = decodeURIComponent(actionIdRaw);
 
     const voteScope = voteScopeOf(drepId, actionId);
-    const nowSec = Math.floor(Date.now() / 1000);
-    const expiresAt = nowSec + RATIONALE_LOCK_TTL_SEC;
+    const now = nowSec();
+    const expiresAt = now + RATIONALE_LOCK_TTL_SEC;
 
     try {
       // Only the current, unexpired holder can extend.
@@ -26,7 +27,7 @@ export const handler = async (
         { voteScope, itemKey: 'RATIONALE#LOCK' },
         'SET lastHeartbeat = :now, #exp = :exp',
         { '#exp': 'expiresAt' },
-        { ':now': new Date().toISOString(), ':exp': expiresAt, ':me': authCtx.walletAddress, ':nowSec': nowSec },
+        { ':now': nowISO(), ':exp': expiresAt, ':me': authCtx.walletAddress, ':nowSec': now },
         'attribute_exists(itemKey) AND editorWallet = :me AND #exp >= :nowSec',
       );
     } catch (err) {

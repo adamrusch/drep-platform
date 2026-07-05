@@ -42,7 +42,8 @@ import {
   DREP_ALWAYS_NO_CONFIDENCE,
   type TallyLookups,
 } from '../lib/voteTally';
-import { getItem, putItem, putItemIfAbsent, queryItems, tableNames } from '../lib/dynamodb';
+import { batchGetItems, getItem, putItem, putItemIfAbsent, queryItems, tableNames } from '../lib/dynamodb';
+import { nowISO, nowSec } from '../lib/time';
 import {
   fanoutAutoPosts,
   selectCompletionSweepCandidates,
@@ -559,13 +560,33 @@ export async function runGovernanceIntake(): Promise<IntakeResult> {
   }
 
   async function processActions(rawActions: BlockfrostProposal[]): Promise<void> {
+    // Cost-fix (2026-07-04 code review): warm the existing-row lookup via a
+    // single BatchGet before entering the per-action worker loop. Previously
+    // every action fired its own GetItem inside the worker (109 sequential
+    // reads on mainnet, ~54.5 RCU/cycle, ~78k RCU/day at 1-min cadence).
+    // BatchGet caps at 100 keys per call; `batchGetItems` handles chunking
+    // + `UnprocessedKeys` retries. On the current ~109-action mainnet this
+    // is 2 calls; on quiet cycles it stays at 1.
+    //
+    // The map's presence-is-hit semantic matches the prior null-on-miss
+    // shape — a row that isn't in the map goes straight into the cold path,
+    // same as when the per-action GetItem returned undefined.
+    const keys = rawActions.map((a) => ({
+      actionId: `${a.tx_hash}#${a.cert_index}`,
+      SK: 'ACTION',
+    }));
+    const preloaded = await batchGetItems<GovernanceActionItem>(
+      tableNames.governanceActions,
+      keys,
+    );
+    const existingByActionId = new Map<string, GovernanceActionItem>(
+      preloaded.map((row) => [row.actionId, row]),
+    );
+
     await processWithConcurrency(rawActions, ITEM_CONCURRENCY, async (rawAction) => {
       const actionId = `${rawAction.tx_hash}#${rawAction.cert_index}`;
       try {
-        const existing = await getItem<GovernanceActionItem>(tableNames.governanceActions, {
-          actionId,
-          SK: 'ACTION',
-        });
+        const existing = existingByActionId.get(actionId);
 
         const nowMs = Date.now();
         const now = new Date(nowMs).toISOString();
@@ -1164,7 +1185,7 @@ async function processAutoPostFanout(
           // `abstractFrozenAt` AND `createdAt`. Using a single timestamp
           // per fan-out call makes the "all rows for this GA were created
           // at the same moment" invariant explicit.
-          const now = new Date().toISOString();
+          const now = nowISO();
           const fanRes = await fanoutAutoPosts({ action: ga, drepIds, now });
           stats.fannedOutForActions++;
           stats.postsWritten += fanRes.written;
@@ -1565,14 +1586,14 @@ async function writeVoteWatermark(blockTime: number): Promise<void> {
   // expire — write a far-future value (current time + 100 years) so the
   // DynamoDB TTL janitor never reaps it. The watermark is a permanent
   // state, not a session marker.
-  const farFuture = Math.floor(Date.now() / 1000) + 100 * 365 * 86_400;
+  const farFuture = nowSec() + 100 * 365 * 86_400;
   await putItem(tableNames.authNonces, {
     nonce: VOTE_WATERMARK_KEY,
     kind: 'watermark',
     walletAddress: '_system',
     blockTime,
     expiresAt: farFuture,
-    updatedAt: new Date().toISOString(),
+    updatedAt: nowISO(),
   });
 }
 
@@ -1624,7 +1645,7 @@ async function persistVoteEvents(votes: readonly KoiosVote[]): Promise<VotePersi
         voteTxHash: v.vote_tx_hash,
         ...(v.meta_url ? { metaUrl: v.meta_url } : {}),
         ...(v.meta_hash ? { metaHash: v.meta_hash } : {}),
-        ingestedAt: new Date().toISOString(),
+        ingestedAt: nowISO(),
       };
       const result = await putItemIfAbsent(tableNames.governanceVotes, item, {
         partitionKey: 'actionId',

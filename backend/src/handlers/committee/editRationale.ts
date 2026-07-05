@@ -1,5 +1,6 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { putItem, deleteItem, tableNames } from '../../lib/dynamodb';
+import { nowISO, nowSec } from '../../lib/time';
 import type { CommitteeRationaleDraftItem } from '../../lib/types';
 import { extractAuthContext } from '../../middleware/role-guard';
 import { writeAuditEvent } from '../../lib/audit';
@@ -58,11 +59,11 @@ export const handler = async (
     const config = await loadVotingConfig(drepId);
     const mode = config.item?.rationaleMode ?? 'lead';
     const voteScope = voteScopeOf(drepId, actionId);
-    const nowSec = Math.floor(Date.now() / 1000);
+    const now = nowSec();
     const lock = mode === 'collaborative' ? await loadRationaleLock(voteScope) : undefined;
 
     const denial = checkRationaleEditAuth(
-      authCtx.walletAddress, committee, mode, config.item?.assignedEditor, lock, nowSec,
+      authCtx.walletAddress, committee, mode, config.item?.assignedEditor, lock, now,
     );
     if (denial) {
       return denial.code === 403 ? forbidden(denial.message) : conflict(denial.message);
@@ -80,8 +81,8 @@ export const handler = async (
       );
     }
 
-    const now = new Date().toISOString();
-    const timeline = (existing?.editorTimeline ?? []).concat({ wallet: authCtx.walletAddress, editedAt: now }).slice(-100);
+    const nowIso = nowISO();
+    const timeline = (existing?.editorTimeline ?? []).concat({ wallet: authCtx.walletAddress, editedAt: nowIso }).slice(-100);
 
     const draft: CommitteeRationaleDraftItem = {
       voteScope,
@@ -96,7 +97,7 @@ export const handler = async (
       ...(body.internalVote ? { internalVote: body.internalVote } : {}),
       ...(body.references ? { references: body.references } : {}),
       ...(body.authors ? { authors: body.authors } : {}),
-      updatedAt: now,
+      updatedAt: nowIso,
       editorTimeline: timeline,
     };
     await putItem(tableNames.committeeVotes, draft as unknown as Record<string, unknown>);
