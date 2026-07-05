@@ -81,8 +81,56 @@ function sha256Hex(bytes: Uint8Array): string {
 }
 
 /**
+ * SSRF defense: hostnames that unambiguously resolve to loopback, link-local,
+ * or RFC-1918 private ranges are rejected before we ever open a socket.
+ *
+ * DRep `image` URLs are on-chain — a DRep can register any URL against a
+ * 500 ADA deposit. Without this block, an attacker could stand up a DRep
+ * with `image: "https://169.254.169.254/latest/meta-data/iam/security-
+ * credentials/..."` and use our sync Lambda's egress role to fetch the
+ * IMDSv1 endpoint (or any other internal service reachable from the
+ * VPC — the AWS VPC endpoints, private RDS ports, other Lambda IPs).
+ *
+ * We match on the LITERAL hostname, not a resolved IP — a resolver
+ * would be a second round-trip and racy (DNS rebinding). The tradeoff:
+ * a hostile DNS record like `evil.com A 127.0.0.1` still resolves to
+ * loopback in fetch. But Node's fetch (undici) does not offer a
+ * pre-connect hook to check the socket peer address, so hostname-block
+ * is the surgical defense-in-depth we can add today. Combined with the
+ * existing `https:`-only rule, the practical attack surface is:
+ * attacker registers a public DNS name pointing to a private address.
+ * That's a real risk on VPC-with-egress; on this deployment the sync
+ * Lambda has no VPC attachment and its egress-target for image fetch
+ * is public internet only, so the IMDSv1 pivot IS the concrete surface
+ * this block closes.
+ */
+function isPrivateHostname(hostname: string): boolean {
+  if (!hostname) return true;
+  const h = hostname.toLowerCase();
+  if (h === 'localhost' || h === 'localhost.localdomain') return true;
+  // IPv6 loopback + IPv4-mapped loopback + ULA (fc00::/7)
+  if (h === '::1' || h === '[::1]') return true;
+  if (h.startsWith('[fc') || h.startsWith('[fd')) return true;
+  // IPv4 in dotted-quad form
+  const v4 = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) {
+    const octets = v4.slice(1, 5).map((s) => Number.parseInt(s, 10));
+    const [a, b] = octets as [number, number, number, number];
+    if (a === 10) return true; // 10.0.0.0/8
+    if (a === 127) return true; // 127.0.0.0/8 loopback
+    if (a === 169 && b === 254) return true; // 169.254.0.0/16 link-local (incl. IMDSv1)
+    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+    if (a === 192 && b === 168) return true; // 192.168.0.0/16
+    if (a === 0) return true; // 0.0.0.0/8
+    if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 CGNAT
+    if (a >= 224) return true; // multicast + reserved
+  }
+  return false;
+}
+
+/**
  * Downloads and validates one image. Returns null on any rejection:
- * non-https, fetch error/timeout, disallowed type, oversize, or empty body.
+ * non-https, private hostname, fetch error/timeout, disallowed type, oversize, or empty body.
  */
 async function fetchValidatedImage(
   url: string,
@@ -95,6 +143,10 @@ async function fetchValidatedImage(
     return null;
   }
   if (parsed.protocol !== 'https:') return null;
+  // SSRF defense: block DRep-registered URLs that point at internal
+  // address space (loopback, RFC-1918, link-local IMDSv1). See comment
+  // on `isPrivateHostname` for the threat model.
+  if (isPrivateHostname(parsed.hostname)) return null;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
