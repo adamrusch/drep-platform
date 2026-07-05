@@ -539,6 +539,42 @@ export async function transactWrite(
 
 // ---- Domain-specific helpers ----
 
+/**
+ * Coerce a value read from DynamoDB into a JS `number`, returning
+ * `undefined` when the value is neither a number nor a bigint.
+ *
+ * # Why this exists
+ *
+ * The `smartUnwrapNumber` unmarshaller at the top of this file returns
+ * `bigint` for any `N`-typed attribute whose magnitude exceeds
+ * `Number.MAX_SAFE_INTEGER`. Small counters (`flagCount`, `voteCount`,
+ * `commentCount`, `upvoteCount`) NEVER cross that boundary in practice
+ * — a comment with 2^53 flags is not a scenario. But the type reader
+ * doesn't know that at compile time, so every flag/counter handler
+ * ends up writing the same defensive branch:
+ *
+ * ```ts
+ * const c = attrs?.['flagCount'];
+ * if (typeof c === 'number') newCount = c;
+ * else if (typeof c === 'bigint') newCount = Number(c);
+ * ```
+ *
+ * Four handlers had this same 5-line pattern verbatim (comments/flag,
+ * clubhouse/flagPost, clubhouse/flagComment, plus a similar shape in
+ * comments/vote). Extracted here.
+ *
+ * `Number(bigint)` past `MAX_SAFE_INTEGER` loses precision, but for
+ * the counters that use this helper the domain is bounded well below
+ * that ceiling. For lovelace math (which CAN exceed 2^53) use
+ * `safeBigInt` in `handlers/comments/vote.ts` instead — that path
+ * keeps bigint semantics end-to-end.
+ */
+export function coerceToNumber(v: unknown): number | undefined {
+  if (typeof v === 'number') return v;
+  if (typeof v === 'bigint') return Number(v);
+  return undefined;
+}
+
 export function buildUpdateExpression(
   fields: Record<string, unknown>,
 ): {
