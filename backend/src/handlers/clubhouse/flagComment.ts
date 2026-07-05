@@ -151,17 +151,26 @@ export const handler = async (
     // `clubhouse_comments` row. Same shape as the sibling handlers —
     // two concurrent writers both ADDing 1 end at +2, never +1. We
     // capture the new counter via `UPDATED_NEW` to decide step B.
+    //
+    // Note: the sibling handlers `comments/flag.ts:238` and
+    // `clubhouse/flagPost.ts:134` also bump `#updatedAt = :now` in the
+    // same expression. This file previously omitted that — a subtle
+    // parity drift caught in the 2026-07-04 code review — so a
+    // clubhouse comment that got flagged never rotated its
+    // `updatedAt`, which any downstream consumer (moderation queue
+    // sort, cache-key derivation) sorts on. Fixed here.
     let newCount: number | undefined;
     try {
       const updateRes = await docClient.send(
         new UpdateCommand({
           TableName: tableNames.clubhouseComments,
           Key: { postKey, commentId },
-          UpdateExpression: 'ADD #flagCount :one',
+          UpdateExpression: 'ADD #flagCount :one SET #updatedAt = :now',
           ExpressionAttributeNames: {
             '#flagCount': 'flagCount',
+            '#updatedAt': 'updatedAt',
           },
-          ExpressionAttributeValues: { ':one': 1 },
+          ExpressionAttributeValues: { ':one': 1, ':now': now },
           ReturnValues: 'UPDATED_NEW',
         }),
       );
