@@ -1263,11 +1263,13 @@ export class ApiStack extends cdk.Stack {
       // requests / 5 min sliding window per source IP, action BLOCK.
       // Default ACL action ALLOW so only the rate rule blocks.
       //
-      // Logging: CloudWatch log group with 7-day retention. Required log
-      // group name prefix is `aws-waf-logs-` for WAF to accept it.
+      // Logging: CloudWatch log group with 30-day retention. Required log
+      // group name prefix is `aws-waf-logs-` for WAF to accept it. 30 days
+      // covers the common 30-day audit-review window some jurisdictions
+      // expect for security logs (was 7 days).
       const wafLogGroup = new logs.LogGroup(this, 'ApiWafLogGroup', {
         logGroupName: `aws-waf-logs-drep-platform-${stage}-api`,
-        retention: logs.RetentionDays.ONE_WEEK,
+        retention: logs.RetentionDays.ONE_MONTH,
         removalPolicy: isPersistent(stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
       });
 
@@ -1370,6 +1372,13 @@ export class ApiStack extends cdk.Stack {
     // Budgets are a global service (no region) and free of charge.
     // They live on the API stack purely for code locality with the
     // other cost-protection layers.
+    //
+    // Operator alert address: sourced from CDK context so no personal
+    // email is hardcoded in source. Override at deploy with
+    // `--context operatorEmail=you@example.com`; the default is a
+    // non-personal role address on the project's own domain.
+    const operatorEmail =
+      (this.node.tryGetContext('operatorEmail') as string | undefined) ?? 'ops@drep.tools';
     new budgets.CfnBudget(this, 'SoftBudget', {
       budget: {
         budgetName: `drep-platform-${stage}-soft-monthly`,
@@ -1401,7 +1410,7 @@ export class ApiStack extends cdk.Stack {
             thresholdType: 'PERCENTAGE',
           },
           subscribers: [
-            { subscriptionType: 'EMAIL', address: 'bugreport@rusch.me' },
+            { subscriptionType: 'EMAIL', address: operatorEmail },
           ],
         },
         {
@@ -1412,7 +1421,7 @@ export class ApiStack extends cdk.Stack {
             thresholdType: 'PERCENTAGE',
           },
           subscribers: [
-            { subscriptionType: 'EMAIL', address: 'bugreport@rusch.me' },
+            { subscriptionType: 'EMAIL', address: operatorEmail },
           ],
         },
         {
@@ -1423,7 +1432,7 @@ export class ApiStack extends cdk.Stack {
             thresholdType: 'PERCENTAGE',
           },
           subscribers: [
-            { subscriptionType: 'EMAIL', address: 'bugreport@rusch.me' },
+            { subscriptionType: 'EMAIL', address: operatorEmail },
           ],
         },
       ],
@@ -1459,7 +1468,7 @@ export class ApiStack extends cdk.Stack {
             thresholdType: 'PERCENTAGE',
           },
           subscribers: [
-            { subscriptionType: 'EMAIL', address: 'bugreport@rusch.me' },
+            { subscriptionType: 'EMAIL', address: operatorEmail },
           ],
         },
       ],
