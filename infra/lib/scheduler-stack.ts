@@ -917,9 +917,13 @@ export class SchedulerStack extends cdk.Stack {
     // Subscribe the operator's email. The first deploy will send a
     // confirmation email that must be clicked through; subsequent
     // deploys reuse the confirmed subscription.
-    alarmTopic.addSubscription(
-      new snsSubscriptions.EmailSubscription('claude@rusch.me'),
-    );
+    //
+    // Address sourced from CDK context so no personal email is hardcoded
+    // in source. Override with `--context operatorEmail=you@example.com`;
+    // default is a non-personal role address on the project's own domain.
+    const operatorEmail =
+      (this.node.tryGetContext('operatorEmail') as string | undefined) ?? 'ops@drep.tools';
+    alarmTopic.addSubscription(new snsSubscriptions.EmailSubscription(operatorEmail));
 
     new cdk.CfnOutput(this, 'SyncFailureAlarmTopicArn', {
       value: alarmTopic.topicArn,
