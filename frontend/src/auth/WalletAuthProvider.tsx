@@ -62,8 +62,15 @@ export function WalletAuthProvider({ children }: WalletAuthProviderProps): React
   const { data: meProfile, isError: meError } = useMe();
 
   useEffect(() => {
-    if (meProfile) setProfile(meProfile);
-  }, [meProfile, setProfile]);
+    // Guard against a late-arriving `/auth/me` resolution firing AFTER a
+    // clearAuth() (session expiry / logout). Without this, an in-flight
+    // request that started while the session was live would setProfile the
+    // now-empty auth state, re-hydrating stale drepId / roles / committee
+    // membership into the store. `isAuthenticated` is the store-derived
+    // "session is still live" boolean; if it's false when the promise
+    // resolves, we drop the profile update.
+    if (meProfile && isAuthenticated) setProfile(meProfile);
+  }, [meProfile, setProfile, isAuthenticated]);
 
   useEffect(() => {
     // A hard error from `/auth/me` (after React-Query's retries) means the
