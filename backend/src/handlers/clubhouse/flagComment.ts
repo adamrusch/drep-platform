@@ -28,6 +28,7 @@ import type {
   APIGatewayProxyResultV2,
 } from 'aws-lambda';
 import {
+  coerceToNumber,
   docClient,
   getItem,
   putItemIfAbsent,
@@ -175,12 +176,7 @@ export const handler = async (
         }),
       );
       const attrs = updateRes.Attributes as Record<string, unknown> | undefined;
-      const c = attrs?.['flagCount'];
-      if (typeof c === 'number') {
-        newCount = c;
-      } else if (typeof c === 'bigint') {
-        newCount = Number(c);
-      }
+      newCount = coerceToNumber(attrs?.['flagCount']);
     } catch (err) {
       // The per-flagger row is already written (canonical evidence) —
       // surface the counter-update failure so an operator notices, but

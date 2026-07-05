@@ -24,6 +24,7 @@ import type {
   APIGatewayProxyResultV2,
 } from 'aws-lambda';
 import {
+  coerceToNumber,
   docClient,
   getItem,
   putItemIfAbsent,
@@ -141,9 +142,7 @@ export const handler = async (
         }),
       );
       const attrs = updateRes.Attributes as Record<string, unknown> | undefined;
-      const c = attrs?.['flagCount'];
-      if (typeof c === 'number') newCount = c;
-      else if (typeof c === 'bigint') newCount = Number(c);
+      newCount = coerceToNumber(attrs?.['flagCount']);
     } catch (err) {
       console.warn(
         `clubhouse/flagPost: counter ADD failed for drepId=${drepId} postId=${postId}:`,

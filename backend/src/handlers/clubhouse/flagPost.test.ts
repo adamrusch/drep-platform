@@ -24,6 +24,8 @@ vi.mock('../../lib/dynamodb', () => ({
   putItemIfAbsent: vi.fn(),
   putItem: vi.fn().mockResolvedValue(undefined),
   docClient: { send: (...args: unknown[]) => mockSend(...args) },
+  coerceToNumber: (v: unknown): number | undefined =>
+    typeof v === 'number' ? v : typeof v === 'bigint' ? Number(v) : undefined,
   tableNames: {
     comments: 'test-comments',
     commentFlags: 'test-comment_flags',

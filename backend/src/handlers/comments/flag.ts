@@ -98,6 +98,7 @@ import type {
   APIGatewayProxyResultV2,
 } from 'aws-lambda';
 import {
+  coerceToNumber,
   docClient,
   getItem,
   putItemIfAbsent,
@@ -245,15 +246,7 @@ export const handler = async (
         }),
       );
       const attrs = updateRes.Attributes as Record<string, unknown> | undefined;
-      const c = attrs?.['flagCount'];
-      if (typeof c === 'number') {
-        newCount = c;
-      } else if (typeof c === 'bigint') {
-        // Defensive — smartUnwrapNumber wraps very large numerics as
-        // bigint. flagCount won't realistically grow past 2^53 but the
-        // conversion is cheap.
-        newCount = Number(c);
-      }
+      newCount = coerceToNumber(attrs?.['flagCount']);
     } catch (err) {
       // Counter-update failure does NOT roll back the per-flagger row
       // (the evidence is the canonical source). We log + propagate
