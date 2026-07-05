@@ -1,6 +1,7 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { getLatestEpoch } from '../../lib/blockfrost';
 import { getCurrentEpochInfo, KoiosError } from '../../lib/koios';
+import { nowSec } from '../../lib/time';
 import { ok, internalError } from '../_response';
 
 interface EpochResponse {
@@ -42,7 +43,7 @@ const FRESH_TTL_MS = 60_000; // 60s — refresh-from-source cadence
 const STALE_FALLBACK_TTL_MS = 30 * 60_000; // 30 min — serve-stale on Blockfrost errors
 
 function buildResponse(epoch: Awaited<ReturnType<typeof getLatestEpoch>>): EpochResponse {
-  const endsInSeconds = Math.max(0, epoch.end_time - Math.floor(Date.now() / 1000));
+  const endsInSeconds = Math.max(0, epoch.end_time - nowSec());
   return {
     epoch: epoch.epoch,
     startTime: new Date(epoch.start_time * 1000).toISOString(),
@@ -76,7 +77,7 @@ function buildResponseFromKoios(
     typeof info.end_time === 'number' && info.end_time > 0
       ? info.end_time
       : startTimeSec + EPOCH_LENGTH_SECONDS;
-  const endsInSeconds = Math.max(0, endTimeSec - Math.floor(Date.now() / 1000));
+  const endsInSeconds = Math.max(0, endTimeSec - nowSec());
   return {
     epoch: info.epoch_no,
     startTime: new Date(startTimeSec * 1000).toISOString(),
@@ -182,8 +183,8 @@ export const handler = async (
       console.warn(`epoch/get served from source=${source} after upstream failure:`, err);
       const SHELLEY_EPOCH_208_START = 1596059091; // 2020-07-29 21:44:51 UTC
       const EPOCH_LENGTH_SECONDS = 432_000; // 5 days
-      const nowSec = Math.floor(Date.now() / 1000);
-      const epochsSinceShelley = Math.floor((nowSec - SHELLEY_EPOCH_208_START) / EPOCH_LENGTH_SECONDS);
+      const now = nowSec();
+      const epochsSinceShelley = Math.floor((now - SHELLEY_EPOCH_208_START) / EPOCH_LENGTH_SECONDS);
       const currentEpoch = 208 + epochsSinceShelley;
       const startTimeSec = SHELLEY_EPOCH_208_START + epochsSinceShelley * EPOCH_LENGTH_SECONDS;
       const endTimeSec = startTimeSec + EPOCH_LENGTH_SECONDS;
@@ -191,7 +192,7 @@ export const handler = async (
         epoch: currentEpoch,
         startTime: new Date(startTimeSec * 1000).toISOString(),
         endTime: new Date(endTimeSec * 1000).toISOString(),
-        endsInSeconds: Math.max(0, endTimeSec - nowSec),
+        endsInSeconds: Math.max(0, endTimeSec - now),
       };
       // Don't cache the fallback as if it were a real Blockfrost response —
       // we want the next request to retry Blockfrost, not pin to fallback.

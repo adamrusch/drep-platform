@@ -475,8 +475,36 @@ export class ApiStack extends cdk.Stack {
     //
     // No other Lambda's memory is changed by this carve-out — every other
     // handler still uses the 512MB default from `commonLambdaProps`.
+    // Least-privilege role for the internet-facing authorizer (rec #2,
+    // partial). It runs on EVERY request, so it gets ONLY what it reads:
+    //   - users            (currentTokenVersion → getItem)
+    //   - identity_sessions (isSessionRevoked → getItem, ConsistentRead)
+    //   - jwtSecret         (verifyJWT → GetSecretValue)
+    // No table writes, no other tables — a compromised authorizer cannot
+    // pivot into any mutation surface (vs. the shared `lambdaRole`, which
+    // has RW to ~25 tables). This access surface is fully traced from
+    // `middleware/jwt-authorizer.ts`; grants are read-only.
+    //
+    // NOTE: the full per-family split of the shared `lambdaRole` (carving
+    // read-only / comment-mutation / committee / admin / sync roles for the
+    // remaining ~40 handlers) is a tracked follow-up. It is deliberately NOT
+    // done here because an under-grant surfaces only at runtime
+    // (AccessDenied) — `cdk synth` and unit tests cannot catch it — so it
+    // must land alongside a deploy smoke-test. The authorizer carve-out is
+    // the highest-value slice and is statically verifiable, so it ships now.
+    const jwtAuthorizerRole = new iam.Role(this, 'JwtAuthorizerRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+      ],
+    });
+    databaseStack.usersTable.grantReadData(jwtAuthorizerRole);
+    databaseStack.identitySessionsTable.grantReadData(jwtAuthorizerRole);
+    jwtSecret.grantRead(jwtAuthorizerRole);
+
     const jwtAuthorizerFn = new lambdaNodejs.NodejsFunction(this, 'JwtAuthorizerFn', {
       ...commonLambdaProps,
+      role: jwtAuthorizerRole,
       entry: path.join(backendDir, 'src', 'middleware/jwt-authorizer.ts'),
       handler: 'handler',
       memorySize: 128,
@@ -1263,11 +1291,13 @@ export class ApiStack extends cdk.Stack {
       // requests / 5 min sliding window per source IP, action BLOCK.
       // Default ACL action ALLOW so only the rate rule blocks.
       //
-      // Logging: CloudWatch log group with 7-day retention. Required log
-      // group name prefix is `aws-waf-logs-` for WAF to accept it.
+      // Logging: CloudWatch log group with 30-day retention. Required log
+      // group name prefix is `aws-waf-logs-` for WAF to accept it. 30 days
+      // covers the common 30-day audit-review window some jurisdictions
+      // expect for security logs (was 7 days).
       const wafLogGroup = new logs.LogGroup(this, 'ApiWafLogGroup', {
         logGroupName: `aws-waf-logs-drep-platform-${stage}-api`,
-        retention: logs.RetentionDays.ONE_WEEK,
+        retention: logs.RetentionDays.ONE_MONTH,
         removalPolicy: isPersistent(stage) ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
       });
 
@@ -1370,6 +1400,13 @@ export class ApiStack extends cdk.Stack {
     // Budgets are a global service (no region) and free of charge.
     // They live on the API stack purely for code locality with the
     // other cost-protection layers.
+    //
+    // Operator alert address: sourced from CDK context so no personal
+    // email is hardcoded in source. Override at deploy with
+    // `--context operatorEmail=you@example.com`; the default is a
+    // non-personal role address on the project's own domain.
+    const operatorEmail =
+      (this.node.tryGetContext('operatorEmail') as string | undefined) ?? 'ops@drep.tools';
     new budgets.CfnBudget(this, 'SoftBudget', {
       budget: {
         budgetName: `drep-platform-${stage}-soft-monthly`,
@@ -1401,7 +1438,7 @@ export class ApiStack extends cdk.Stack {
             thresholdType: 'PERCENTAGE',
           },
           subscribers: [
-            { subscriptionType: 'EMAIL', address: 'bugreport@rusch.me' },
+            { subscriptionType: 'EMAIL', address: operatorEmail },
           ],
         },
         {
@@ -1412,7 +1449,7 @@ export class ApiStack extends cdk.Stack {
             thresholdType: 'PERCENTAGE',
           },
           subscribers: [
-            { subscriptionType: 'EMAIL', address: 'bugreport@rusch.me' },
+            { subscriptionType: 'EMAIL', address: operatorEmail },
           ],
         },
         {
@@ -1423,7 +1460,7 @@ export class ApiStack extends cdk.Stack {
             thresholdType: 'PERCENTAGE',
           },
           subscribers: [
-            { subscriptionType: 'EMAIL', address: 'bugreport@rusch.me' },
+            { subscriptionType: 'EMAIL', address: operatorEmail },
           ],
         },
       ],
@@ -1459,7 +1496,7 @@ export class ApiStack extends cdk.Stack {
             thresholdType: 'PERCENTAGE',
           },
           subscribers: [
-            { subscriptionType: 'EMAIL', address: 'bugreport@rusch.me' },
+            { subscriptionType: 'EMAIL', address: operatorEmail },
           ],
         },
       ],

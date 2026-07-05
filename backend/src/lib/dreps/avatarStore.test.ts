@@ -150,6 +150,40 @@ describe('storeDrepAvatars', () => {
     expect(repo.markedFailedCalls).toEqual([{ drepId: 'st-http', nowMs: 5_000 }]);
   });
 
+  // SSRF defense: a DRep whose `image` URL points at a private / loopback /
+  // link-local host must be rejected before any socket opens. The most
+  // dangerous target is EC2 IMDSv1 (169.254.169.254) — if the sync Lambda
+  // ever runs with a VPC attachment or an IAM role a hostile DRep could
+  // enumerate, the pivot must never fire the fetch.
+  const SSRF_HOSTS: Array<[string, string]> = [
+    ['loopback ipv4', 'https://127.0.0.1/x.png'],
+    ['loopback ipv4 (127/8)', 'https://127.5.5.5/x.png'],
+    ['localhost hostname', 'https://localhost/x.png'],
+    ['IMDSv1 link-local', 'https://169.254.169.254/latest/meta-data/x.png'],
+    ['other link-local', 'https://169.254.1.1/x.png'],
+    ['RFC-1918 10/8', 'https://10.0.0.5/x.png'],
+    ['RFC-1918 172.16/12', 'https://172.20.1.1/x.png'],
+    ['RFC-1918 192.168/16', 'https://192.168.1.1/x.png'],
+    ['zero-net', 'https://0.0.0.0/x.png'],
+    ['CGNAT', 'https://100.64.5.5/x.png'],
+    ['multicast', 'https://224.0.0.1/x.png'],
+  ];
+  for (const [label, url] of SSRF_HOSTS) {
+    it(`SSRF: rejects ${label} without fetching`, async () => {
+      const repo = makeRepo([{ drepId: `st-ssrf-${label}`, imageUrl: url }]);
+      let calls = 0;
+      const fetchImpl = (async () => {
+        calls++;
+        return imageResponse(PNG_BYTES);
+      }) as unknown as typeof fetch;
+
+      const r = await storeDrepAvatars({ bucket, fetchImpl, repo, nowMs: 1 });
+      expect(calls).toBe(0);
+      expect(r.failed).toBe(1);
+      expect(r.stored).toBe(0);
+    });
+  }
+
   it('rejects a disallowed content type and leaves the row unchanged', async () => {
     const repo = makeRepo([
       { drepId: 'st-svg', imageUrl: 'https://img.example/evil.svg' },

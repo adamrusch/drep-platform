@@ -46,6 +46,10 @@ vi.mock('../../lib/dynamodb', () => ({
   putItemIfAbsent: vi.fn(),
   putItem: vi.fn().mockResolvedValue(undefined),
   docClient: { send: (...args: unknown[]) => mockSend(...args) },
+  // Real implementation — the helper is pure and shape-thin; mocking it
+  // would just re-implement the same branch inside the mock.
+  coerceToNumber: (v: unknown): number | undefined =>
+    typeof v === 'number' ? v : typeof v === 'bigint' ? Number(v) : undefined,
   tableNames: {
     comments: 'test-comments',
     commentFlags: 'test-comment_flags',

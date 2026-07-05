@@ -1,9 +1,20 @@
 // ============================================================
-// Backend TypeScript types — includes all shared types inline
-// to avoid rootDir boundary issues with the shared/ workspace
+// Backend TypeScript types — the canonical source of truth.
+//
+// Includes all shared types inline to avoid rootDir boundary issues
+// with the `shared/` workspace. Frontend keeps its own copy in
+// `frontend/src/types/index.ts`; the pairs are NOT drift-guarded
+// (they diverge intentionally in a few places, e.g. the frontend's
+// `Comment` doesn't need bigint fields).
+//
+// The `shared/types/index.ts` file that used to live alongside
+// `shared/cip20.ts` was removed in the 2026-07-04 code review — it
+// had no importers, no drift guard, and its comment claiming to be
+// "the canonical source used by backend and frontend" was actively
+// misleading.
 // ============================================================
 
-// ---- Shared types (duplicated from shared/types/index.ts) ----
+// ---- Cross-cutting fundamentals ----
 
 export type UserRole =
   | 'guest'
