@@ -15,18 +15,19 @@
  */
 
 import { putItem, getItem, tableNames } from './dynamodb';
+import { nowISO, nowSec } from './time';
 
 const CIRCUIT_KEY = '_circuit:blockfrost';
 
 /** Open the circuit for the given duration. Default: 6 hours. */
 export async function openBlockfrostCircuit(ttlSeconds = 6 * 60 * 60): Promise<void> {
-  const expiresAt = Math.floor(Date.now() / 1000) + ttlSeconds;
+  const expiresAt = nowSec() + ttlSeconds;
   await putItem(tableNames.authNonces, {
     nonce: CIRCUIT_KEY,
     kind: 'circuit',
     walletAddress: '_system',
     expiresAt,
-    openedAt: new Date().toISOString(),
+    openedAt: nowISO(),
   });
 }
 

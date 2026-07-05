@@ -43,6 +43,7 @@ import {
   type TallyLookups,
 } from '../lib/voteTally';
 import { getItem, putItem, putItemIfAbsent, queryItems, tableNames } from '../lib/dynamodb';
+import { nowISO, nowSec } from '../lib/time';
 import {
   fanoutAutoPosts,
   selectCompletionSweepCandidates,
@@ -1164,7 +1165,7 @@ async function processAutoPostFanout(
           // `abstractFrozenAt` AND `createdAt`. Using a single timestamp
           // per fan-out call makes the "all rows for this GA were created
           // at the same moment" invariant explicit.
-          const now = new Date().toISOString();
+          const now = nowISO();
           const fanRes = await fanoutAutoPosts({ action: ga, drepIds, now });
           stats.fannedOutForActions++;
           stats.postsWritten += fanRes.written;
@@ -1565,14 +1566,14 @@ async function writeVoteWatermark(blockTime: number): Promise<void> {
   // expire — write a far-future value (current time + 100 years) so the
   // DynamoDB TTL janitor never reaps it. The watermark is a permanent
   // state, not a session marker.
-  const farFuture = Math.floor(Date.now() / 1000) + 100 * 365 * 86_400;
+  const farFuture = nowSec() + 100 * 365 * 86_400;
   await putItem(tableNames.authNonces, {
     nonce: VOTE_WATERMARK_KEY,
     kind: 'watermark',
     walletAddress: '_system',
     blockTime,
     expiresAt: farFuture,
-    updatedAt: new Date().toISOString(),
+    updatedAt: nowISO(),
   });
 }
 
@@ -1624,7 +1625,7 @@ async function persistVoteEvents(votes: readonly KoiosVote[]): Promise<VotePersi
         voteTxHash: v.vote_tx_hash,
         ...(v.meta_url ? { metaUrl: v.meta_url } : {}),
         ...(v.meta_hash ? { metaHash: v.meta_hash } : {}),
-        ingestedAt: new Date().toISOString(),
+        ingestedAt: nowISO(),
       };
       const result = await putItemIfAbsent(tableNames.governanceVotes, item, {
         partitionKey: 'actionId',
