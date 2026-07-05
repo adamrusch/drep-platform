@@ -1,5 +1,6 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { extractAuthContext } from '../../middleware/role-guard';
+import { nowSec } from '../../lib/time';
 import { ok, badRequest, notFound, handleError } from '../_response';
 import {
   assertCommitteeMember,
@@ -31,7 +32,7 @@ export const handler = async (
 
     const config = await loadVotingConfig(drepId);
     const voteScope = voteScopeOf(drepId, actionId);
-    const nowSec = Math.floor(Date.now() / 1000);
+    const now = nowSec();
 
     const [draft, lock, final] = await Promise.all([
       loadRationaleDraft(voteScope),
@@ -39,7 +40,7 @@ export const handler = async (
       loadRationaleFinal(voteScope),
     ]);
 
-    const activeLock = isLockActive(lock, nowSec) ? lock : undefined;
+    const activeLock = isLockActive(lock, now) ? lock : undefined;
 
     return ok({
       mode: config.item?.rationaleMode ?? 'lead',

@@ -2,6 +2,7 @@ import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 }
 import { extractAuthContext } from '../../middleware/role-guard';
 import { requirePlatformAdmin } from '../../lib/platformAdmin';
 import { getSafetyMode, isSafetyModeActive } from '../../lib/safetyMode';
+import { nowSec } from '../../lib/time';
 import { ok, handleError } from '../_response';
 
 /** Safety-mode status for the admin panel (GET /admin/safety-mode). */
@@ -13,7 +14,7 @@ export const handler = async (
     requirePlatformAdmin(authCtx);
 
     const item = await getSafetyMode();
-    const active = isSafetyModeActive(item, Math.floor(Date.now() / 1000));
+    const active = isSafetyModeActive(item, nowSec());
 
     return ok({
       active,
