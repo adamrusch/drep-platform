@@ -475,8 +475,36 @@ export class ApiStack extends cdk.Stack {
     //
     // No other Lambda's memory is changed by this carve-out — every other
     // handler still uses the 512MB default from `commonLambdaProps`.
+    // Least-privilege role for the internet-facing authorizer (rec #2,
+    // partial). It runs on EVERY request, so it gets ONLY what it reads:
+    //   - users            (currentTokenVersion → getItem)
+    //   - identity_sessions (isSessionRevoked → getItem, ConsistentRead)
+    //   - jwtSecret         (verifyJWT → GetSecretValue)
+    // No table writes, no other tables — a compromised authorizer cannot
+    // pivot into any mutation surface (vs. the shared `lambdaRole`, which
+    // has RW to ~25 tables). This access surface is fully traced from
+    // `middleware/jwt-authorizer.ts`; grants are read-only.
+    //
+    // NOTE: the full per-family split of the shared `lambdaRole` (carving
+    // read-only / comment-mutation / committee / admin / sync roles for the
+    // remaining ~40 handlers) is a tracked follow-up. It is deliberately NOT
+    // done here because an under-grant surfaces only at runtime
+    // (AccessDenied) — `cdk synth` and unit tests cannot catch it — so it
+    // must land alongside a deploy smoke-test. The authorizer carve-out is
+    // the highest-value slice and is statically verifiable, so it ships now.
+    const jwtAuthorizerRole = new iam.Role(this, 'JwtAuthorizerRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+      ],
+    });
+    databaseStack.usersTable.grantReadData(jwtAuthorizerRole);
+    databaseStack.identitySessionsTable.grantReadData(jwtAuthorizerRole);
+    jwtSecret.grantRead(jwtAuthorizerRole);
+
     const jwtAuthorizerFn = new lambdaNodejs.NodejsFunction(this, 'JwtAuthorizerFn', {
       ...commonLambdaProps,
+      role: jwtAuthorizerRole,
       entry: path.join(backendDir, 'src', 'middleware/jwt-authorizer.ts'),
       handler: 'handler',
       memorySize: 128,
