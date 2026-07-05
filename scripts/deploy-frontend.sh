@@ -88,7 +88,7 @@ done
 # ---- Resolve target → (stack suffix, VITE_STAGE) ----
 case "$TARGET" in
     test) STACK_SUFFIX="test"; VITE_STAGE="test" ;;
-    prod) STACK_SUFFIX="dev";  VITE_STAGE="prod" ;;  # drep.tools is the dev-stage stack
+    prod) STACK_SUFFIX="prod"; VITE_STAGE="prod" ;;  # post-migration: drep.tools is served by the *-prod stacks (2026-06-05)
     "")   echo "ERROR: --target {test|prod} is required" >&2; exit 1 ;;
     *)    echo "ERROR: --target must be 'test' or 'prod' (got '$TARGET')" >&2; exit 1 ;;
 esac
