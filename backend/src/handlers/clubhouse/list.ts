@@ -1,7 +1,7 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { queryItems, tableNames } from '../../lib/dynamodb';
 import type { ClubhousePostItem, UserRole } from '../../lib/types';
-import { ok, badRequest, internalError } from '../_response';
+import { ok, badRequest, internalError, parseLimit } from '../_response';
 
 /** Defensive read of optional authorizer context (Sprint 4) — same
  *  pattern as `handlers/comments/list.ts`. The clubhouse list is
@@ -72,7 +72,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     const limitParam = qs['limit'];
     const lastKey = qs['lastKey'];
 
-    const limit = limitParam ? Math.min(parseInt(limitParam, 10), 50) : 20;
+    const limit = parseLimit(limitParam, 20, 50);
 
     // Projection: every persisted field EXCEPT `comments`. We use a
     // ProjectionExpression that explicitly names the keep-list rather
