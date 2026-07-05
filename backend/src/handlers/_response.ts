@@ -161,6 +161,42 @@ export function serviceUnavailable(message = 'Service Unavailable'): APIGatewayP
   };
 }
 
+/**
+ * Parse a `?limit=<n>` query-string parameter into a bounded positive
+ * integer.
+ *
+ * # The bug this consolidation replaces
+ *
+ * Four list handlers previously wrote the same one-liner:
+ * ```ts
+ * const limit = limitParam ? Math.min(parseInt(limitParam, 10), MAX) : DEFAULT;
+ * ```
+ * When `limitParam` is a non-empty non-numeric string (`?limit=foo`),
+ * `parseInt` returns `NaN`, `Math.min(NaN, MAX)` returns `NaN`, and the
+ * value is passed straight through to `queryItems` as `Limit`. The AWS
+ * SDK's DynamoDB marshaller serialises `NaN` as `null`, which DynamoDB
+ * treats as "no limit set" — so a garbage `limit=` param silently
+ * flipped the response from a bounded page to the DDB default (up to
+ * 1 MB of items). Real bug: `GET /comments/{id}?limit=xyz` returned a
+ * larger response than `?limit=100` did.
+ *
+ * `parseLimit` fixes this by rejecting non-finite / non-positive parses
+ * back to `defaultLimit`, matching the safe pattern that `directory/
+ * list.ts` and `clubhouse/_rail.ts` already used inline. It also caps
+ * at `maxLimit` so a caller passing `?limit=999999` gets `maxLimit`,
+ * not `999999`.
+ */
+export function parseLimit(
+  raw: string | undefined,
+  defaultLimit: number,
+  maxLimit: number,
+): number {
+  if (raw == null || raw.length === 0) return defaultLimit;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 1) return defaultLimit;
+  return Math.min(n, maxLimit);
+}
+
 export function handleError(err: unknown): APIGatewayProxyResultV2 {
   if (err instanceof Error) {
     if (err.name === 'AuthorizationError') {
