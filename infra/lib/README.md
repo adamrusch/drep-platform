@@ -27,8 +27,8 @@ FrontendStack         (independent)
 
 ## Shared configuration
 
-`bin/app.ts` defines per-stage AWS account/region (`REDACTED_ACCOUNT_ID` /
-`us-east-1`) and the `customDomain` block (Hosted Zone ID, ACM
+`bin/app.ts` defines per-stage AWS account/region (account sourced from
+`CDK_DEFAULT_ACCOUNT` / `us-east-1`) and the `customDomain` block (Hosted Zone ID, ACM
 certificate ARN, apex/www/api domains). The hosted zone and certificate
 are managed manually outside CDK to avoid destruction risk; CDK imports
 them by ID/ARN.

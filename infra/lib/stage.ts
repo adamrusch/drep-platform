@@ -42,12 +42,15 @@ export function isPersistent(stage: string): boolean {
 
 // ACM certificates live OUTSIDE CDK — issued manually and DNS-validated in the
 // drep.tools hosted zone — to avoid destruction risk. CDK imports them by ARN.
-const PROD_CERTIFICATE_ARN =
-  'arn:aws:acm:us-east-1:REDACTED_ACCOUNT_ID:certificate/9b367d8e-f72f-4e69-9f02-0124c70c7149';
+// The account segment is sourced from the deploy environment (CDK sets
+// CDK_DEFAULT_ACCOUNT from the active credentials) rather than hardcoded, so no
+// account id ships in source. Only the prod/test stages use these ARNs, and
+// those are only ever deployed with real credentials present.
+const ACM_ACCOUNT = process.env.CDK_DEFAULT_ACCOUNT || process.env.AWS_ACCOUNT_ID || '000000000000';
+const PROD_CERTIFICATE_ARN = `arn:aws:acm:us-east-1:${ACM_ACCOUNT}:certificate/9b367d8e-f72f-4e69-9f02-0124c70c7149`;
 // ACM cert for test.drep.tools + www + api (us-east-1, DNS-validated in the
 // drep.tools zone). Issued 2026-05-30. Overridable via `--context testCertArn=`.
-const TEST_CERTIFICATE_ARN =
-  'arn:aws:acm:us-east-1:REDACTED_ACCOUNT_ID:certificate/b252b08e-d328-4ec2-804e-623eed1b7ef1';
+const TEST_CERTIFICATE_ARN = `arn:aws:acm:us-east-1:${ACM_ACCOUNT}:certificate/b252b08e-d328-4ec2-804e-623eed1b7ef1`;
 
 const HOSTED_ZONE_ID = 'Z0487212142GV67N7GOFU';
 const ZONE_NAME = 'drep.tools';
