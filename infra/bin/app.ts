@@ -26,8 +26,19 @@ if (stage === 'dev' || stage === 'prod') {
   );
 }
 
+// AWS account is sourced from the deploy environment — CDK sets
+// CDK_DEFAULT_ACCOUNT from the active credentials/profile — or `--context
+// account=<id>`. The dummy fallback keeps credential-less `cdk synth` (CI,
+// which only synths the domain-less `dev` stage) working. Account IDs are
+// not secrets, but keeping the id out of source avoids publishing infra
+// identifiers now that the repo is open-source.
+const account =
+  (app.node.tryGetContext('account') as string | undefined) ||
+  process.env.CDK_DEFAULT_ACCOUNT ||
+  '000000000000';
+
 const env: cdk.Environment = {
-  account: 'REDACTED_ACCOUNT_ID',
+  account,
   region: 'us-east-1',
 };
 
